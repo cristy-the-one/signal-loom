@@ -301,10 +301,6 @@ async function textCall(path: string, command: string, args: Record<string, unkn
 }
 
 export function writeProject(path: string, project: ProjectFile): Promise<void> {
-  if (inTauri()) return invoke<void>("write_project", { path, project });
-  return http<void>("/api/write-project", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ path, json: JSON.stringify(project) }),
-  });
+  if (!inTauri()) return Promise.reject(new Error("Saving to a path needs the desktop app."));
+  return invoke<void>("write_project", { path, project });
 }

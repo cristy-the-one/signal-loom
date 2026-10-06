@@ -174,7 +174,7 @@ def main() -> None:
         "# Pair with cluster.map.json.",
     ]
     lines.extend(line for _t, _order, line in records)
-    (FIXTURES / "cluster_drive.slog").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (FIXTURES / "cluster_drive.slog").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
     signal_map = {
         "name": "Instrument cluster",
@@ -210,7 +210,7 @@ def main() -> None:
             },
         ],
     }
-    (FIXTURES / "cluster.map.json").write_text(json.dumps(signal_map, indent=2) + "\n", encoding="utf-8")
+    (FIXTURES / "cluster.map.json").write_text(json.dumps(signal_map, indent=2) + "\n", encoding="utf-8", newline="\n")
 
     project = {
         "format": "signal-loom",
@@ -228,7 +228,7 @@ def main() -> None:
             "plotted": ["VehicleSpeed", "EngineRPM", "BrakePressure"],
         },
     }
-    (FIXTURES / "demo.loom").write_text(json.dumps(project, indent=2) + "\n", encoding="utf-8")
+    (FIXTURES / "demo.loom").write_text(json.dumps(project, indent=2) + "\n", encoding="utf-8", newline="\n")
 
     snippet = "\n".join(
         [
@@ -242,7 +242,7 @@ def main() -> None:
             "",
         ]
     )
-    (FIXTURES / "decoded_snippet.csv").write_text(snippet, encoding="utf-8")
+    (FIXTURES / "decoded_snippet.csv").write_text(snippet, encoding="utf-8", newline="\n")
     print(f"wrote {len(records)} records, gear events: {gear_events}")
     # The 10-minute lap is a seeded longitudinal model, not a speed ramp.
     from hypercar_bus import generate

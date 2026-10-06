@@ -26,17 +26,17 @@ fn lift<T>(result: loom_core::Result<T>) -> Result<T, String> {
     result.map_err(|err| err.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_sample(state: State<'_, AppState>) -> Result<loom_core::Summary, String> {
     lift(lock(&state)?.open_sample())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_log(state: State<'_, AppState>, path: String) -> Result<loom_core::Summary, String> {
     lift(lock(&state)?.open_path(PathBuf::from(path).as_path()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn begin_open_log(state: State<'_, AppState>, path: String) -> Result<(), String> {
     begin(&state, move |session, control| {
         session
@@ -45,7 +45,7 @@ fn begin_open_log(state: State<'_, AppState>, path: String) -> Result<(), String
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn begin_open_map(state: State<'_, AppState>, path: String) -> Result<(), String> {
     begin(&state, move |session, control| {
         session
@@ -54,7 +54,7 @@ fn begin_open_map(state: State<'_, AppState>, path: String) -> Result<(), String
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn begin_add_map(state: State<'_, AppState>, path: String, channel: u8) -> Result<(), String> {
     begin(&state, move |session, control| {
         session
@@ -63,12 +63,12 @@ fn begin_add_map(state: State<'_, AppState>, path: String, channel: u8) -> Resul
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn index_progress(state: State<'_, AppState>) -> Result<IndexStatus, String> {
     progress(&state)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cancel_index(state: State<'_, AppState>) -> Result<IndexStatus, String> {
     state.control.request_cancel();
     progress(&state)
@@ -159,12 +159,12 @@ fn progress(state: &AppState) -> Result<IndexStatus, String> {
     Ok(status)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_signal_map(state: State<'_, AppState>, path: String) -> Result<loom_core::Summary, String> {
     lift(lock(&state)?.open_map_path(PathBuf::from(path).as_path()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn query_series(
     state: State<'_, AppState>,
     query: Query,
@@ -172,17 +172,17 @@ fn query_series(
     lift(lock(&state)?.query(&query))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn values_at(state: State<'_, AppState>, t_us: u64) -> Result<Vec<loom_core::ValueDto>, String> {
     lift(lock(&state)?.values_at(t_us))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn frame_at(state: State<'_, AppState>, t_us: u64) -> Result<Option<loom_core::FrameDto>, String> {
     lift(lock(&state)?.frame_at(t_us))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn step_frame(
     state: State<'_, AppState>,
     t_us: u64,
@@ -191,7 +191,7 @@ fn step_frame(
     lift(lock(&state)?.step(t_us, direction))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_project(
     state: State<'_, AppState>,
     path: String,
@@ -199,7 +199,7 @@ fn open_project(
     lift(lock(&state)?.load_project_file(PathBuf::from(path).as_path()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn signal_stats(
     state: State<'_, AppState>,
     name: String,
@@ -209,7 +209,7 @@ fn signal_stats(
     lift(lock(&state)?.stats(&name, t0_us, t1_us))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn export_csv(
     state: State<'_, AppState>,
     names: Vec<String>,
@@ -219,12 +219,12 @@ fn export_csv(
     lift(lock(&state)?.export_csv(&names, t0_us, t1_us))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn export_slog(state: State<'_, AppState>, t0_us: u64, t1_us: u64) -> Result<String, String> {
     lift(lock(&state)?.export_slog(t0_us, t1_us))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_math(
     state: State<'_, AppState>,
     channels: Vec<MathChannel>,
@@ -232,7 +232,7 @@ fn set_math(
     lift(lock(&state)?.set_math(channels))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_triggers(
     state: State<'_, AppState>,
     triggers: Vec<ThresholdTrigger>,
@@ -240,12 +240,12 @@ fn set_triggers(
     lift(lock(&state)?.set_triggers(triggers))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_compare(state: State<'_, AppState>, path: String) -> Result<loom_core::Summary, String> {
     lift(lock(&state)?.open_compare_path(PathBuf::from(path).as_path()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_compare_offset(
     state: State<'_, AppState>,
     offset_us: i64,
@@ -255,7 +255,7 @@ fn set_compare_offset(
     lift(session.summary())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn bus_load(
     state: State<'_, AppState>,
     t0_us: u64,
@@ -264,7 +264,7 @@ fn bus_load(
     lift(lock(&state)?.bus_load(t0_us, t1_us))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn capture_can(
     state: State<'_, AppState>,
     iface: String,
@@ -273,14 +273,14 @@ fn capture_can(
     lift(lock(&state)?.capture_socketcan(&iface, duration_ms))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_compare(state: State<'_, AppState>) -> Result<loom_core::Summary, String> {
     let mut session = lock(&state)?;
     session.clear_compare();
     lift(session.summary())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn write_project(
     state: State<'_, AppState>,
     path: String,

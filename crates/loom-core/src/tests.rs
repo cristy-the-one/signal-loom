@@ -688,6 +688,38 @@ F 2000 1A0 0304
 }
 
 #[test]
+fn projects_are_written_only_as_loom_files() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let text = std::fs::read_to_string(root.join("demo.loom")).unwrap();
+    let project = crate::ProjectFile::parse(&text).unwrap();
+    let dir = std::env::temp_dir().join(format!("loom-write-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = Session::new();
+    assert!(session
+        .write_project(&dir.join("startup.bat"), &project)
+        .is_err());
+    assert!(!dir.join("startup.bat").exists());
+    session
+        .write_project(&dir.join("drive.LOOM"), &project)
+        .unwrap();
+    assert!(dir.join("drive.LOOM").is_file());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn non_ascii_payloads_are_skipped_not_panics() {
+    let slog = "SLOGv1\nF 0 1A0 0102\nF 1000 1A0 a\u{e9}0\nF 2000 1A0 0304\n";
+    let log = IndexedLog::open_bytes(slog.as_bytes().to_vec(), None).unwrap();
+    assert_eq!(log.frame_count(), 2);
+    assert_eq!(log.skipped(), 1);
+
+    let candump = "(0.000) can0 1A0#0102\n(0.001) can0 123##\u{e9}a\n(0.002) can0 1A0#0304\n";
+    let log = IndexedLog::open_bytes(candump.as_bytes().to_vec(), None).unwrap();
+    assert_eq!(log.frame_count(), 2);
+    assert_eq!(log.skipped(), 1);
+}
+
+#[test]
 fn asc_relative_absolute_fd_extended_and_channels() {
     let absolute = "\
 date Mon
