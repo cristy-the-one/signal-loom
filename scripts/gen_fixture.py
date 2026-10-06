@@ -244,6 +244,10 @@ def main() -> None:
     )
     (FIXTURES / "decoded_snippet.csv").write_text(snippet, encoding="utf-8")
     print(f"wrote {len(records)} records, gear events: {gear_events}")
+    from hypercar_bus import generate
+
+    count, size = generate()
+    print(f"hypercar_lap.slog records={count} bytes={size}")
 
 
 if __name__ == "__main__":

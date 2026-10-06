@@ -3,6 +3,9 @@
 //! The index stores checkpoint offsets, not every sample. Callers ask for a
 //! time window and a point budget; the UI never receives the whole recording.
 
+mod analyze;
+mod blf;
+mod dbc;
 mod decode;
 mod dto;
 mod error;
@@ -11,14 +14,18 @@ mod map;
 mod project;
 mod scan;
 mod session;
+mod socketcan;
 
 #[cfg(test)]
 mod tests;
 
 pub use dto::{
-    deserialize_us, EventDto, FrameDto, PointDto, ProjectOpen, Query, SeriesDto, SignalDto,
-    StepDir, Summary, ValueDto,
+    deserialize_us, BusLoad, EventDto, FrameDto, IndexStatus, PointDto, ProjectOpen, Query,
+    SeriesDto, SignalDto, StepDir, Summary, ValueDto, WindowStats,
 };
 pub use error::{Error, Result};
+pub use index::IndexControl;
+pub use map::SignalMap;
 pub use project::{Bookmark, ProjectFile, ViewState, PROJECT_FORMAT};
+pub use project::{MathChannel, Note, ThresholdTrigger};
 pub use session::Session;

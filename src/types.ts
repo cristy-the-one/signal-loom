@@ -13,6 +13,20 @@ export interface Summary {
   bytes: number;
   signals: SignalInfo[];
   events: LogEvent[];
+  skippedRecords: number;
+  warnings: string[];
+}
+
+export interface IndexStatus {
+  running: boolean;
+  done: boolean;
+  idle: boolean;
+  bytesDone: number;
+  bytesTotal: number;
+  frames: number;
+  skipped: number;
+  summary?: Summary;
+  error?: string;
 }
 
 export interface SignalInfo {
@@ -45,6 +59,7 @@ export interface ValueRead {
   name: string;
   unit: string;
   value: number;
+  label?: string;
 }
 
 export interface FrameHit {
@@ -52,6 +67,7 @@ export interface FrameHit {
   ordinal: number;
   messageId: number | null;
   messageName: string;
+  extended: boolean;
   dlc: number;
   dataHex: string;
   values: ValueRead[];
@@ -61,6 +77,40 @@ export interface Bookmark {
   id: string;
   tUs: number;
   label: string;
+}
+
+export interface MathChannel {
+  name: string;
+  unit: string;
+  expr: string;
+}
+
+export interface ThresholdTrigger {
+  id: string;
+  signal: string;
+  op: string;
+  value: number;
+}
+
+export interface Note {
+  id: string;
+  tUs: number;
+  body: string;
+}
+
+export interface BusLoad {
+  frames: number;
+  rate: number;
+  load: number;
+}
+
+export interface WindowStats {
+  count: number;
+  min: number;
+  max: number;
+  avg: number;
+  first: number;
+  last: number;
 }
 
 export interface ProjectFile {
@@ -74,6 +124,13 @@ export interface ProjectFile {
     spanUs: number;
     plotted: string[];
   };
+  math?: MathChannel[];
+  triggers?: ThresholdTrigger[];
+  notes?: Note[];
+  cursorAUs?: number | null;
+  cursorBUs?: number | null;
+  comparePath?: string | null;
+  compareOffsetUs?: number;
 }
 
 export interface ProjectOpen {
@@ -87,4 +144,5 @@ export interface Query {
   t1Us: number;
   signals: string[];
   maxPoints: number;
+  includeCompare?: boolean;
 }

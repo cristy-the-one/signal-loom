@@ -8,6 +8,8 @@ description = "Parse, index, decode, and window-query CAN and telemetry logs"
 publish = false
 
 [dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

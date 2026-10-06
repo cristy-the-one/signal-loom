@@ -28,6 +28,8 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
+      - name: Generate the synthetic hypercar lap
+        run: python3 scripts/gen_fixture.py
       - run: cargo test -p loom-core
       - run: cargo clippy -p loom-core -p loom-serve --all-targets -- -D warnings
 
