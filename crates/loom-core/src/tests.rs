@@ -452,7 +452,23 @@ fn error_frames_are_events() {
 
 #[test]
 fn hypercar_lap_decodes_like_a_drive() {
+    use sha2::{Digest, Sha256};
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let lap = std::fs::read(root.join("hypercar_lap.slog")).expect("synthetic lap");
+    assert_eq!(
+        lap.len(),
+        7_698_847,
+        "regenerate with scripts/gen_fixture.py"
+    );
+    let digest = Sha256::digest(&lap);
+    let sha = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        sha,
+        "9f633ec07b7c1612ddb1449e51153865d8c7dc8c4716605b93dec92143b3dd07"
+    );
     let mut session = Session::new();
     session
         .open_path(&root.join("hypercar_lap.slog"))
@@ -504,6 +520,8 @@ fn hypercar_lap_decodes_like_a_drive() {
     assert!(at(200_000_000, "VehicleSpeed") > 150.0);
     assert!(at(200_000_000, "Gear") >= 5.0);
     assert!(at(200_000_000, "EngineRPM") < 9000.0);
+    assert!(at(200_000_000, "BrakePressure") < 0.5);
+    assert!(at(299_000_000, "BrakePressure") > 40.0);
     assert!(at(500_000_000, "CoolantTemp") > at(5_000_000, "CoolantTemp") + 20.0);
     assert!(at(299_000_000, "AbsActive") > 0.5);
     assert!(at(560_000_000, "DoorFL") > 0.5);

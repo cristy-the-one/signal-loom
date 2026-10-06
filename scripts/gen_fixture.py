@@ -244,6 +244,7 @@ def main() -> None:
     )
     (FIXTURES / "decoded_snippet.csv").write_text(snippet, encoding="utf-8")
     print(f"wrote {len(records)} records, gear events: {gear_events}")
+    # The 10-minute lap is a seeded longitudinal model, not a speed ramp.
     from hypercar_bus import generate
 
     count, size = generate()
