@@ -1,0 +1,108 @@
+# Unsigned Signal Loom installers.
+#
+# This file is GitHub Actions syntax. Depot and Buildkite run that same
+# syntax on an Origin-hosted repo once the app is connected. Origin itself
+# does not execute workflows, and it has no GitHub Release API, so the draft
+# release step only succeeds on GitHub Actions (a GitHub mirror, where CI
+# stays on GitHub). Workflow artifacts are uploaded either way.
+#
+# Job names here are release jobs. The CI names frontend, rust, and
+# tauri-smoke stay in ci.yml and are not reused.
+
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  installers:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-nsis
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            artifacts: |
+              **/bundle/nsis/*-setup.exe
+          - name: linux-deb-appimage
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            artifacts: |
+              **/bundle/deb/*.deb
+              **/bundle/appimage/*.AppImage
+          - name: macos-apple-silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: dmg
+            artifacts: |
+              **/bundle/dmg/*.dmg
+          - name: macos-intel
+            os: macos-latest
+            target: x86_64-apple-darwin
+            bundles: dmg
+            artifacts: |
+              **/bundle/dmg/*.dmg
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux webview and AppImage dependencies
+        if: matrix.name == 'linux-deb-appimage'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libfuse2 xdg-utils
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install the pinned stable toolchain and this job's Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: npm ci
+
+      - name: Read the product version
+        id: ver
+        shell: bash
+        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build the unsigned installer
+        env:
+          NO_STRIP: ${{ matrix.name == 'linux-deb-appimage' && 'true' || '' }}
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.artifacts }}
+          if-no-files-found: error
+
+      - name: Attach installers to the draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: false
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: Signal Loom v${{ steps.ver.outputs.version }}
+          body: |
+            Unsigned Signal Loom ${{ steps.ver.outputs.version }} installers. No Authenticode or Apple Developer ID signature.
+            Windows NSIS, for Beast 01: Signal Loom_${{ steps.ver.outputs.version }}_x64-setup.exe
+          files: ${{ matrix.artifacts }}
+          fail_on_unmatched_files: true
