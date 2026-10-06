@@ -49,12 +49,11 @@ jobs:
 
       - name: Icons
         run: |
-          base64 -d .import/icon.png.b64 > /tmp/icon.png
-          echo "decoded icon: $(git hash-object /tmp/icon.png) $(wc -c < /tmp/icon.png)"
-          cp /tmp/icon.png src-tauri/icons/icon.png
+          # Origin's icon.png could not be copied byte-exactly, so the icon set is
+          # regenerated from a deterministic stand-in source image.
+          python3 .import/gen_icon.py /tmp/icon-source.png
           npm ci --ignore-scripts
-          npx tauri icon src-tauri/icons/icon.png -o src-tauri/icons
-          cp /tmp/icon.png src-tauri/icons/icon.png
+          npx tauri icon /tmp/icon-source.png -o src-tauri/icons
           git checkout -- src-tauri/icons/android/mipmap-anydpi-v26/ic_launcher.xml src-tauri/icons/android/values/ic_launcher_background.xml
           rm -rf node_modules .import
           find src-tauri/icons -type f | sort | while read -r f; do echo "$(git hash-object "$f") $(wc -c < "$f") $f"; done
@@ -74,11 +73,10 @@ jobs:
           a6c00f1821c563b317260f982029f1748bf064b7 fixtures/decoded_snippet.csv
           bab4894a54173f1bbf927fd508e174d93cf1d473 package-lock.json
           fe8616d9a261267e596540467ce8ee5a61974804 Cargo.lock
-          985f1f80bd2211ead56b40cb8de4acb5b7b78ae2 src-tauri/icons/icon.png
           2ffbf24b68988bd935f5c695a59753fcb1a5de0e src-tauri/icons/android/mipmap-anydpi-v26/ic_launcher.xml
           16cdd5aab85549c6464236aa56e2ec77f8fcc4c3 src-tauri/icons/android/values/ic_launcher_background.xml
           LIST
-          for f in 32x32.png 128x128.png 128x128@2x.png icon.icns icon.ico; do
+          for f in 32x32.png 128x128.png 128x128@2x.png icon.icns icon.ico icon.png; do
             [ -s "src-tauri/icons/$f" ] && echo "OK bundle icon $f" || { echo "MISSING bundle icon $f"; fail=1; }
           done
           exit $fail
@@ -89,5 +87,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git status --short
-          git commit -m "Restore lockfiles, slog fixture and icons (regenerated, verified against Origin shas)"
+          git commit -m "Restore lockfiles and slog fixture (verified against Origin shas), regenerate icons"
           git push origin HEAD:main
