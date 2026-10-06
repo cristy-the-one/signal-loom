@@ -120,6 +120,12 @@ pub fn write_project(path: &Path, project: &ProjectFile) -> Result<()> {
     if project.format != PROJECT_FORMAT || project.version != 1 {
         return Err(Error::msg("refusing to write an unsupported project"));
     }
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("loom"))
+    {
+        return Err(Error::msg("projects are saved only as .loom files"));
+    }
     let text = project.to_json()?;
     std::fs::write(path, text).map_err(|err| Error::write(path, err))
 }

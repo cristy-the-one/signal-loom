@@ -778,8 +778,8 @@ def generate() -> tuple[int, int]:
     ]
     text = "\n".join(header + [line for _t, _order, line in lines]) + "\n"
     FIXTURES.mkdir(parents=True, exist_ok=True)
-    (FIXTURES / "hypercar_lap.slog").write_text(text, encoding="utf-8")
-    (FIXTURES / "hypercar_lap.dbc").write_text(dbc_text(), encoding="utf-8")
+    (FIXTURES / "hypercar_lap.slog").write_text(text, encoding="utf-8", newline="\n")
+    (FIXTURES / "hypercar_lap.dbc").write_text(dbc_text(), encoding="utf-8", newline="\n")
     return len(lines), len(text.encode("utf-8"))
 
 

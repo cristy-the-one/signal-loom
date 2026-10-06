@@ -5,7 +5,7 @@
 //! 127.0.0.1 only and is not a network service.
 
 use loom_core::{
-    IndexControl, IndexStatus, MathChannel, ProjectFile, Query, Session, StepDir, ThresholdTrigger,
+    IndexControl, IndexStatus, MathChannel, Query, Session, StepDir, ThresholdTrigger,
 };
 use serde::Deserialize;
 use std::env;
@@ -66,8 +66,12 @@ fn parse_port() -> u16 {
 }
 
 fn dispatch(hub: &Hub, request: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
-    if request.method() == &Method::Options {
-        return respond(204, b"{}".to_vec());
+    // The UI reaches this process through the Vite proxy, so every legitimate
+    // request is same-origin. Refuse other sites and DNS-rebound hostnames.
+    if !header(request, "host").is_some_and(|host| is_loopback_authority(&host))
+        || header(request, "origin").is_some_and(|origin| !is_loopback_origin(&origin))
+    {
+        return error(403, "only the local Signal Loom UI may call this engine");
     }
     let path = request.url().split('?').next().unwrap_or("/").to_string();
     let method = request.method().clone();
@@ -226,12 +230,6 @@ fn dispatch(hub: &Hub, request: &mut Request) -> Response<std::io::Cursor<Vec<u8
             (Method::Post, "/api/compare-clear") => {
                 session.clear_compare();
                 json(&lift(session.summary())?)
-            }
-            (Method::Post, "/api/write-project") => {
-                let req: WriteProjectBody = parse_json(&body)?;
-                let project = lift(ProjectFile::parse(&req.json))?;
-                lift(session.write_project(PathBuf::from(req.path).as_path(), &project))?;
-                Ok(br#"{"ok":true}"#.to_vec())
             }
             _ => Err(format!("no route for {path}")),
         }
@@ -419,12 +417,6 @@ struct OffsetBody {
     offset_us: i64,
 }
 
-#[derive(Deserialize)]
-struct WriteProjectBody {
-    path: String,
-    json: String,
-}
-
 fn json_text(body: &[u8]) -> Result<String, String> {
     if body.first() == Some(&b'{') {
         if let Ok(wrapped) = serde_json::from_slice::<serde_json::Value>(body) {
@@ -458,6 +450,23 @@ fn read_body(request: &mut Request) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+fn is_loopback_authority(authority: &str) -> bool {
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "[::1]"
+    )
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    origin
+        .strip_prefix("http://")
+        .is_some_and(is_loopback_authority)
+}
+
 fn header(request: &Request, name: &str) -> Option<String> {
     request.headers().iter().find_map(|header| {
         let field = header.field.as_str().as_str();
@@ -479,12 +488,6 @@ fn error(status: u16, message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
 fn respond(status: u16, body: Vec<u8>) -> Response<std::io::Cursor<Vec<u8>>> {
     let mut response = Response::from_data(body).with_status_code(StatusCode(status));
     response.add_header(header_line("Content-Type", "application/json"));
-    response.add_header(header_line("Access-Control-Allow-Origin", "*"));
-    response.add_header(header_line("Access-Control-Allow-Headers", "*"));
-    response.add_header(header_line(
-        "Access-Control-Allow-Methods",
-        "GET, POST, OPTIONS",
-    ));
     response
 }
 

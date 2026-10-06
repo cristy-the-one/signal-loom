@@ -4,7 +4,7 @@
 //! There is no `write`, `send`, or `sendto` on this socket.
 
 use crate::error::{Error, Result};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Turn one classic `can_frame` (16 bytes, little-endian) into a SLOGv1 line.
 pub fn frame_line(t_us: u64, frame: &[u8]) -> Result<String> {
@@ -112,7 +112,7 @@ unsafe fn read_only_fd(iface: &str, duration: Duration) -> Result<Vec<(u64, [u8;
             std::mem::size_of::<libc::timeval>() as libc::socklen_t,
         );
     }
-    let start = Instant::now();
+    let start = std::time::Instant::now();
     let mut frames = Vec::new();
     while start.elapsed() < duration && frames.len() < 200_000 {
         let mut buf = [0u8; 16];

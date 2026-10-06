@@ -676,7 +676,10 @@ impl<'a> Scanner<'a> {
         let fd = rest.starts_with('#');
         let mut data_tok = rest.trim_start_matches('#');
         if fd && data_tok.len() % 2 == 1 {
-            data_tok = &data_tok[1..];
+            let Some(payload) = data_tok.get(1..) else {
+                return self.bad("candump FD flags are not a hex digit");
+            };
+            data_tok = payload;
         }
         let id = candump_id(id_tok).map_err(|message| self.err_msg(&message))?;
         if data_tok.is_empty() || data_tok.starts_with('R') || data_tok.starts_with('r') {
@@ -987,6 +990,9 @@ pub fn parse_payload(text: &str) -> std::result::Result<(FrameData, u8), String>
         .chars()
         .filter(|c| !c.is_ascii_whitespace() && *c != '_')
         .collect();
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("bad payload hex '{hex}'"));
+    }
     if hex.len() > MAX_DATA * 2 || !hex.len().is_multiple_of(2) {
         return Err("payload must be an even number of hex digits, at most 64 bytes".into());
     }
