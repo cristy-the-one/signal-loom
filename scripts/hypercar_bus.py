@@ -7,11 +7,13 @@ cluster, and BMS. Payloads use an XOR checksum in byte 7 and a nibble
 or byte counter. Cycle times are 10, 20, 100, and 1000 ms, with jitter.
 
 Speed comes from a seeded longitudinal model (torque curve, gear ratio,
-aero drag, rolling resistance, mass). RPM follows road speed through the
-gear, with a torque cut on upshifts and a blip on downshifts. Brake
-pressure is zero except during scheduled applies: a 100–200 ms rise, a
-hold, and a release. The lap is urban, a top-speed straight, then corners
-and a pit.
+aero drag, rolling resistance, mass). A slow grade and a headwind move
+the aero balance so a flat-out straight is not a dead line. RPM follows
+road speed through the gear, with a torque cut on upshifts and a blip on
+downshifts. Brake pressure is zero except during scheduled applies: a
+100–200 ms rise, a constant hold, and a release. The lap is urban, several
+corners, a chicane, one short top-speed straight, a second shorter
+straight, and a pit.
 """
 
 from __future__ import annotations
@@ -25,9 +27,11 @@ FIXTURES = ROOT / "fixtures"
 DURATION_S = 600.0
 DT_S = 0.001
 
-# Overall ratio, engine rpm / wheel rpm. 7th is the top-speed gear:
-# drag and the torque curve meet near 330 km/h and about 8,400 rpm.
+# Overall ratio, engine rpm / wheel rpm. 7th is the top-speed gear.
+# Full-throttle drag and the torque curve meet under the rev limiter.
 GEARS = [0.0, 12.8, 8.6, 6.3, 4.9, 4.05, 3.5, 3.15]
+# Torque starts to fall here. The straight is geared to stay below it.
+REV_LIMIT = 9050.0
 WHEEL_RADIUS = 0.335
 WHEELBASE = 2.70
 TRACK = 1.64
@@ -70,34 +74,56 @@ CHECKSUM_FAULT_S = 460.0
 
 # (t1, desired km/h, throttle cap, peak lateral g). Lateral g is a sine
 # bump across the leg so a corner builds and releases. Straights are 0 g.
+# The 420 km/h leg is a throttle demand, not a speed the car can reach.
+# Aero drag sets the top speed, and only for the last part of that leg.
 _LEG_ROWS = [
     (8.0, 0.0, 0.0, 0.0),
-    (22.0, 42.0, 0.45, 0.0),
-    (34.0, 16.0, 0.25, 0.42),
-    (52.0, 55.0, 0.50, 0.0),
-    (66.0, 18.0, 0.22, -0.55),
-    (88.0, 48.0, 0.40, 0.12),
-    (292.0, 360.0, 1.0, 0.0),
-    (318.0, 88.0, 0.35, 0.85),
-    (348.0, 185.0, 0.90, 0.35),
-    (372.0, 64.0, 0.28, -1.10),
-    (408.0, 220.0, 1.0, 0.0),
-    (432.0, 92.0, 0.32, 0.80),
-    (470.0, 200.0, 0.92, -0.22),
-    (496.0, 68.0, 0.30, -0.90),
-    (544.0, 34.0, 0.32, 0.15),
-    (574.0, 8.0, 0.16, 0.0),
+    (20.0, 40.0, 0.42, 0.0),
+    (32.0, 16.0, 0.22, 0.48),
+    (48.0, 58.0, 0.48, 0.0),
+    (62.0, 20.0, 0.22, -0.58),
+    (78.0, 46.0, 0.38, 0.22),
+    (94.0, 24.0, 0.20, -0.42),
+    (128.0, 130.0, 0.72, 0.0),
+    (148.0, 72.0, 0.32, 0.82),
+    (168.0, 155.0, 0.78, -0.28),
+    (212.0, 195.0, 0.62, 0.12),
+    (224.0, 110.0, 0.35, 0.95),
+    (236.0, 125.0, 0.45, -1.05),
+    (247.0, 95.0, 0.32, 0.72),
+    (293.0, 420.0, 1.0, 0.0),
+    (312.0, 78.0, 0.30, 0.88),
+    (338.0, 215.0, 0.78, 0.0),
+    (356.0, 64.0, 0.28, -1.05),
+    (378.0, 150.0, 0.70, 0.35),
+    (396.0, 58.0, 0.26, -0.78),
+    (428.0, 185.0, 0.82, -0.18),
+    (448.0, 70.0, 0.30, 0.92),
+    (472.0, 125.0, 0.55, 0.0),
+    (492.0, 48.0, 0.24, -0.62),
+    (522.0, 100.0, 0.50, 0.40),
+    (544.0, 32.0, 0.28, 0.12),
+    (572.0, 8.0, 0.15, 0.0),
     (600.0, 0.0, 0.0, 0.0),
 ]
-# Explicit applies only. Rise is 100–200 ms. Zero everywhere else.
+# Explicit applies only. Rise and release are 100–200 ms. The hold is one
+# pressure, then the trace returns to exactly zero.
 _BRAKE_ROWS = [
-    (19.4, 0.14, 1.8, 0.18, 14.0),
-    (50.2, 0.15, 2.4, 0.20, 18.0),
-    (293.2, 0.16, 6.0, 0.22, 64.0),
-    (349.0, 0.14, 3.4, 0.18, 46.0),
-    (406.2, 0.15, 4.2, 0.20, 40.0),
-    (471.0, 0.13, 3.0, 0.18, 34.0),
-    (526.0, 0.16, 8.0, 0.28, 20.0),
+    (18.6, 0.14, 1.4, 0.16, 12.0),
+    (46.4, 0.15, 1.8, 0.18, 16.0),
+    (76.2, 0.12, 1.5, 0.16, 14.0),
+    (126.4, 0.16, 2.2, 0.18, 26.0),
+    (146.2, 0.14, 1.6, 0.16, 22.0),
+    (212.4, 0.15, 1.8, 0.18, 32.0),
+    (224.6, 0.13, 1.4, 0.16, 24.0),
+    (236.8, 0.14, 1.6, 0.16, 28.0),
+    (293.2, 0.16, 6.4, 0.20, 64.0),
+    (336.2, 0.15, 2.6, 0.18, 40.0),
+    (376.4, 0.14, 2.0, 0.16, 30.0),
+    (426.2, 0.15, 2.4, 0.18, 34.0),
+    (470.4, 0.13, 2.2, 0.18, 26.0),
+    (520.2, 0.16, 2.0, 0.18, 18.0),
+    (542.0, 0.14, 1.6, 0.16, 12.0),
 ]
 
 
@@ -143,23 +169,42 @@ def lat_target(t_s: float, leg: tuple[float, float, float, float, float]) -> flo
     return peak * math.sin(math.pi * phase)
 
 
+def _straight_gust(t_s: float, rise_s: float) -> float:
+    """1 on the top-speed straight, then back to 0 after the braking zone."""
+    if t_s <= 276.0 or t_s >= 306.0:
+        return 0.0
+    level = smoothstep(min((t_s - 276.0) / rise_s, 1.0))
+    if t_s > 294.0:
+        level *= 1.0 - smoothstep(min((t_s - 294.0) / 10.0, 1.0))
+    return level
+
+
+def road_slope(t_s: float) -> float:
+    """Uphill is positive. The top-speed straight runs onto a hill."""
+    grade = 0.003 * math.sin(2.0 * math.pi * (t_s - 30.0) / 80.0)
+    grade += 0.042 * _straight_gust(t_s, 4.0)
+    return grade
+
+
+def headwind_mps(t_s: float) -> float:
+    """Positive is a headwind. A gust arrives once the straight is at speed."""
+    wind = 0.7 * math.sin(2.0 * math.pi * (t_s - 80.0) / 50.0)
+    wind += 4.2 * _straight_gust(t_s, 5.0)
+    return wind
+
+
 def brake_pressure_bar(t_s: float) -> float:
-    """Smooth apply, or exactly zero. Noise stays under a bar on the hold."""
+    """One smooth apply, a constant hold, a smooth release, or exactly zero."""
     for t0, rise, hold, fall, peak in _BRAKE_ROWS:
         end = t0 + rise + hold + fall
         if t_s < t0 or t_s >= end:
             continue
         u = t_s - t0
         if u < rise:
-            shape = smoothstep(u / rise)
-        elif u < rise + hold:
-            shape = 1.0 - 0.035 * ((u - rise) / hold)
-        else:
-            shape = (1.0 - smoothstep((u - rise - hold) / fall)) * 0.965
-        bar = peak * shape
-        if bar > 2.0:
-            bar += 0.30 * math.sin(t_s * 31.0 + t0)
-        return max(0.0, bar)
+            return peak * smoothstep(u / rise)
+        if u < rise + hold:
+            return peak
+        return peak * (1.0 - smoothstep((u - rise - hold) / fall))
     return 0.0
 
 
@@ -366,17 +411,19 @@ class Bus:
         else:
             rpm = self.rpm if self.rpm > 400 else 900.0
             limit = 1.0
-            if rpm > 8350:
-                limit = clamp(1.0 - (rpm - 8350) / 450.0, 0.15, 1.0)
+            if rpm > REV_LIMIT:
+                limit = clamp(1.0 - (rpm - REV_LIMIT) / 350.0, 0.05, 1.0)
             eng = engine_torque_nm(rpm) * self.throttle * self.torque_scale * limit
             mot = motor_nm(speed_kmh) * self.throttle * self.torque_scale if self.soc > 12 else 0.0
             drive = min(MU * MASS * G, (eng + mot) * GEARS[self.gear] * DRIVE_EFF / WHEEL_RADIUS)
         self.torque = eng + mot
-        drag = CDA * self.speed_mps * self.speed_mps
+        air = self.speed_mps + (headwind_mps(self.t_s) if self.speed_mps > 1.0 else 0.0)
+        drag = CDA * air * abs(air)
         roll = CRR * MASS * G if self.speed_mps > 0.15 else 0.0
+        grade = MASS * G * road_slope(self.t_s) if self.t_s >= 8.0 and self.gear > 0 else 0.0
         # 80 bar is a hard stop, a bit over 1 g before aero.
         brake_force = (self.brake_bar / 80.0) * 18500.0
-        net = drive - drag - roll - brake_force
+        net = drive - drag - roll - grade - brake_force
         self.speed_mps = max(0.0, self.speed_mps + (net / MASS) * DT_S)
 
     def _rpm_target(self) -> float:
@@ -441,11 +488,11 @@ class Bus:
 
     def turn_left(self) -> bool:
         t = self.t_s
-        return 18 <= t < 27 or 398 <= t < 418 or 500 <= t < 514
+        return 18 <= t < 30 or 210 <= t < 224 or 300 <= t < 314
 
     def turn_right(self) -> bool:
         t = self.t_s
-        return 62 <= t < 80 or 428 <= t < 450
+        return 46 <= t < 64 or 224 <= t < 238 or 336 <= t < 356
 
     def wheel_kmh(self, index: int) -> float:
         """FL, FR, RL, RR. Outside wheels run faster in a corner."""
@@ -725,7 +772,7 @@ def generate() -> tuple[int, int]:
     header = [
         "SLOGv1",
         "# SYNTHETIC. Not a vehicle capture. Generated by scripts/hypercar_bus.py.",
-        "# Hybrid hypercar. Torque, gears, drag, and mass. Urban, a top-speed straight, corners, pit.",
+        "# Hybrid hypercar. Torque, gears, drag, grade, and wind. Urban, corners, a short top-speed straight, pit.",
         "# XOR checksum in byte 7. Counters live in the DBC. Pair with hypercar_lap.dbc.",
         "# Planted: DTC P0301, TCU counter skip, ECM_Fast gap, bus-off error frames, ABS bad checksum.",
     ]

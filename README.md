@@ -8,7 +8,7 @@ The heavy work stays in Rust. The window is a Tauri 2 shell. The UI is TypeScrip
 
 Desktop layout at 1440×900, after indexing finished. The first four pictures use the synthetic hypercar lap, `fixtures/hypercar_lap.slog` with `fixtures/hypercar_lap.dbc`. That recording is generated, not a capture from a vehicle. The last picture is a slice of the same lap with bad lines mixed in.
 
-![Full window of the synthetic lap at 4:58, braking off the top-speed straight. Speed is about 123 km/h, engine speed near 6200 rpm, brake pressure near 62 bar, and the MIL and ABS lamps are lit.](docs/screenshots/deck-mid-drive.png)
+![Full window of the synthetic lap at 4:58, braking off the top-speed straight. Speed is 116.7 km/h in 3rd, engine speed is 5938 rpm, brake pressure is 64 bar, and the MIL and ABS lamps are lit.](docs/screenshots/deck-mid-drive.png)
 
 The instrument deck mid-drive. Gauges and telltales follow the playhead, and the timeline keeps the whole ten minutes.
 
@@ -16,7 +16,7 @@ The instrument deck mid-drive. Gauges and telltales follow the playhead, and the
 
 A planted fault selected. The row tracks the playhead, and the lane under the minimap is coloured by severity.
 
-![Measurement cursors on VehicleSpeed across the run up to top speed. The readout shows Δt 30.5 s, a delta of 91.46, min 246.1, max 337.6, and average 321.9.](docs/screenshots/cursors-stats.png)
+![Measurement cursors on VehicleSpeed across the run up to top speed. The readout shows Δt 27.0 s, a delta of 149.8, min 195.6, max 345.5, and average 309.5.](docs/screenshots/cursors-stats.png)
 
 Cursors A and B on the highway section. The transport shows Δt plus min, max, and average for the first plotted signal.
 
@@ -51,7 +51,7 @@ Vite stays on port 43127 and proxies `/api` to `loom-serve` on `127.0.0.1:43128`
 
 ## What's on the deck
 
-Sample opens `fixtures/hypercar_lap.slog` with `fixtures/hypercar_lap.dbc` when those files are on disk. That is a synthetic 10-minute hybrid drive (urban, a top-speed straight, corners, and a pit), not a capture from a vehicle. Speed is integrated from the torque curve, gear ratio, drag, rolling resistance, and mass. Message ids are invented. The log plants a DTC, a counter skip, a missing ECM cycle, a bus-off burst, and one bad ABS checksum. `fixtures/cluster_drive.slog` is a shorter cluster trace, with `fixtures/cluster.map.json`. `fixtures/demo.loom` points at that shorter trace. `fixtures/decoded_snippet.csv` is a tiny pre-decoded trace. The screenshots above use the 10-minute lap. The skipped-record picture is a slice of that lap with bad lines inserted.
+Sample opens `fixtures/hypercar_lap.slog` with `fixtures/hypercar_lap.dbc` when those files are on disk. That is a synthetic 10-minute hybrid drive (urban, several corners, a chicane, a short top-speed straight, a second shorter straight, and a pit), not a capture from a vehicle. Speed is integrated from the torque curve, gear ratio, drag, rolling resistance, mass, a slow grade, and wind. The top-speed straight is a few tens of seconds in top gear, under the rev limiter, and ends in a brake application. Message ids are invented. The log plants a DTC, a counter skip, a missing ECM cycle, a bus-off burst, and one bad ABS checksum. `fixtures/cluster_drive.slog` is a shorter cluster trace, with `fixtures/cluster.map.json`. `fixtures/demo.loom` points at that shorter trace. `fixtures/decoded_snippet.csv` is a tiny pre-decoded trace. The screenshots above use the 10-minute lap. The skipped-record picture is a slice of that lap with bad lines inserted.
 
 `fixtures/hypercar_lap.dbc` is committed. `fixtures/hypercar_lap.slog` is not: the app reads it from disk when it is present and otherwise falls back to the short cluster sample, and the Rust test that checks the lap only needs the generated file. Regenerate it locally, and CI writes it before `cargo test`:
 
