@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Signal Loom</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect fill='%2312171c' width='32' height='32'/%3E%3Cpath d='M4 20 L10 12 L16 18 L22 8 L28 14' fill='none' stroke='%233ec6ff' stroke-width='2'/%3E%3Cpath d='M16 4 V28' stroke='%23ff4d2e' stroke-width='1.5'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <svg class="mark" viewBox="0 0 28 28" aria-hidden="true">
+            <rect x="1" y="1" width="26" height="26" rx="3" fill="#12171c" stroke="#2a343d" />
+            <path d="M4 18 L9 11 L14 16 L19 8 L24 13" fill="none" stroke="#3ec6ff" stroke-width="1.6" />
+            <path d="M14 5 V23" stroke="#ff4d2e" stroke-width="1.2" />
+          </svg>
+          <div>
+            <div class="word">Signal Loom</div>
+            <div class="sub" id="project-name">Untitled</div>
+          </div>
+        </div>
+        <div class="identity">
+          <div class="log-name" id="log-name">No log</div>
+          <div class="log-meta" id="log-meta">Open a recording to index it</div>
+        </div>
+        <div class="actions">
+          <span class="runtime" id="runtime">Desktop</span>
+          <button type="button" id="btn-sample" title="Load the built-in cluster drive">Sample</button>
+          <button type="button" id="btn-open" title="Open a log (Ctrl/Cmd+O)">Open</button>
+          <button type="button" id="btn-map" title="Open a JSON signal map">Map</button>
+          <button type="button" id="btn-project" title="Open a .loom project (Ctrl/Cmd+Shift+O)">Project</button>
+          <button type="button" id="btn-save" title="Save project (Ctrl/Cmd+S)">Save</button>
+          <button type="button" id="btn-help" class="icon-btn" title="Keyboard shortcuts">?</button>
+        </div>
+      </header>
+      <p id="error" class="error" role="alert" hidden></p>
+      <div class="workspace">
+        <aside class="rail">
+          <section class="rail-block signals-block">
+            <header class="rail-head">
+              <h2>Signals</h2>
+              <span id="sig-count">0</span>
+            </header>
+            <label class="search">
+              <span class="sr">Filter signals</span>
+              <input id="sig-filter" type="search" placeholder="Filter name, unit, message" autocomplete="off" />
+            </label>
+            <div id="sig-list" class="sig-list" role="list"></div>
+          </section>
+          <section class="rail-block marks-block">
+            <header class="rail-head">
+              <h2>Bookmarks</h2>
+            </header>
+            <form id="mark-form" class="mark-form">
+              <input id="mark-label" type="text" maxlength="80" placeholder="Label at playhead" />
+              <button type="submit">Add</button>
+            </form>
+            <div id="mark-list" class="mark-list"></div>
+            <header class="rail-head subhead">
+              <h2>Log events</h2>
+            </header>
+            <div id="event-list" class="mark-list"></div>
+          </section>
+        </aside>
+        <main class="viewport" id="viewport">
+          <div class="viewport-body" id="viewport-body">
+            <div class="stage" id="stage">
+              <canvas id="plot" aria-label="Signal overlay"></canvas>
+              <div id="legend" class="legend"></div>
+              <p id="scale-note" class="scale-note" hidden>Each trace is scaled across the whole log</p>
+              <p id="stage-msg" class="stage-msg">No log on the deck. Load the cluster sample or open a CAN log.</p>
+            </div>
+            <div class="timeline-wrap">
+              <canvas id="timeline" aria-label="Recording timeline"></canvas>
+              <div class="transport">
+                <button type="button" id="prev-event" title="Previous event (Shift+Left)">|◀</button>
+                <button type="button" id="prev-frame" title="Previous frame (Left)">◀</button>
+                <button type="button" id="play" title="Play or pause (Space)">▶</button>
+                <button type="button" id="next-frame" title="Next frame (Right)">▶</button>
+                <button type="button" id="next-event" title="Next event (Shift+Right)">▶|</button>
+                <span class="readout" id="time-readout">0.000</span>
+                <span class="readout dim" id="frame-readout"></span>
+                <span class="spacer"></span>
+                <span class="readout dim" id="span-readout">span —</span>
+                <button type="button" id="zoom-out" title="Zoom out ([)">−</button>
+                <button type="button" id="zoom-in" title="Zoom in (])">+</button>
+                <button type="button" id="zoom-all" title="Show the whole log">All</button>
+                <button type="button" id="rate" title="Playback rate">1×</button>
+              </div>
+            </div>
+          </div>
+          <div id="veil" class="veil" hidden>
+            <div class="veil-card">
+              <div class="veil-kicker">Indexing</div>
+              <p id="veil-label">Reading log</p>
+              <div class="veil-bar" aria-hidden="true"></div>
+            </div>
+          </div>
+          <div id="drop" class="drop" hidden>Drop a log, signal map, or .loom project</div>
+        </main>
+      </div>
+    </div>
+    <dialog id="help">
+      <form method="dialog">
+        <header>
+          <h2>Keys</h2>
+          <button type="submit" class="icon-btn" aria-label="Close">×</button>
+        </header>
+        <ul>
+          <li><span>Open log</span><kbd>Ctrl/Cmd</kbd><kbd>O</kbd></li>
+          <li><span>Open project</span><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>O</kbd></li>
+          <li><span>Save project</span><kbd>Ctrl/Cmd</kbd><kbd>S</kbd></li>
+          <li><span>Save as</span><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>S</kbd></li>
+          <li><span>Load sample</span><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>L</kbd></li>
+          <li><span>Frame step</span><kbd>←</kbd><kbd>→</kbd></li>
+          <li><span>Event / bookmark step</span><kbd>Shift</kbd><kbd>←</kbd><kbd>→</kbd></li>
+          <li><span>Play / pause</span><kbd>Space</kbd></li>
+          <li><span>Bookmark playhead</span><kbd>B</kbd></li>
+          <li><span>Zoom</span><kbd>[</kbd><kbd>]</kbd><span class="hint-note">wheel</span></li>
+          <li><span>Pan</span><kbd>Shift</kbd><span class="hint-note">wheel</span></li>
+          <li><span>Filter signals</span><kbd>/</kbd></li>
+          <li><span>Start / end</span><kbd>Home</kbd><kbd>End</kbd></li>
+        </ul>
+      </form>
+    </dialog>
+    <input id="file-log" type="file" hidden accept=".slog,.slbin,.csv,.txt,.log" />
+    <input id="file-map" type="file" hidden accept=".json,application/json" />
+    <input id="file-project" type="file" hidden accept=".loom,.json,application/json" />
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

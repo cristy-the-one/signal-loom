@@ -1,0 +1,32 @@
+{
+  "format": "signal-loom",
+  "version": 1,
+  "logPath": "fixtures/cluster_drive.slog",
+  "signalMapPath": "fixtures/cluster.map.json",
+  "bookmarks": [
+    {
+      "id": "key-on",
+      "tUs": 0,
+      "label": "Key on"
+    },
+    {
+      "id": "pullaway",
+      "tUs": 2000000,
+      "label": "Pullaway"
+    },
+    {
+      "id": "braking",
+      "tUs": 30000000,
+      "label": "Braking"
+    }
+  ],
+  "view": {
+    "playheadUs": 2000000,
+    "spanUs": 45000000,
+    "plotted": [
+      "VehicleSpeed",
+      "EngineRPM",
+      "BrakePressure"
+    ]
+  }
+}

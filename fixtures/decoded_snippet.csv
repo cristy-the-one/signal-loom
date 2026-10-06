@@ -1,0 +1,7 @@
+t_us,signal,value,unit
+0,VehicleSpeed,0,km/h
+0,EngineRPM,800,rpm
+1000000,VehicleSpeed,12.5,km/h
+1000000,EngineRPM,1600,rpm
+2000000,VehicleSpeed,28,km/h
+2000000,EngineRPM,2400,rpm
