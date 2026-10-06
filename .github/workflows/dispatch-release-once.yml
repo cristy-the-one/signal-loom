@@ -1,0 +1,27 @@
+# One-shot: the cloud agent token cannot call workflow_dispatch.
+# Pushing this file dispatches release.yml, then the file is removed.
+name: dispatch-release-once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/dispatch-release-once.yml
+
+permissions:
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch the release workflow on main
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "release.yml",
+              ref: "main",
+            });
