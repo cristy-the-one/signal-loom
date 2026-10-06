@@ -1,0 +1,104 @@
+{
+  "name": "Instrument cluster",
+  "version": 1,
+  "messages": [
+    {
+      "id": "0x1A0",
+      "name": "Powertrain",
+      "signals": [
+        {
+          "name": "EngineRPM",
+          "startBit": 0,
+          "bitLength": 16,
+          "factor": 0.25,
+          "offset": 0,
+          "unit": "rpm"
+        },
+        {
+          "name": "VehicleSpeed",
+          "startBit": 16,
+          "bitLength": 16,
+          "factor": 0.01,
+          "offset": 0,
+          "unit": "km/h"
+        },
+        {
+          "name": "CoolantTemp",
+          "startBit": 32,
+          "bitLength": 8,
+          "factor": 1,
+          "offset": -40,
+          "unit": "\\u00b0C"
+        },
+        {
+          "name": "Throttle",
+          "startBit": 40,
+          "bitLength": 8,
+          "factor": 0.4,
+          "offset": 0,
+          "unit": "%"
+        }
+      ]
+    },
+    {
+      "id": "0x2B0",
+      "name": "Body",
+      "signals": [
+        {
+          "name": "Gear",
+          "startBit": 0,
+          "bitLength": 4,
+          "factor": 1,
+          "offset": 0,
+          "unit": ""
+        },
+        {
+          "name": "BrakePressure",
+          "startBit": 8,
+          "bitLength": 12,
+          "factor": 0.1,
+          "offset": 0,
+          "unit": "bar"
+        },
+        {
+          "name": "TurnSignal",
+          "startBit": 20,
+          "bitLength": 2,
+          "factor": 1,
+          "offset": 0,
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "id": "0x3C0",
+      "name": "Electrical",
+      "signals": [
+        {
+          "name": "FuelLevel",
+          "startBit": 0,
+          "bitLength": 8,
+          "factor": 0.5,
+          "offset": 0,
+          "unit": "%"
+        },
+        {
+          "name": "BatteryVoltage",
+          "startBit": 8,
+          "bitLength": 8,
+          "factor": 0.1,
+          "offset": 0,
+          "unit": "V"
+        },
+        {
+          "name": "Odometer",
+          "startBit": 16,
+          "bitLength": 24,
+          "factor": 0.1,
+          "offset": 0,
+          "unit": "km"
+        }
+      ]
+    }
+  ]
+}
