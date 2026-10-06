@@ -28,7 +28,7 @@
           "bitLength": 8,
           "factor": 1,
           "offset": -40,
-          "unit": "\\u00b0C"
+          "unit": "\u00b0C"
         },
         {
           "name": "Throttle",
