@@ -5,6 +5,13 @@ This is not a capture. Message ids, checksums, and the lap are invented
 for Signal Loom. The layout is a private bus: ECM, TCU, ABS, ESC, BCM,
 cluster, and BMS. Payloads use an XOR checksum in byte 7 and a nibble
 or byte counter. Cycle times are 10, 20, 100, and 1000 ms, with jitter.
+
+Speed comes from a seeded longitudinal model (torque curve, gear ratio,
+aero drag, rolling resistance, mass). RPM follows road speed through the
+gear, with a torque cut on upshifts and a blip on downshifts. Brake
+pressure is zero except during scheduled applies: a 100–200 ms rise, a
+hold, and a release. The lap is urban, a top-speed straight, then corners
+and a pit.
 """
 
 from __future__ import annotations
@@ -18,13 +25,20 @@ FIXTURES = ROOT / "fixtures"
 DURATION_S = 600.0
 DT_S = 0.001
 
-# Overall ratio, engine rpm / wheel rpm. Tuned so 7th sits near 7,500 rpm
-# at about 280 km/h with a 0.34 m tyre.
-GEAR_RATIO = [0.0, 24.0, 15.5, 10.6, 7.6, 5.7, 4.6, 3.85]
-WHEEL_RADIUS = 0.34
-WHEEL_RPM_PER_KMH = 7.80
-MASS = 1480.0
-MU_FORCE = 1.25 * MASS * 9.81
+# Overall ratio, engine rpm / wheel rpm. 7th is the top-speed gear:
+# drag and the torque curve meet near 330 km/h and about 8,400 rpm.
+GEARS = [0.0, 12.8, 8.6, 6.3, 4.9, 4.05, 3.5, 3.15]
+WHEEL_RADIUS = 0.335
+WHEELBASE = 2.70
+TRACK = 1.64
+MASS = 1390.0
+G = 9.81
+# 0.5 * Cd * A * rho, Cd 0.36, A 2.0 m^2.
+CDA = 0.5 * 0.36 * 2.0 * 1.225
+CRR = 0.012
+MU = 1.40
+IDLE = 980.0
+DRIVE_EFF = 0.92
 
 ECM_FAST = 0x100
 ECM_SLOW = 0x101
@@ -54,48 +68,129 @@ ECM_GAP = (250.0, 250.08)
 BUS_OFF = (410.0, 410.045)
 CHECKSUM_FAULT_S = 460.0
 
+# (t1, desired km/h, throttle cap, peak lateral g). Lateral g is a sine
+# bump across the leg so a corner builds and releases. Straights are 0 g.
+_LEG_ROWS = [
+    (8.0, 0.0, 0.0, 0.0),
+    (22.0, 42.0, 0.45, 0.0),
+    (34.0, 16.0, 0.25, 0.42),
+    (52.0, 55.0, 0.50, 0.0),
+    (66.0, 18.0, 0.22, -0.55),
+    (88.0, 48.0, 0.40, 0.12),
+    (292.0, 360.0, 1.0, 0.0),
+    (318.0, 88.0, 0.35, 0.85),
+    (348.0, 185.0, 0.90, 0.35),
+    (372.0, 64.0, 0.28, -1.10),
+    (408.0, 220.0, 1.0, 0.0),
+    (432.0, 92.0, 0.32, 0.80),
+    (470.0, 200.0, 0.92, -0.22),
+    (496.0, 68.0, 0.30, -0.90),
+    (544.0, 34.0, 0.32, 0.15),
+    (574.0, 8.0, 0.16, 0.0),
+    (600.0, 0.0, 0.0, 0.0),
+]
+# Explicit applies only. Rise is 100–200 ms. Zero everywhere else.
+_BRAKE_ROWS = [
+    (19.4, 0.14, 1.8, 0.18, 14.0),
+    (50.2, 0.15, 2.4, 0.20, 18.0),
+    (293.2, 0.16, 6.0, 0.22, 64.0),
+    (349.0, 0.14, 3.4, 0.18, 46.0),
+    (406.2, 0.15, 4.2, 0.20, 40.0),
+    (471.0, 0.13, 3.0, 0.18, 34.0),
+    (526.0, 0.16, 8.0, 0.28, 20.0),
+]
+
 
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-def targets(t_s: float) -> tuple[float, float]:
-    """Target speed (km/h) and steering angle (deg) for the scripted lap."""
-    segments = [
-        (0, 8, 0, 0, 0, 0),
-        (8, 28, 0, 38, 0, 0),
-        (28, 42, 38, 0, 0, 0),
-        (42, 68, 0, 52, 0, 6),
-        (68, 86, 52, 8, 6, -10),
-        (86, 150, 8, 160, -10, 0),
-        (150, 296, 160, 248, 0, 0.3),
-        (296, 302, 248, 25, 0.3, 1),
-        (302, 370, 25, 32, 1, 8),
-        (370, 410, 30, 150, 8, 16),
-        (410, 445, 150, 55, 16, -24),
-        (445, 490, 55, 210, -24, 6),
-        (490, 525, 210, 40, 6, -12),
-        (525, 555, 40, 8, -12, 0),
-        (555, 600, 8, 0, 0, 0),
-    ]
-    for start, end, v0, v1, s0, s1 in segments:
-        if start <= t_s < end or (end == 600 and t_s >= start):
-            span = end - start
-            blend = 0.0 if span == 0 else (t_s - start) / span
-            return v0 + (v1 - v0) * blend, s0 + (s1 - s0) * blend
-    return 0.0, 0.0
+def smoothstep(value: float) -> float:
+    value = clamp(value, 0.0, 1.0)
+    return value * value * (3.0 - 2.0 * value)
 
 
-def torque_curve(rpm: float) -> float:
+def lag(current: float, target: float, tau_s: float) -> float:
+    alpha = 1.0 - math.exp(-DT_S / tau_s)
+    return current + (target - current) * alpha
+
+
+def legs() -> list[tuple[float, float, float, float, float]]:
+    built = []
+    t0 = 0.0
+    for t1, speed, cap, lat in _LEG_ROWS:
+        built.append((t0, t1, speed, cap, lat))
+        t0 = t1
+    return built
+
+
+LEGS = legs()
+
+
+def leg_at(t_s: float) -> tuple[float, float, float, float, float]:
+    for leg in LEGS:
+        if t_s < leg[1]:
+            return leg
+    return LEGS[-1]
+
+
+def lat_target(t_s: float, leg: tuple[float, float, float, float, float]) -> float:
+    peak = leg[4]
+    if abs(peak) < 0.01:
+        return 0.0
+    dur = max(leg[1] - leg[0], 0.001)
+    phase = clamp((t_s - leg[0]) / dur, 0.0, 1.0)
+    return peak * math.sin(math.pi * phase)
+
+
+def brake_pressure_bar(t_s: float) -> float:
+    """Smooth apply, or exactly zero. Noise stays under a bar on the hold."""
+    for t0, rise, hold, fall, peak in _BRAKE_ROWS:
+        end = t0 + rise + hold + fall
+        if t_s < t0 or t_s >= end:
+            continue
+        u = t_s - t0
+        if u < rise:
+            shape = smoothstep(u / rise)
+        elif u < rise + hold:
+            shape = 1.0 - 0.035 * ((u - rise) / hold)
+        else:
+            shape = (1.0 - smoothstep((u - rise - hold) / fall)) * 0.965
+        bar = peak * shape
+        if bar > 2.0:
+            bar += 0.30 * math.sin(t_s * 31.0 + t0)
+        return max(0.0, bar)
+    return 0.0
+
+
+def engine_torque_nm(rpm: float) -> float:
+    """Wide full-throttle curve. Peak in the midrange, falling toward redline."""
     if rpm < 900:
-        return 0.25
-    if rpm < 3200:
-        return 0.45 + 0.55 * (rpm - 900) / 2300
+        return 140.0
+    if rpm < 2000:
+        return 140.0 + 420.0 * (rpm - 900) / 1100.0
+    if rpm < 4200:
+        return 560.0 + 250.0 * (rpm - 2000) / 2200.0
     if rpm < 6800:
-        return 1.0
+        return 810.0 - 30.0 * (rpm - 4200) / 2600.0
     if rpm < 8600:
-        return max(0.2, 1.0 - 0.85 * (rpm - 6800) / 1800)
-    return 0.15
+        return 780.0 - 300.0 * (rpm - 6800) / 1800.0
+    return 460.0
+
+
+def motor_nm(speed_kmh: float) -> float:
+    if speed_kmh < 70:
+        return 320.0
+    if speed_kmh < 240:
+        return 320.0 * (1.0 - (speed_kmh - 70) / 220.0)
+    return 35.0
+
+
+def kinematic_rpm(speed_mps: float, gear: int) -> float:
+    if gear <= 0:
+        return 0.0
+    wheel_rpm = speed_mps / (2.0 * math.pi * WHEEL_RADIUS) * 60.0
+    return wheel_rpm * GEARS[gear]
 
 
 def set_bits(data: bytearray, start: int, length: int, raw: int) -> None:
@@ -130,119 +225,216 @@ class Bus:
         self.speed_mps = 0.0
         self.gear = 0
         self.throttle = 0.0
-        self.brake = 0.0
+        self.brake_bar = 0.0
         self.torque = 0.0
-        self.rpm = 820.0
+        self.torque_scale = 1.0
+        self.rpm = 0.0
         self.steer = 0.0
         self.lat_g = 0.0
         self.coolant = 38.0
-        self.oil = 24.0
-        self.oil_pressure = 1.4
-        self.fuel = 58.0
-        self.soc = 71.0
-        self.pack_v = 392.0
+        self.oil = 28.0
+        self.oil_pressure = 1.2
+        self.fuel = 62.0
+        self.soc = 74.0
+        self.pack_v = 408.0
         self.pack_a = 0.0
-        self.cell_temp = 26.0
+        self.cell_temp = 24.0
+        self.load_avg = 0.0
         self.abs_active = False
         self.esc_active = False
-        self.abs_until = -1.0
         self.mil = 0
         self.dtc_count = 0
+        self.shift_kind = ""
+        self.shift_elapsed = 0.0
+        self.shift_from_rpm = IDLE
         self.shift_at = -10.0
+        self.shift_lock_until = 0.0
         self.counters = {msg[0]: 0 for msg in MESSAGES}
         self.counter_fault_used = False
         self.checksum_fault_used = False
         self.t_s = 0.0
 
     def step(self) -> None:
-        target_v, target_steer = targets(self.t_s)
-        speed_kmh = self.speed_mps * 3.6
-        if self.t_s < 1.1:
+        self._advance_shift()
+        if self.t_s < 8.0:
             self.throttle = 0.0
-            self.brake = 0.0
-            self.rpm = 0.0
-        elif self.t_s < 2.4:
-            self.throttle = 0.18
-            self.brake = 0.0
-            self.rpm = 280 + (self.t_s - 1.1) / 1.3 * 700
+            self.brake_bar = 0.0
         else:
-            if target_v > speed_kmh + 1.2:
-                self.throttle = clamp((target_v - speed_kmh) / 22.0, 0.08, 1.0)
-                self.brake = 0.0
-            elif speed_kmh > target_v + 1.2:
-                self.throttle = 0.0
-                self.brake = clamp((speed_kmh - target_v) / 28.0, 0.0, 1.0)
-            else:
-                self.throttle = 0.1 if target_v > 6 else 0.0
-                self.brake = 0.0
-            self._shift(speed_kmh)
-            wheel_rpm = speed_kmh * WHEEL_RPM_PER_KMH
-            if self.gear == 0:
-                self.rpm = 830 + self.throttle * 900 + 6 * math.sin(self.t_s * 23)
-            else:
-                self.rpm = max(750.0, wheel_rpm * GEAR_RATIO[self.gear])
-                self.rpm += 8 * math.sin(self.t_s * 19)
-            if self.t_s - self.shift_at < 0.12 and self.gear:
-                # Clutch fill: the drop is already in the new ratio. Add a short flare.
-                self.rpm += 280 * (1 - (self.t_s - self.shift_at) / 0.12)
-
-        engine = self.throttle * 820.0 * torque_curve(self.rpm if self.rpm else 800)
-        motor = self.throttle * 240.0 if self.soc > 12 else 0.0
-        regen = self.brake * 160.0 if speed_kmh > 8 else 0.0
-        self.torque = engine + motor - regen
-        if self.gear == 0 or self.t_s < 2.4:
-            drive = 0.0
-        else:
-            drive = min(MU_FORCE, self.torque * GEAR_RATIO[self.gear] / WHEEL_RADIUS)
-        drag = 0.36 * self.speed_mps * self.speed_mps
-        roll = 160.0 if self.speed_mps > 0.2 else 0.0
-        brake_force = self.brake * 16500.0
-        net = drive - drag - roll - brake_force
-        self.speed_mps = max(0.0, self.speed_mps + (net / MASS) * DT_S)
-
-        self.steer += (target_steer - self.steer) * 0.04
-        speed = max(self.speed_mps, 0.0)
-        lat = (self.steer / 16.0) * min(speed_kmh / 70.0, 1.35)
-        self.lat_g = clamp(lat, -1.45, 1.45)
-        self.esc_active = abs(self.lat_g) > 1.05 and speed_kmh > 40
-
-        if self.brake > 0.72 and speed_kmh > 36:
-            self.abs_active = True
-            self.abs_until = self.t_s + 0.28
-        elif self.t_s > self.abs_until:
-            self.abs_active = False
-
-        self.coolant += ((92.0 - self.coolant) * 0.018 + self.throttle * 0.55) * DT_S
-        self.oil += ((112.0 - self.oil) * 0.006 + self.throttle * 0.22) * DT_S
-        self.oil_pressure = 1.15 + max(self.rpm, 0.0) / 3200.0
-        self.fuel = max(40.0, self.fuel - self.throttle * 0.012 * DT_S)
-        self.soc = clamp(
-            self.soc - self.throttle * 0.045 * DT_S + self.brake * 0.02 * DT_S,
-            18.0,
-            100.0,
-        )
-        self.pack_a = self.throttle * 280.0 - (regen if self.brake > 0.05 else 0.0)
-        self.pack_v = 398.0 - self.pack_a * 0.045 - (71.0 - self.soc) * 0.2
-        self.cell_temp += (28.0 + self.throttle * 16.0 - self.cell_temp) * 0.025 * DT_S
+            self.brake_bar = brake_pressure_bar(self.t_s)
+            self._throttle(leg_at(self.t_s))
+            self._maybe_shift()
+        self._integrate()
+        self._track_rpm()
+        self._chassis(leg_at(self.t_s))
+        self._thermal()
         if self.t_s >= DTC_S:
             self.mil = 1
             self.dtc_count = 1
         self.t_s += DT_S
 
-    def _shift(self, speed_kmh: float) -> None:
-        if self.t_s - self.shift_at < 0.55:
+    def _throttle(self, leg: tuple[float, float, float, float, float]) -> None:
+        desired = leg[2]
+        cap = leg[3]
+        speed_kmh = self.speed_mps * 3.6
+        if self.brake_bar > 0.8:
+            target = 0.0
+        else:
+            err = desired - speed_kmh
+            cruise = self._cruise_throttle()
+            if err > 12.0:
+                target = cap
+            elif err > -1.5:
+                blend = clamp(err / 12.0, 0.0, 1.0)
+                target = min(cap, cruise + (cap - cruise) * blend)
+            else:
+                target = 0.0
+        step = 4.5 * DT_S
+        self.throttle += clamp(target - self.throttle, -step, step)
+        self.throttle = clamp(self.throttle, 0.0, 1.0)
+
+    def _cruise_throttle(self) -> float:
+        if self.gear <= 0 or self.speed_mps < 1.5:
+            return 0.12
+        drag = CDA * self.speed_mps * self.speed_mps + CRR * MASS * G
+        need = drag * WHEEL_RADIUS
+        kin = max(kinematic_rpm(self.speed_mps, self.gear), 1200.0)
+        avail = (engine_torque_nm(kin) + motor_nm(self.speed_mps * 3.6)) * GEARS[self.gear] * DRIVE_EFF
+        if avail < 1.0:
+            return 0.35
+        return clamp(need / avail, 0.0, 0.85)
+
+    def _maybe_shift(self) -> None:
+        if self.t_s < self.shift_lock_until or self.shift_kind:
             return
         if self.gear == 0:
-            if self.throttle > 0.15 or speed_kmh > 2:
-                self.gear = 1
-                self.shift_at = self.t_s
+            self.gear = 1
+            self.shift_at = self.t_s
+            self.shift_lock_until = self.t_s + 0.45
             return
-        if self.rpm > 7100 and self.gear < 7:
-            self.gear += 1
-            self.shift_at = self.t_s
-        elif self.rpm < 2500 and self.gear > 1 and self.throttle < 0.45:
-            self.gear -= 1
-            self.shift_at = self.t_s
+        braking = self.brake_bar > 20.0
+        if braking and self.gear > 1 and self.rpm < 5600:
+            best = self.gear
+            for gear in range(self.gear - 1, 0, -1):
+                nxt = kinematic_rpm(self.speed_mps, gear)
+                if nxt > 7200:
+                    break
+                best = gear
+                if nxt >= 5600:
+                    break
+            if best < self.gear:
+                self._begin_shift(best, "down")
+            return
+        if not braking and self.gear < 7 and self.throttle > 0.12:
+            limit = 7850.0 if self.throttle > 0.55 else 4400.0
+            nxt = kinematic_rpm(self.speed_mps, self.gear + 1)
+            if self.rpm > limit and nxt < self.rpm - 350:
+                self._begin_shift(self.gear + 1, "up")
+                return
+        if self.gear > 1 and self.rpm < 2800 and self.throttle < 0.55 and self.speed_mps > 1.2:
+            nxt = kinematic_rpm(self.speed_mps, self.gear - 1)
+            if 1400.0 < nxt < 8000.0:
+                self._begin_shift(self.gear - 1, "down")
+
+    def _begin_shift(self, gear: int, kind: str) -> None:
+        self.shift_from_rpm = self.rpm
+        self.gear = gear
+        self.shift_kind = kind
+        self.shift_elapsed = 0.0
+        self.shift_at = self.t_s
+        self.shift_lock_until = self.t_s + (0.55 if kind == "up" else 0.62)
+
+    def _advance_shift(self) -> None:
+        if not self.shift_kind:
+            self.torque_scale = 1.0
+            return
+        dur = 0.11 if self.shift_kind == "up" else 0.16
+        self.shift_elapsed += DT_S
+        if self.shift_kind == "up":
+            self.torque_scale = 0.0 if self.shift_elapsed < 0.08 else clamp((self.shift_elapsed - 0.08) / 0.03, 0.0, 1.0)
+        else:
+            self.torque_scale = 0.30
+        if self.shift_elapsed >= dur:
+            self.shift_kind = ""
+            self.torque_scale = 1.0
+
+    def _integrate(self) -> None:
+        speed_kmh = self.speed_mps * 3.6
+        if self.t_s < 8.0 or self.gear <= 0:
+            eng = 0.0
+            mot = 0.0
+            drive = 0.0
+        else:
+            rpm = self.rpm if self.rpm > 400 else 900.0
+            limit = 1.0
+            if rpm > 8350:
+                limit = clamp(1.0 - (rpm - 8350) / 450.0, 0.15, 1.0)
+            eng = engine_torque_nm(rpm) * self.throttle * self.torque_scale * limit
+            mot = motor_nm(speed_kmh) * self.throttle * self.torque_scale if self.soc > 12 else 0.0
+            drive = min(MU * MASS * G, (eng + mot) * GEARS[self.gear] * DRIVE_EFF / WHEEL_RADIUS)
+        self.torque = eng + mot
+        drag = CDA * self.speed_mps * self.speed_mps
+        roll = CRR * MASS * G if self.speed_mps > 0.15 else 0.0
+        # 80 bar is a hard stop, a bit over 1 g before aero.
+        brake_force = (self.brake_bar / 80.0) * 18500.0
+        net = drive - drag - roll - brake_force
+        self.speed_mps = max(0.0, self.speed_mps + (net / MASS) * DT_S)
+
+    def _rpm_target(self) -> float:
+        if self.t_s < 1.1:
+            return 0.0
+        if self.t_s < 2.4:
+            return (self.t_s - 1.1) / 1.3 * IDLE
+        kin = kinematic_rpm(self.speed_mps, self.gear) if self.gear else 0.0
+        if self.speed_mps < 0.4 or self.gear == 0:
+            return IDLE + 160.0 * self.throttle
+        requested = IDLE + 1900.0 * self.throttle
+        if self.gear <= 2 and kin < requested and self.throttle > 0.2 and self.brake_bar < 1.0:
+            return requested
+        return max(kin, 800.0)
+
+    def _track_rpm(self) -> None:
+        kin = kinematic_rpm(self.speed_mps, self.gear) if self.gear else self._rpm_target()
+        if self.shift_kind == "up":
+            u = clamp(self.shift_elapsed / 0.11, 0.0, 1.0)
+            blend = smoothstep(u)
+            dip = -220.0 * math.sin(math.pi * u)
+            self.rpm = self.shift_from_rpm + (kin - self.shift_from_rpm) * blend + dip
+            return
+        if self.shift_kind == "down":
+            u = clamp(self.shift_elapsed / 0.16, 0.0, 1.0)
+            blip = kin + 520.0 * math.sin(math.pi * u)
+            blend = smoothstep(u)
+            self.rpm = self.shift_from_rpm + (blip - self.shift_from_rpm) * blend
+            return
+        target = self._rpm_target()
+        self.rpm = lag(self.rpm, target, 0.045)
+
+    def _chassis(self, leg: tuple[float, float, float, float, float]) -> None:
+        speed_kmh = self.speed_mps * 3.6
+        self.lat_g = lag(self.lat_g, lat_target(self.t_s, leg), 0.22)
+        self.lat_g = clamp(self.lat_g, -1.45, 1.45)
+        if abs(self.lat_g) < 0.02 or self.speed_mps < 1.0:
+            steer_target = 0.0
+        else:
+            radius = (self.speed_mps * self.speed_mps) / (self.lat_g * G)
+            road = math.atan(WHEELBASE / radius)
+            steer_target = math.degrees(road) * 14.0
+        steer_target = clamp(steer_target, -420.0, 420.0)
+        self.steer = lag(self.steer, steer_target, 0.16)
+        self.esc_active = abs(self.lat_g) > 0.98 and speed_kmh > 55
+        self.abs_active = self.brake_bar >= 42.0 and speed_kmh > 48.0
+
+    def _thermal(self) -> None:
+        self.load_avg = lag(self.load_avg, self.throttle, 4.0)
+        self.coolant = lag(self.coolant, 84.0 + 12.0 * self.load_avg, 70.0)
+        self.oil = lag(self.oil, 96.0 + 22.0 * self.load_avg, 130.0)
+        self.oil_pressure = 1.15 + max(self.rpm, 0.0) / 3400.0
+        self.fuel = max(41.0, self.fuel - self.throttle * 0.0045 * DT_S)
+        amps = self.throttle * 150.0 * self.torque_scale - min(self.brake_bar, 36.0) * 1.4
+        self.pack_a = lag(self.pack_a, amps, 0.35)
+        self.soc = clamp(self.soc - self.pack_v * self.pack_a * DT_S / 3600.0 / 32000.0 * 100.0, 15.0, 100.0)
+        self.pack_v = 412.0 - self.pack_a * 0.035 - (74.0 - self.soc) * 0.18
+        self.cell_temp = lag(self.cell_temp, 27.0 + 14.0 * self.load_avg, 90.0)
 
     def doors_open(self) -> bool:
         return self.t_s < 3.2 or 548.0 < self.t_s < 572.0
@@ -256,15 +448,24 @@ class Bus:
         return 62 <= t < 80 or 428 <= t < 450
 
     def wheel_kmh(self, index: int) -> float:
+        """FL, FR, RL, RR. Outside wheels run faster in a corner."""
         base = self.speed_mps * 3.6
-        steer = self.steer / 350.0
-        side = -1 if index in (0, 2) else 1
-        axle = 0.004 * side * steer * (1 if index < 2 else 0.6)
-        slip = 1.0 + self.throttle * 0.008 if index < 2 else 1.0
-        pulse = 0.0
+        side = -1.0 if index in (0, 2) else 1.0
+        rear = index >= 2
+        if abs(self.lat_g) < 0.03 or self.speed_mps < 1.0:
+            ratio = 1.0
+        else:
+            radius = (self.speed_mps * self.speed_mps) / (self.lat_g * G)
+            sign = 1.0 if radius > 0 else -1.0
+            wheel_r = abs(radius) + side * sign * (TRACK / 2.0)
+            ratio = wheel_r / abs(radius)
+        slip = 1.0
+        if rear and self.throttle > 0.45 and self.brake_bar < 1.0:
+            slip += 0.006 * self.throttle
         if self.abs_active:
-            pulse = 0.035 * math.sin(self.t_s * 90 + index * 1.3)
-        return max(0.0, base * slip * (1 + axle + pulse))
+            slip *= 1.0 - 0.012 * (0.65 + 0.35 * math.sin(self.t_s * 55.0 + index))
+        noise = 0.03 * math.sin(self.t_s * 9.0 + index * 1.7)
+        return max(0.0, base * ratio * slip + noise)
 
     def payload(self, msg_id: int) -> bytes:
         counter = self.counters[msg_id]
@@ -279,7 +480,8 @@ class Bus:
         data = bytearray(8)
         speed = self.speed_mps * 3.6
         if msg_id == ECM_FAST:
-            set_bits(data, 0, 16, round(clamp(self.rpm, 0, 16000) / 0.25))
+            shown_rpm = self.rpm + 3.0 * math.sin(self.t_s * 13.0)
+            set_bits(data, 0, 16, round(clamp(shown_rpm, 0, 16000) / 0.25))
             set_signed(data, 16, 16, round((clamp(self.torque, -400, 1200) + 500) / 0.1))
             set_bits(data, 32, 8, round(self.throttle * 200))
             set_bits(data, 40, 8, round(min(1.0, self.throttle * 1.05) * 200))
@@ -298,7 +500,7 @@ class Bus:
             target = self.gear
             set_bits(data, 4, 4, target)
             set_bits(data, 8, 16, round(clamp(self.rpm, 0, 16000) / 0.25))
-            clutch = 100 if self.t_s - self.shift_at < 0.12 else 0
+            clutch = 100 if self.shift_kind else 0
             set_bits(data, 24, 8, round(clutch / 0.5))
             set_bits(data, 32, 1, 1 if clutch else 0)
             return finish(data, counter, 48, 4, bad)
@@ -309,7 +511,7 @@ class Bus:
         if msg_id == ESC:
             set_signed(data, 0, 16, round(self.steer / 0.1))
             set_signed(data, 16, 16, round(self.lat_g / 0.001))
-            set_bits(data, 32, 8, round(self.brake * 160))
+            set_bits(data, 32, 8, round(clamp(self.brake_bar, 0.0, 80.0) / 0.5))
             yaw = clamp(self.lat_g * 18, -40, 40)
             set_signed(data, 40, 12, round(yaw / 0.1))
             set_bits(data, 52, 1, 1 if self.abs_active else 0)
@@ -320,11 +522,13 @@ class Bus:
                 set_bits(data, 0, 1, 1)
             set_bits(data, 8, 1, 1 if self.turn_left() and int(self.t_s * 2) % 2 == 0 else 0)
             set_bits(data, 9, 1, 1 if self.turn_right() and int(self.t_s * 2) % 2 == 0 else 0)
-            set_bits(data, 10, 1, 1 if self.brake > 0.05 else 0)
+            set_bits(data, 10, 1, 1 if self.brake_bar > 1.0 else 0)
             return finish(data, counter, 48, 8, bad)
         if msg_id == CLUSTER:
-            set_bits(data, 0, 16, round(speed / 0.01))
-            set_bits(data, 16, 16, round(clamp(self.rpm, 0, 16000) / 0.25))
+            shown = speed + 0.05 * math.sin(self.t_s * 2.1)
+            shown_rpm = self.rpm + 3.0 * math.sin(self.t_s * 13.0 + 0.4)
+            set_bits(data, 0, 16, round(max(0.0, shown) / 0.01))
+            set_bits(data, 16, 16, round(clamp(shown_rpm, 0, 16000) / 0.25))
             telltale = 0
             if self.mil:
                 telltale |= 1
@@ -521,7 +725,7 @@ def generate() -> tuple[int, int]:
     header = [
         "SLOGv1",
         "# SYNTHETIC. Not a vehicle capture. Generated by scripts/hypercar_bus.py.",
-        "# Hybrid hypercar, urban then highway then a lap. 10 minutes from key-on.",
+        "# Hybrid hypercar. Torque, gears, drag, and mass. Urban, a top-speed straight, corners, pit.",
         "# XOR checksum in byte 7. Counters live in the DBC. Pair with hypercar_lap.dbc.",
         "# Planted: DTC P0301, TCU counter skip, ECM_Fast gap, bus-off error frames, ABS bad checksum.",
     ]
