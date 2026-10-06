@@ -8,6 +8,18 @@ use std::collections::HashSet;
 pub struct SignalMap {
     pub name: String,
     pub signals: Vec<MappedSignal>,
+    pub messages: Vec<MapMessage>,
+    pub warnings: Vec<String>,
+}
+
+/// One CAN message described by a map or a DBC.
+#[derive(Debug, Clone)]
+pub struct MapMessage {
+    pub id: u32,
+    pub name: String,
+    pub dlc: u8,
+    /// Nominal period, when the map or DBC `GenMsgCycleTime` provides one.
+    pub cycle_us: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -17,6 +29,11 @@ pub struct MappedSignal {
     pub message_name: String,
     pub message_id: u32,
     pub spec: DecodeSpec,
+    /// 0 applies on every channel.
+    pub channel: u8,
+    pub mux_switch: bool,
+    pub mux_value: Option<u32>,
+    pub table: Vec<(i64, String)>,
 }
 
 impl SignalMap {
@@ -35,12 +52,13 @@ impl SignalMap {
         }
         let mut signals = Vec::new();
         let mut seen = HashSet::new();
-        for message in raw.messages {
+        for message in &raw.messages {
             let message_name = message.name.trim().to_string();
+            let message_id = message.id;
             if message_name.is_empty() {
                 return Err(Error::msg("a message in the signal map has no name"));
             }
-            for signal in message.signals {
+            for signal in &message.signals {
                 let signal_name = signal.name.trim().to_string();
                 if signal_name.is_empty() {
                     return Err(Error::msg(format!(
@@ -68,20 +86,96 @@ impl SignalMap {
                     .map_err(|message| Error::msg(format!("signal {signal_name}: {message}")))?;
                 signals.push(MappedSignal {
                     name: signal_name,
-                    unit: signal.unit,
+                    unit: signal.unit.clone(),
                     message_name: message_name.clone(),
-                    message_id: message.id,
+                    message_id,
                     spec,
+                    channel: message.channel.unwrap_or(0),
+                    mux_switch: signal.mux_switch,
+                    mux_value: signal.mux_value,
+                    table: signal
+                        .table
+                        .iter()
+                        .map(|row| (row.value, row.label.clone()))
+                        .collect(),
                 });
             }
         }
         if signals.is_empty() {
             return Err(Error::msg("signal map has no signals"));
         }
+        let messages = raw
+            .messages
+            .iter()
+            .map(|message| MapMessage {
+                id: message.id,
+                name: message.name.trim().to_string(),
+                dlc: message.dlc.unwrap_or(8).min(8),
+                cycle_us: message.cycle_us,
+            })
+            .collect();
         Ok(Self {
             name: name.to_string(),
             signals,
+            messages,
+            warnings: Vec::new(),
         })
+    }
+
+    /// Add another DBC or map. A colliding signal name becomes `Name@channel`.
+    /// Channel 0 means the new signals apply on every channel.
+    pub fn append(&mut self, mut other: SignalMap, channel: u8) {
+        if channel != 0 {
+            for signal in &mut other.signals {
+                if signal.channel == 0 {
+                    signal.channel = channel;
+                }
+            }
+        }
+        let mut seen: HashSet<String> = self
+            .signals
+            .iter()
+            .map(|signal| signal.name.clone())
+            .collect();
+        for mut signal in other.signals.drain(..) {
+            let assigned = signal.channel;
+            signal.name = unique_name(&seen, &signal.name, assigned, signal.message_id);
+            seen.insert(signal.name.clone());
+            self.signals.push(signal);
+        }
+        for message in other.messages {
+            let clash = self
+                .messages
+                .iter()
+                .any(|have| have.id == message.id && have.name == message.name);
+            if !clash {
+                self.messages.push(message);
+            }
+        }
+        for warning in other.warnings {
+            if self.warnings.len() < 32 && !self.warnings.iter().any(|have| have == &warning) {
+                self.warnings.push(warning);
+            }
+        }
+        if !other.name.is_empty() && self.name != other.name && !self.name.contains(&other.name) {
+            self.name = format!("{} + {}", self.name, other.name);
+        }
+    }
+}
+
+fn unique_name(seen: &HashSet<String>, name: &str, channel: u8, message_id: u32) -> String {
+    if !seen.contains(name) {
+        return name.to_string();
+    }
+    let tagged = if channel == 0 {
+        format!("{name}@{message_id:X}")
+    } else {
+        format!("{name}@{channel}")
+    };
+    if seen.contains(&tagged) {
+        format!("{tagged}_{message_id:X}")
+    } else {
+        tagged
     }
 }
 
@@ -105,7 +199,13 @@ struct RawMessage {
     id: u32,
     name: String,
     #[serde(default)]
+    dlc: Option<u8>,
+    #[serde(default, rename = "cycleUs")]
+    cycle_us: Option<u64>,
+    #[serde(default)]
     signals: Vec<RawSignal>,
+    #[serde(default)]
+    channel: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +224,18 @@ struct RawSignal {
     signed: bool,
     #[serde(default)]
     endian: RawEndian,
+    #[serde(default)]
+    mux_switch: bool,
+    #[serde(default)]
+    mux_value: Option<u32>,
+    #[serde(default)]
+    table: Vec<RawTable>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTable {
+    value: i64,
+    label: String,
 }
 
 fn default_factor() -> f64 {

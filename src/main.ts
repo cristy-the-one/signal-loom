@@ -4,7 +4,9 @@ import "@fontsource/ibm-plex-sans/600.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import * as api from "./api";
-import { TRACE_COLORS, drawPlot, type Trace } from "./plot";
+import { familyColor, severityOf } from "./family";
+import { drawBus, drawGauges, readingsFrom } from "./gauges";
+import { drawPlot, formatHover, heldValue, timeOnPlot, type Trace } from "./plot";
 import { drawTimeline, timeAt, type TimelineMark } from "./timeline";
 import {
   basename,
@@ -17,7 +19,20 @@ import {
   formatValue,
   hexId,
 } from "./format";
-import type { Bookmark, FrameHit, Point, ProjectFile, ProjectOpen, Series, Summary } from "./types";
+import type {
+  Bookmark,
+  BusLoad,
+  FrameHit,
+  MathChannel,
+  Note,
+  Point,
+  ProjectFile,
+  ProjectOpen,
+  Series,
+  Summary,
+  ThresholdTrigger,
+  ValueRead,
+} from "./types";
 import "./styles.css";
 
 const MIN_SPAN = 10_000;
@@ -49,18 +64,42 @@ const els = {
   rate: must<HTMLButtonElement>("rate"),
   veil: must<HTMLElement>("veil"),
   veilLabel: must<HTMLElement>("veil-label"),
+  veilDetail: must<HTMLElement>("veil-detail"),
+  veilFill: must<HTMLElement>("veil-fill"),
+  veilCancel: must<HTMLButtonElement>("veil-cancel"),
+  warn: must<HTMLElement>("warn"),
+  dbcChannel: must<HTMLInputElement>("dbc-channel"),
   drop: must<HTMLElement>("drop"),
   help: must<HTMLDialogElement>("help"),
   save: must<HTMLButtonElement>("btn-save"),
   fileLog: must<HTMLInputElement>("file-log"),
   fileMap: must<HTMLInputElement>("file-map"),
   fileProject: must<HTMLInputElement>("file-project"),
+  fileCompare: must<HTMLInputElement>("file-compare"),
+  gauges: must<HTMLCanvasElement>("gauges"),
+  bus: must<HTMLCanvasElement>("bus"),
+  crosshair: must<HTMLElement>("crosshair"),
+  crossTime: must<HTMLElement>("cross-time"),
+  crossVals: must<HTMLElement>("cross-vals"),
+  cursorRead: must<HTMLElement>("cursor-read"),
+  noteBody: must<HTMLInputElement>("note-body"),
+  noteList: must<HTMLElement>("note-list"),
+  mathList: must<HTMLElement>("math-list"),
+  trigList: must<HTMLElement>("trig-list"),
+  compareLabel: must<HTMLElement>("compare-label"),
+  compareOffset: must<HTMLInputElement>("compare-offset"),
+  captureArm: must<HTMLInputElement>("capture-arm"),
+  captureIface: must<HTMLInputElement>("capture-iface"),
+  captureMs: must<HTMLInputElement>("capture-ms"),
+  captureBtn: must<HTMLButtonElement>("btn-capture"),
 };
 
 interface View {
   t0: number;
   t1: number;
 }
+
+type RailTab = "marks" | "notes" | "math" | "alerts" | "drive";
 
 const state: {
   summary: Summary | null;
@@ -80,6 +119,20 @@ const state: {
   frame: FrameHit | null;
   overview: Point[] | null;
   overviewName: string | null;
+  held: ValueRead[];
+  bus: BusLoad | null;
+  hoverT: number | null;
+  hoverX: number;
+  cursorA: number | null;
+  cursorB: number | null;
+  cursorText: string;
+  math: MathChannel[];
+  triggers: ThresholdTrigger[];
+  notes: Note[];
+  compareOn: boolean;
+  comparePath: string | null;
+  compareOffsetUs: number;
+  tab: RailTab;
 } = {
   summary: null,
   playhead: 0,
@@ -98,6 +151,20 @@ const state: {
   frame: null,
   overview: null,
   overviewName: null,
+  held: [],
+  bus: null,
+  hoverT: null,
+  hoverX: 0,
+  cursorA: null,
+  cursorB: null,
+  cursorText: "",
+  math: [],
+  triggers: [],
+  notes: [],
+  compareOn: false,
+  comparePath: null,
+  compareOffsetUs: 0,
+  tab: "marks",
 };
 
 let queryToken = 0;
@@ -125,8 +192,10 @@ function defaultPlotted(summary: Summary): string[] {
 }
 
 function colorFor(name: string): string {
-  const index = state.summary?.signals.findIndex((signal) => signal.name === name) ?? 0;
-  return TRACE_COLORS[(index < 0 ? 0 : index) % TRACE_COLORS.length];
+  const base = name.replace(/ · B$/, "");
+  const index = state.summary?.signals.findIndex((signal) => signal.name === base) ?? 0;
+  const signal = state.summary?.signals.find((item) => item.name === base);
+  return familyColor(base, signal?.messageName ?? "", index < 0 ? 0 : index);
 }
 
 function windowFor(playhead: number, span: number, summary: Summary): View {
@@ -163,6 +232,58 @@ function paintBusy(label?: string): void {
   els.viewport.classList.toggle("is-busy", active);
   els.veil.hidden = !active;
   if (label) els.veilLabel.textContent = label;
+  if (!active) {
+    els.veilDetail.textContent = "";
+    els.veilFill.style.width = "0";
+    els.veilCancel.hidden = true;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function withIndex(
+  label: string,
+  start: () => Promise<void>,
+): Promise<Summary> {
+  state.busy += 1;
+  paintBusy(label);
+  els.veilCancel.hidden = false;
+  let stop = false;
+  const onCancel = () => {
+    stop = true;
+    void api.cancelIndex();
+    els.veilLabel.textContent = "Cancelling";
+  };
+  els.veilCancel.addEventListener("click", onCancel);
+  try {
+    await start();
+    for (;;) {
+      const tick = await api.indexProgress();
+      if (tick.error) throw new Error(tick.error);
+      if (tick.done && tick.summary) return tick.summary;
+      if (tick.idle && !tick.done) throw new Error("indexing did not start");
+      const pct = tick.bytesTotal
+        ? Math.min(99, Math.round((100 * tick.bytesDone) / tick.bytesTotal))
+        : 0;
+      els.veilFill.style.width = `${pct}%`;
+      els.veilLabel.textContent = stop ? "Cancelling" : `${label} · ${pct}%`;
+      const skipped = tick.skipped ? ` · ${formatCount(tick.skipped)} skipped` : "";
+      els.veilDetail.textContent = `${formatCount(tick.frames)} frames${skipped}`;
+      await sleep(80);
+    }
+  } finally {
+    els.veilCancel.removeEventListener("click", onCancel);
+    state.busy = Math.max(0, state.busy - 1);
+    paintBusy();
+  }
+}
+
+function mapChannel(): number {
+  const value = Number(els.dbcChannel.value);
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.min(255, Math.round(value));
 }
 
 async function withBusy(label: string, work: () => Promise<void>): Promise<void> {
@@ -193,11 +314,28 @@ function renderChrome(): void {
   }
   els.logName.textContent = summary.logLabel;
   const map = summary.mapLabel ?? "no signal map";
-  els.logMeta.textContent = `${formatCount(summary.frameCount)} frames · ${formatCount(summary.checkpointCount)} checkpoints · ${formatBytes(summary.bytes)} · ${summary.format} · ${map}`;
+  const skipped = summary.skippedRecords ? ` · ${formatCount(summary.skippedRecords)} skipped` : "";
+  els.logMeta.textContent = `${formatCount(summary.frameCount)} frames · ${formatCount(summary.checkpointCount)} checkpoints · ${formatBytes(summary.bytes)} · ${summary.format}${skipped} · ${map}`;
+  const warnings = summary.warnings ?? [];
+  if (warnings.length || summary.skippedRecords) {
+    const head = summary.skippedRecords
+      ? `${formatCount(summary.skippedRecords)} records skipped`
+      : "Import notes";
+    const tail = warnings.slice(0, 3).join(" · ");
+    els.warn.hidden = false;
+    els.warn.textContent = tail ? `${head}. ${tail}` : head;
+  } else {
+    els.warn.hidden = true;
+    els.warn.textContent = "";
+  }
   els.sigCount.textContent = String(summary.signals.length);
   renderSignals();
   renderMarks();
   renderEvents();
+  renderNotes();
+  renderMath();
+  renderTriggers();
+  renderCompare();
   renderTransport();
 }
 
@@ -206,11 +344,13 @@ function renderTransport(): void {
   els.spanReadout.textContent = `span ${formatSpan(state.span)}`;
   els.play.textContent = state.playing ? "❚❚" : "▶";
   els.rate.textContent = `${state.rate}×`;
+  els.cursorRead.textContent = state.cursorText;
   const frame = state.frame;
   if (!frame) {
     els.frameReadout.textContent = "";
   } else if (frame.messageId != null) {
-    els.frameReadout.textContent = `f ${formatCount(frame.ordinal)} · ${hexId(frame.messageId)} ${frame.messageName}`;
+    const id = frame.extended ? `${hexId(frame.messageId)}x` : hexId(frame.messageId);
+    els.frameReadout.textContent = `f ${formatCount(frame.ordinal)} · ${id} ${frame.messageName}`;
   } else {
     els.frameReadout.textContent = `f ${formatCount(frame.ordinal)} · ${frame.messageName}`;
   }
@@ -328,8 +468,15 @@ function renderEvents(): void {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "event-row";
+    const severity = severityOf(event.label);
+    button.classList.add(severity);
+    const selected = Math.abs(event.tUs - state.playhead) <= 500;
+    if (selected) {
+      button.classList.add("is-selected");
+      queueMicrotask(() => button.scrollIntoView({ block: "nearest" }));
+    }
     const dot = document.createElement("span");
-    dot.className = "event-dot";
+    dot.className = `event-dot ${severity}`;
     const time = document.createElement("span");
     time.className = "event-t";
     time.textContent = formatUs(event.tUs);
@@ -337,7 +484,10 @@ function renderEvents(): void {
     label.className = "event-l";
     label.textContent = event.label;
     button.append(dot, time, label);
-    button.addEventListener("click", () => scrubTo(event.tUs));
+    button.addEventListener("click", () => {
+      scrubTo(event.tUs);
+      renderEvents();
+    });
     els.eventList.append(button);
   }
   if (state.summary?.eventsTruncated) {
@@ -352,7 +502,7 @@ function renderLegend(): void {
   els.legend.replaceChildren();
   for (const name of state.plotted) {
     const signal = state.summary?.signals.find((item) => item.name === name);
-    const value = state.frame?.values.find((item) => item.name === name);
+    const held = state.held.find((item) => item.name === name);
     const item = document.createElement("div");
     item.className = "legend-item";
     const swatch = document.createElement("i");
@@ -362,7 +512,11 @@ function renderLegend(): void {
     label.textContent = name;
     const reading = document.createElement("span");
     reading.className = "val";
-    reading.textContent = value ? formatValue(value.value) : "—";
+    reading.textContent = held
+      ? held.label
+        ? `${formatValue(held.value)} ${held.label}`
+        : formatValue(held.value)
+      : "—";
     const unit = document.createElement("span");
     unit.className = "unit";
     unit.textContent = signal?.unit ?? "";
@@ -373,7 +527,7 @@ function renderLegend(): void {
 }
 
 function stageMessage(): string | null {
-  if (!state.summary) return "No log on the deck. Load the cluster sample or open a CAN log.";
+  if (!state.summary) return "No log on the deck. Load the synthetic hypercar sample or open a CAN log.";
   if (state.summary.signals.length === 0) return "No signals yet. Open a JSON signal map to decode frames.";
   if (state.plotted.length === 0) return "Select signals to overlay them on the scope.";
   return null;
@@ -384,34 +538,78 @@ function draw(): void {
   const message = stageMessage();
   els.stageMsg.hidden = message == null;
   els.stageMsg.textContent = message ?? "";
-  const traces: Trace[] = state.plotted.map((name) => {
+  const names = traceNames();
+  const traces: Trace[] = names.map((name) => {
+    const base = name.replace(/ · B$/, "");
     const series = state.series.find((item) => item.name === name);
     const points = series?.points ?? [];
-    const info = summary?.signals.find((signal) => signal.name === name);
+    const info = summary?.signals.find((signal) => signal.name === base);
     let min = info?.min ?? null;
     let max = info?.max ?? null;
     if (min == null || max == null || max <= min) {
-      min = points.reduce((lo, point) => Math.min(lo, point.v), Infinity);
-      max = points.reduce((hi, point) => Math.max(hi, point.v), -Infinity);
+      const scalePoints = points.length ? points : (state.series.find((item) => item.name === base)?.points ?? []);
+      min = scalePoints.reduce((lo, point) => Math.min(lo, point.v), Infinity);
+      max = scalePoints.reduce((hi, point) => Math.max(hi, point.v), -Infinity);
       if (!Number.isFinite(min) || !Number.isFinite(max)) {
         min = 0;
         max = 1;
       }
     }
-    return { name, color: colorFor(name), points, min, max };
+    return { name, color: colorFor(name), points, min, max, dashed: name.endsWith(" · B") };
   });
-  drawPlot(els.plot, state.view, state.playhead, traces);
+  drawPlot(els.plot, state.view, state.playhead, traces, {
+    hoverT: state.hoverT,
+    cursorA: state.cursorA,
+    cursorB: state.cursorB,
+  });
+  drawGauges(els.gauges, state.summary ? readingsFrom(state.held) : null);
+  drawBus(els.bus, state.bus);
   const domain = summary
     ? { t0: summary.tStartUs, t1: summary.tEndUs }
     : { t0: 0, t1: 1 };
   const view = summary ? windowFor(state.playhead, state.span, summary) : state.view;
   const marks: TimelineMark[] = [
-    ...(summary?.events.map((event) => ({ t: event.tUs, kind: "event" as const })) ?? []),
+    ...(summary?.events.map((event) => ({
+      t: event.tUs,
+      kind: "event" as const,
+      severity: severityOf(event.label),
+    })) ?? []),
     ...state.bookmarks.map((mark) => ({ t: mark.tUs, kind: "mark" as const })),
+    ...state.notes.map((note) => ({ t: note.tUs, kind: "mark" as const })),
   ];
   drawTimeline(els.timeline, domain, view, state.playhead, marks, state.overview);
+  placeCrosshair(traces);
   renderTransport();
   renderLegend();
+}
+
+function traceNames(): string[] {
+  const names = [...state.plotted];
+  if (!state.compareOn) return names;
+  for (const name of state.plotted) {
+    if (state.series.some((series) => series.name === `${name} · B`)) names.push(`${name} · B`);
+  }
+  return names;
+}
+
+function placeCrosshair(traces: Trace[]): void {
+  if (state.hoverT == null || !state.summary) {
+    els.crosshair.hidden = true;
+    return;
+  }
+  els.crosshair.hidden = false;
+  const stage = els.plot.parentElement?.getBoundingClientRect();
+  if (!stage) return;
+  let left = state.hoverX - stage.left + 14;
+  if (left > stage.width - 200) left = Math.max(8, state.hoverX - stage.left - 200);
+  els.crosshair.style.left = `${left}px`;
+  els.crosshair.style.top = "18px";
+  els.crossTime.textContent = formatUs(state.hoverT);
+  const lines = traces.map((trace) => {
+    const signal = state.summary?.signals.find((item) => item.name === trace.name.replace(/ · B$/, ""));
+    return formatHover(trace.name, heldValue(trace.points, state.hoverT ?? 0), signal?.unit ?? "");
+  });
+  els.crossVals.textContent = lines.join("\n");
 }
 
 function scrubTo(t: number): void {
@@ -443,15 +641,26 @@ async function refresh(): Promise<void> {
   const width = els.plot.getBoundingClientRect().width || 800;
   const maxPoints = Math.max(200, Math.min(4000, Math.round(width * 2)));
   try {
-    const [series, frame] = await Promise.all([
+    const bus = oneSecond(state.playhead, summary);
+    const [series, frame, held, load] = await Promise.all([
       state.plotted.length
-        ? api.query({ t0Us: view.t0, t1Us: view.t1, signals: state.plotted, maxPoints })
+        ? api.query({
+            t0Us: view.t0,
+            t1Us: view.t1,
+            signals: state.plotted,
+            maxPoints,
+            includeCompare: state.compareOn,
+          })
         : Promise.resolve([] as Series[]),
       api.frameAt(state.playhead),
+      api.valuesAt(state.playhead),
+      api.busLoad(bus.t0, bus.t1),
     ]);
     if (token !== queryToken) return;
     state.series = series;
     state.frame = frame;
+    state.held = held;
+    state.bus = load;
     state.view = view;
     clearError();
     draw();
@@ -491,6 +700,36 @@ async function refreshOverview(): Promise<void> {
   }
 }
 
+function oneSecond(playhead: number, summary: Summary): View {
+  const half = 500_000;
+  let t0 = playhead - half;
+  let t1 = playhead + half;
+  if (t0 < summary.tStartUs) {
+    t0 = summary.tStartUs;
+    t1 = Math.min(summary.tEndUs, t0 + 1_000_000);
+  }
+  if (t1 > summary.tEndUs) {
+    t1 = summary.tEndUs;
+    t0 = Math.max(summary.tStartUs, t1 - 1_000_000);
+  }
+  return { t0, t1 };
+}
+
+function resetDeck(): void {
+  state.math = [];
+  state.triggers = [];
+  state.notes = [];
+  state.cursorA = null;
+  state.cursorB = null;
+  state.cursorText = "";
+  state.compareOn = false;
+  state.comparePath = null;
+  state.compareOffsetUs = 0;
+  state.held = [];
+  state.bus = null;
+  els.compareOffset.value = "0";
+}
+
 function adoptSummary(summary: Summary, mode: "fresh" | "keep"): void {
   state.summary = summary;
   if (mode === "fresh") {
@@ -503,6 +742,7 @@ function adoptSummary(summary: Summary, mode: "fresh" | "keep"): void {
     state.dirty = false;
     state.overview = null;
     state.overviewName = null;
+    resetDeck();
   } else {
     state.plotted = state.plotted.filter((name) => summary.signals.some((signal) => signal.name === name));
     if (state.plotted.length === 0) state.plotted = defaultPlotted(summary);
@@ -533,6 +773,16 @@ function applyProject(opened: ProjectOpen, path: string | null): void {
   state.selectedMark = null;
   state.overview = null;
   state.overviewName = null;
+  state.math = opened.project.math ?? [];
+  state.triggers = opened.project.triggers ?? [];
+  state.notes = opened.project.notes ?? [];
+  state.cursorA = opened.project.cursorAUs ?? null;
+  state.cursorB = opened.project.cursorBUs ?? null;
+  state.comparePath = opened.project.comparePath ?? null;
+  state.compareOffsetUs = opened.project.compareOffsetUs ?? 0;
+  state.compareOn = Boolean(state.comparePath) && !opened.warnings.some((warning) => warning.startsWith("Compare"));
+  els.compareOffset.value = String(state.compareOffsetUs / 1000);
+  void refreshCursors();
   if (opened.warnings.length) setError(opened.warnings.join(" "));
   else clearError();
   renderChrome();
@@ -552,6 +802,13 @@ function currentProject(): ProjectFile {
       spanUs: Math.round(state.span),
       plotted: [...state.plotted],
     },
+    math: state.math,
+    triggers: state.triggers,
+    notes: state.notes,
+    cursorAUs: state.cursorA,
+    cursorBUs: state.cursorB,
+    comparePath: state.comparePath,
+    compareOffsetUs: state.compareOffsetUs,
   };
 }
 
@@ -566,11 +823,15 @@ async function openLog(): Promise<void> {
     els.fileLog.click();
     return;
   }
-  const path = await pick([{ name: "Logs", extensions: ["slog", "slbin", "csv", "txt", "log"] }]);
+  const path = await pick([
+    { name: "Logs", extensions: ["slog", "slbin", "csv", "txt", "log", "asc", "blf"] },
+  ]);
   if (!path) return;
-  await withBusy(`Indexing ${basename(path)}`, async () => {
-    adoptSummary(await api.openPath(path), "fresh");
-  });
+  try {
+    adoptSummary(await withIndex(`Indexing ${basename(path)}`, () => api.beginOpen(path)), "fresh");
+  } catch (err) {
+    setError(errText(err));
+  }
 }
 
 async function openMap(): Promise<void> {
@@ -578,13 +839,35 @@ async function openMap(): Promise<void> {
     els.fileMap.click();
     return;
   }
-  const path = await pick([{ name: "Signal map", extensions: ["json"] }]);
+  const path = await pick([{ name: "Signal map", extensions: ["dbc", "json"] }]);
   if (!path) return;
-  await withBusy(`Decoding with ${basename(path)}`, async () => {
-    adoptSummary(await api.openMapPath(path), "keep");
+  try {
+    adoptSummary(await withIndex(`Decoding ${basename(path)}`, () => api.beginMap(path)), "keep");
     state.dirty = true;
     renderChrome();
-  });
+  } catch (err) {
+    setError(errText(err));
+  }
+}
+
+async function addMap(): Promise<void> {
+  if (!api.inTauri()) {
+    els.fileMap.dataset.mode = "add";
+    els.fileMap.click();
+    return;
+  }
+  const path = await pick([{ name: "Signal map", extensions: ["dbc", "json"] }]);
+  if (!path) return;
+  try {
+    adoptSummary(
+      await withIndex(`Adding ${basename(path)}`, () => api.beginAddMap(path, mapChannel())),
+      "keep",
+    );
+    state.dirty = true;
+    renderChrome();
+  } catch (err) {
+    setError(errText(err));
+  }
 }
 
 async function openProject(): Promise<void> {
@@ -623,8 +906,8 @@ async function saveProject(asNew: boolean): Promise<void> {
   });
 }
 
-function download(name: string, text: string): void {
-  const blob = new Blob([text], { type: "application/json" });
+function download(name: string, text: string, type = "application/json"): void {
+  const blob = new Blob([text], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -716,12 +999,28 @@ function removeBookmark(id: string): void {
   draw();
 }
 
-function zoom(factor: number): void {
+function zoom(factor: number, anchor: number | null = null): void {
   if (!state.summary) return;
-  state.span = clamp(state.span * factor, MIN_SPAN, duration(state.summary));
+  const summary = state.summary;
+  const old = windowFor(state.playhead, state.span, summary);
+  const nextSpan = clamp(state.span * factor, MIN_SPAN, duration(summary));
+  if (anchor != null && nextSpan < duration(summary) - 0.5) {
+    const u = (anchor - old.t0) / Math.max(1, old.t1 - old.t0);
+    state.playhead = clamp(anchor + nextSpan * (0.5 - u), summary.tStartUs, summary.tEndUs);
+  }
+  state.span = nextSpan;
   state.dirty = true;
   draw();
   scheduleRefresh();
+}
+
+function exportWindow(): { t0: number; t1: number } | null {
+  if (!state.summary) return null;
+  if (state.cursorA != null && state.cursorB != null) {
+    return { t0: Math.min(state.cursorA, state.cursorB), t1: Math.max(state.cursorA, state.cursorB) };
+  }
+  const view = windowFor(state.playhead, state.span, state.summary);
+  return { t0: view.t0, t1: view.t1 };
 }
 
 function togglePlay(): void {
@@ -812,6 +1111,22 @@ function onKey(event: KeyboardEvent): void {
     addBookmark();
     return;
   }
+  if (event.key === "n" || event.key === "N") {
+    event.preventDefault();
+    showTab("notes");
+    els.noteBody.focus();
+    return;
+  }
+  if (event.key === "1") {
+    event.preventDefault();
+    dropCursor("a");
+    return;
+  }
+  if (event.key === "2") {
+    event.preventDefault();
+    dropCursor("b");
+    return;
+  }
   if ((event.key === "Delete" || event.key === "Backspace") && state.selectedMark) {
     event.preventDefault();
     removeBookmark(state.selectedMark);
@@ -837,17 +1152,34 @@ function onWheel(event: WheelEvent): void {
   event.preventDefault();
   if (event.shiftKey) {
     scrubTo(state.playhead + (event.deltaY / 400) * state.span);
-  } else {
-    const factor = Math.exp(event.deltaY * 0.0012);
-    zoom(factor);
+    return;
   }
+  const factor = Math.exp(event.deltaY * 0.0012);
+  const target = event.currentTarget;
+  let anchor: number | null = null;
+  if (target === els.plot) {
+    anchor = timeOnPlot(els.plot, event.clientX, windowFor(state.playhead, state.span, state.summary));
+  } else if (target === els.timeline) {
+    anchor = timeAt(els.timeline, event.clientX, { t0: state.summary.tStartUs, t1: state.summary.tEndUs });
+  }
+  zoom(factor, anchor);
 }
 
-async function ingestFile(file: File): Promise<void> {
+async function ingestFile(file: File, mode: "replace" | "add" = "replace"): Promise<void> {
   const name = file.name.toLowerCase();
   await withBusy(`Indexing ${file.name}`, async () => {
     if (name.endsWith(".loom")) {
       applyProject(await api.openProjectJson(await file.text()), null);
+      return;
+    }
+    if (name.endsWith(".dbc") || (name.endsWith(".json") && mode === "add")) {
+      const text = await file.text();
+      const summary = mode === "add"
+        ? await api.addMapJson(text, mapChannel())
+        : await api.openMapJson(text);
+      adoptSummary(summary, "keep");
+      state.dirty = true;
+      renderChrome();
       return;
     }
     if (name.endsWith(".json")) {
@@ -867,18 +1199,349 @@ async function ingestFile(file: File): Promise<void> {
 
 async function ingestPath(path: string): Promise<void> {
   const lower = path.toLowerCase();
-  await withBusy(`Indexing ${basename(path)}`, async () => {
-    if (lower.endsWith(".loom")) {
+  if (lower.endsWith(".loom")) {
+    await withBusy(`Opening ${basename(path)}`, async () => {
       applyProject(await api.openProjectPath(path), path);
-      return;
-    }
-    if (lower.endsWith(".json")) {
-      adoptSummary(await api.openMapPath(path), "keep");
+    });
+    return;
+  }
+  try {
+    if (lower.endsWith(".dbc") || lower.endsWith(".json")) {
+      adoptSummary(await withIndex(`Decoding ${basename(path)}`, () => api.beginMap(path)), "keep");
       state.dirty = true;
       renderChrome();
       return;
     }
-    adoptSummary(await api.openPath(path), "fresh");
+    adoptSummary(await withIndex(`Indexing ${basename(path)}`, () => api.beginOpen(path)), "fresh");
+  } catch (err) {
+    setError(errText(err));
+  }
+}
+
+function showTab(tab: RailTab): void {
+  state.tab = tab;
+  for (const name of ["marks", "notes", "math", "alerts", "drive"] as const) {
+    const panel = document.getElementById(`panel-${name}`);
+    if (panel) panel.hidden = name !== tab;
+    document.querySelector(`[data-tab="${name}"]`)?.classList.toggle("is-on", name === tab);
+  }
+}
+
+function renderNotes(): void {
+  els.noteList.replaceChildren();
+  if (state.notes.length === 0) {
+    const note = document.createElement("p");
+    note.className = "empty-note";
+    note.textContent = "N focuses a note at the playhead";
+    els.noteList.append(note);
+    return;
+  }
+  for (const note of state.notes) {
+    const row = document.createElement("div");
+    row.className = "mark-row-wrap";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mark-row";
+    const time = document.createElement("span");
+    time.className = "mark-t";
+    time.textContent = formatUs(note.tUs);
+    const label = document.createElement("span");
+    label.className = "mark-l";
+    label.textContent = note.body;
+    button.append(time, label);
+    button.addEventListener("click", () => scrubTo(note.tUs));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "mark-x";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", "Remove note");
+    remove.addEventListener("click", () => {
+      state.notes = state.notes.filter((item) => item.id !== note.id);
+      state.dirty = true;
+      renderNotes();
+      draw();
+    });
+    const line = document.createElement("div");
+    line.style.display = "flex";
+    button.style.flex = "1";
+    line.append(button, remove);
+    row.append(line);
+    els.noteList.append(row);
+  }
+}
+
+function renderMath(): void {
+  els.mathList.replaceChildren();
+  if (state.math.length === 0) {
+    const note = document.createElement("p");
+    note.className = "empty-note";
+    note.textContent = "No derived channels";
+    els.mathList.append(note);
+    return;
+  }
+  for (const channel of state.math) {
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mark-row";
+    button.style.flex = "1";
+    const label = document.createElement("span");
+    label.className = "mark-l";
+    label.textContent = channel.unit ? `${channel.name} = ${channel.expr} ${channel.unit}` : `${channel.name} = ${channel.expr}`;
+    button.append(label);
+    button.addEventListener("click", () => {
+      if (!state.plotted.includes(channel.name)) state.plotted = [...state.plotted, channel.name];
+      state.dirty = true;
+      renderChrome();
+      void refresh();
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "mark-x";
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      state.math = state.math.filter((item) => item.name !== channel.name);
+      state.plotted = state.plotted.filter((name) => name !== channel.name);
+      void syncMath();
+    });
+    row.append(button, remove);
+    els.mathList.append(row);
+  }
+}
+
+function renderTriggers(): void {
+  els.trigList.replaceChildren();
+  if (state.triggers.length === 0) {
+    const note = document.createElement("p");
+    note.className = "empty-note";
+    note.textContent = "Thresholds land on the event lane";
+    els.trigList.append(note);
+    return;
+  }
+  for (const trigger of state.triggers) {
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    const label = document.createElement("span");
+    label.className = "mark-l";
+    label.style.flex = "1";
+    label.style.padding = "3px 4px";
+    label.textContent = `${trigger.signal} ${trigger.op} ${trigger.value}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "mark-x";
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      state.triggers = state.triggers.filter((item) => item.id !== trigger.id);
+      void syncTriggers();
+    });
+    row.append(label, remove);
+    els.trigList.append(row);
+  }
+}
+
+function renderCompare(): void {
+  if (!state.compareOn) {
+    els.compareLabel.textContent = "No second drive";
+    return;
+  }
+  const name = state.comparePath ? basename(state.comparePath) : "uploaded log";
+  els.compareLabel.textContent = `${name} · offset ${state.compareOffsetUs / 1000} ms`;
+}
+
+function addNote(): void {
+  if (!state.summary) return;
+  const body = els.noteBody.value.trim();
+  if (!body) return;
+  const note: Note = {
+    id: `n-${Date.now().toString(36)}`,
+    tUs: Math.round(state.playhead),
+    body,
+  };
+  state.notes = [...state.notes, note].sort((a, b) => a.tUs - b.tUs);
+  state.dirty = true;
+  els.noteBody.value = "";
+  renderNotes();
+  draw();
+}
+
+async function addMath(): Promise<void> {
+  const name = (document.getElementById("math-name") as HTMLInputElement).value.trim();
+  const expr = (document.getElementById("math-expr") as HTMLInputElement).value.trim();
+  const unit = (document.getElementById("math-unit") as HTMLInputElement).value.trim();
+  if (!name || !expr) {
+    setError("A math channel needs a name and an expression.");
+    return;
+  }
+  const next = [...state.math.filter((channel) => channel.name !== name), { name, unit, expr }];
+  await withBusy("Compiling math", async () => {
+    const summary = await api.setMath(next);
+    state.math = next;
+    if (!state.plotted.includes(name)) state.plotted = [...state.plotted, name];
+    adoptSummary(summary, "keep");
+    state.dirty = true;
+    renderChrome();
+    (document.getElementById("math-name") as HTMLInputElement).value = "";
+    (document.getElementById("math-expr") as HTMLInputElement).value = "";
+  });
+}
+
+async function syncMath(): Promise<void> {
+  await withBusy("Compiling math", async () => {
+    adoptSummary(await api.setMath(state.math), "keep");
+    state.dirty = true;
+    renderChrome();
+  });
+}
+
+async function addTrigger(): Promise<void> {
+  const signal = (document.getElementById("trig-signal") as HTMLInputElement).value.trim();
+  const op = (document.getElementById("trig-op") as HTMLSelectElement).value;
+  const value = Number((document.getElementById("trig-value") as HTMLInputElement).value);
+  if (!signal || !Number.isFinite(value)) {
+    setError("A trigger needs a signal and a finite level.");
+    return;
+  }
+  state.triggers = [
+    ...state.triggers,
+    { id: `t-${Date.now().toString(36)}`, signal, op, value },
+  ];
+  await syncTriggers();
+}
+
+async function syncTriggers(): Promise<void> {
+  await withBusy("Arming triggers", async () => {
+    adoptSummary(await api.setTriggers(state.triggers), "keep");
+    state.dirty = true;
+    renderChrome();
+  });
+}
+
+async function openCompare(): Promise<void> {
+  if (!api.inTauri()) {
+    els.fileCompare.click();
+    return;
+  }
+  const path = await pick([
+    { name: "Logs", extensions: ["slog", "slbin", "csv", "txt", "log", "asc", "blf"] },
+  ]);
+  if (!path) return;
+  await withBusy(`Comparing ${basename(path)}`, async () => {
+    const summary = await api.openComparePath(path);
+    state.compareOn = true;
+    state.comparePath = path;
+    adoptSummary(summary, "keep");
+    state.dirty = true;
+    renderChrome();
+  });
+}
+
+async function ingestCompareFile(file: File): Promise<void> {
+  await withBusy(`Comparing ${file.name}`, async () => {
+    const summary = await api.openCompareBytes(await file.arrayBuffer());
+    state.compareOn = true;
+    state.comparePath = file.name;
+    adoptSummary(summary, "keep");
+    state.dirty = true;
+    renderChrome();
+  });
+}
+
+async function clearCompareDrive(): Promise<void> {
+  await withBusy("Clearing compare", async () => {
+    const summary = await api.clearCompare();
+    state.compareOn = false;
+    state.comparePath = null;
+    state.compareOffsetUs = 0;
+    els.compareOffset.value = "0";
+    adoptSummary(summary, "keep");
+    state.dirty = true;
+    renderChrome();
+  });
+}
+
+async function applyOffset(): Promise<void> {
+  const ms = Number(els.compareOffset.value);
+  if (!Number.isFinite(ms)) return;
+  state.compareOffsetUs = Math.round(ms * 1000);
+  if (!state.compareOn) {
+    state.dirty = true;
+    renderCompare();
+    return;
+  }
+  await withBusy("Aligning drives", async () => {
+    adoptSummary(await api.setCompareOffset(state.compareOffsetUs), "keep");
+    state.dirty = true;
+    renderChrome();
+  });
+}
+
+function dropCursor(which: "a" | "b"): void {
+  if (!state.summary) return;
+  const t = Math.round(state.playhead);
+  if (which === "a") state.cursorA = t;
+  else state.cursorB = t;
+  state.dirty = true;
+  void refreshCursors();
+  draw();
+}
+
+async function refreshCursors(): Promise<void> {
+  const a = state.cursorA;
+  const b = state.cursorB;
+  if (a == null && b == null) {
+    state.cursorText = "";
+    renderTransport();
+    return;
+  }
+  if (a == null || b == null || state.plotted.length === 0) {
+    const mark = a ?? b ?? 0;
+    state.cursorText = `${a == null ? "B" : "A"} ${formatUs(mark)}`;
+    renderTransport();
+    draw();
+    return;
+  }
+  const t0 = Math.min(a, b);
+  const t1 = Math.max(a, b);
+  const name = state.plotted[0];
+  try {
+    const stats = await api.signalStats(name, t0, t1);
+    state.cursorText = `Δt ${formatSpan(t1 - t0)} · ${name} Δ ${formatValue(stats.last - stats.first)} · min ${formatValue(stats.min)} max ${formatValue(stats.max)} avg ${formatValue(stats.avg)}`;
+    clearError();
+  } catch (err) {
+    state.cursorText = errText(err);
+  }
+  renderTransport();
+  draw();
+}
+
+async function exportRange(kind: "csv" | "slog"): Promise<void> {
+  const window = exportWindow();
+  if (!window || !state.summary) {
+    setError("Open a log before exporting.");
+    return;
+  }
+  await withBusy(kind === "csv" ? "Exporting CSV" : "Trimming log", async () => {
+    if (kind === "csv") {
+      const names = state.plotted.length ? state.plotted : state.summary!.signals.slice(0, 1).map((signal) => signal.name);
+      const text = await api.exportCsv(names, window.t0, window.t1);
+      download(`signal-loom-${Math.round(window.t0)}-${Math.round(window.t1)}.csv`, text, "text/csv");
+    } else {
+      const text = await api.exportSlog(window.t0, window.t1);
+      download(`signal-loom-${Math.round(window.t0)}-${Math.round(window.t1)}.slog`, text, "text/plain");
+    }
+  });
+}
+
+async function captureBus(): Promise<void> {
+  if (!els.captureArm.checked) {
+    setError("Tick Listen only before a SocketCAN capture. The socket is read-only.");
+    return;
+  }
+  const iface = els.captureIface.value.trim();
+  const durationMs = Math.round(Number(els.captureMs.value));
+  await withBusy(`Listening on ${iface}`, async () => {
+    adoptSummary(await api.captureCan(iface, durationMs), "fresh");
   });
 }
 
@@ -887,6 +1550,7 @@ function bind(): void {
   document.getElementById("btn-sample")?.addEventListener("click", () => void loadSample());
   document.getElementById("btn-open")?.addEventListener("click", () => void openLog());
   document.getElementById("btn-map")?.addEventListener("click", () => void openMap());
+  document.getElementById("btn-add-map")?.addEventListener("click", () => void addMap());
   document.getElementById("btn-project")?.addEventListener("click", () => void openProject());
   els.save.addEventListener("click", () => void saveProject(false));
   document.getElementById("btn-help")?.addEventListener("click", () => {
@@ -926,13 +1590,75 @@ function bind(): void {
   });
   els.fileMap.addEventListener("change", () => {
     const file = els.fileMap.files?.[0];
+    const mode = els.fileMap.dataset.mode === "add" ? "add" : "replace";
+    els.fileMap.dataset.mode = "replace";
     els.fileMap.value = "";
-    if (file) void ingestFile(file);
+    if (file) void ingestFile(file, mode);
   });
   els.fileProject.addEventListener("change", () => {
     const file = els.fileProject.files?.[0];
     els.fileProject.value = "";
     if (file) void ingestFile(file);
+  });
+  els.fileCompare.addEventListener("change", () => {
+    const file = els.fileCompare.files?.[0];
+    els.fileCompare.value = "";
+    if (file) void ingestCompareFile(file);
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
+    button.addEventListener("click", () => showTab(button.dataset.tab as RailTab));
+  });
+  document.getElementById("note-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    addNote();
+  });
+  document.getElementById("math-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void addMath();
+  });
+  document.getElementById("trig-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void addTrigger();
+  });
+  document.getElementById("btn-compare")?.addEventListener("click", () => void openCompare());
+  document.getElementById("btn-compare-clear")?.addEventListener("click", () => void clearCompareDrive());
+  els.compareOffset.addEventListener("change", () => void applyOffset());
+  document.getElementById("cursor-a")?.addEventListener("click", () => dropCursor("a"));
+  document.getElementById("cursor-b")?.addEventListener("click", () => dropCursor("b"));
+  document.getElementById("cursor-clear")?.addEventListener("click", () => {
+    state.cursorA = null;
+    state.cursorB = null;
+    state.cursorText = "";
+    state.dirty = true;
+    draw();
+  });
+  document.getElementById("export-csv")?.addEventListener("click", () => void exportRange("csv"));
+  document.getElementById("export-slog")?.addEventListener("click", () => void exportRange("slog"));
+  els.captureArm.addEventListener("change", () => {
+    els.captureBtn.disabled = !els.captureArm.checked;
+  });
+  els.captureBtn.addEventListener("click", () => void captureBus());
+
+  let panX = 0;
+  let panning = false;
+  els.plot.addEventListener("pointermove", (event) => {
+    if (!state.summary) return;
+    if (panning) {
+      const rect = els.plot.getBoundingClientRect();
+      const dx = event.clientX - panX;
+      panX = event.clientX;
+      const view = windowFor(state.playhead, state.span, state.summary);
+      scrubTo(state.playhead + (-dx / Math.max(1, rect.width)) * (view.t1 - view.t0));
+      return;
+    }
+    const view = windowFor(state.playhead, state.span, state.summary);
+    state.hoverT = timeOnPlot(els.plot, event.clientX, view);
+    state.hoverX = event.clientX;
+    draw();
+  });
+  els.plot.addEventListener("pointerleave", () => {
+    state.hoverT = null;
+    draw();
   });
 
   const scrubTimeline = (event: PointerEvent) => {
@@ -952,10 +1678,17 @@ function bind(): void {
   });
   els.plot.addEventListener("pointerdown", (event) => {
     if (!state.summary) return;
-    const rect = els.plot.getBoundingClientRect();
-    const view = windowFor(state.playhead, state.span, state.summary);
-    const u = (event.clientX - rect.left) / Math.max(1, rect.width);
-    scrubTo(view.t0 + clamp(u, 0, 1) * (view.t1 - view.t0));
+    if (event.button === 1 || event.altKey) {
+      panning = true;
+      panX = event.clientX;
+      els.plot.setPointerCapture(event.pointerId);
+      return;
+    }
+    if (event.button !== 0) return;
+    scrubTo(timeOnPlot(els.plot, event.clientX, windowFor(state.playhead, state.span, state.summary)));
+  });
+  els.plot.addEventListener("pointerup", () => {
+    panning = false;
   });
   els.plot.addEventListener("wheel", onWheel, { passive: false });
   els.timeline.addEventListener("wheel", onWheel, { passive: false });

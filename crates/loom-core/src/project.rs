@@ -15,6 +15,45 @@ pub struct ProjectFile {
     #[serde(default)]
     pub bookmarks: Vec<Bookmark>,
     pub view: ViewState,
+    #[serde(default)]
+    pub math: Vec<MathChannel>,
+    #[serde(default)]
+    pub triggers: Vec<ThresholdTrigger>,
+    #[serde(default)]
+    pub notes: Vec<Note>,
+    #[serde(default)]
+    pub cursor_a_us: Option<u64>,
+    #[serde(default)]
+    pub cursor_b_us: Option<u64>,
+    #[serde(default)]
+    pub compare_path: Option<String>,
+    #[serde(default)]
+    pub compare_offset_us: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MathChannel {
+    pub name: String,
+    pub unit: String,
+    pub expr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThresholdTrigger {
+    pub id: String,
+    pub signal: String,
+    pub op: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Note {
+    pub id: String,
+    pub t_us: u64,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +97,16 @@ impl ProjectFile {
                 mark.id = format!("mark-{}", mark.t_us);
             }
         }
+        for channel in &project.math {
+            if channel.name.trim().is_empty() {
+                return Err(Error::msg("a math channel is missing a name"));
+            }
+            crate::analyze::compile(&channel.expr)?;
+        }
+        for note in &mut project.notes {
+            note.body = note.body.trim().chars().take(2_000).collect();
+        }
+        project.notes.retain(|note| !note.body.is_empty());
         Ok(project)
     }
 

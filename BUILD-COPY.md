@@ -1,3 +1,5 @@
-# Signal Loom (build copy)
+# Signal Loom
 
-The source of truth is the Origin repo marius-cristian/signal-loom. This GitHub copy exists to run the release workflow and host draft releases.
+This repository (`cristy-the-one/signal-loom`) is the main copy of Signal Loom. The Origin repository `marius-cristian/signal-loom` is the archived original and is left unchanged.
+
+GitHub Actions runs CI and the release workflow. The release workflow builds unsigned installers and attaches them to a draft GitHub Release, including the Windows NSIS `x64-setup.exe`.

@@ -28,13 +28,18 @@
           <span class="runtime" id="runtime">Desktop</span>
           <button type="button" id="btn-sample" title="Load the built-in cluster drive">Sample</button>
           <button type="button" id="btn-open" title="Open a log (Ctrl/Cmd+O)">Open</button>
-          <button type="button" id="btn-map" title="Open a JSON signal map">Map</button>
+          <button type="button" id="btn-map" title="Replace the signal map">Map</button>
+          <label class="ch-field" title="Channel for an added DBC. 0 applies on every channel.">Ch
+            <input id="dbc-channel" type="number" min="0" max="255" value="0" />
+          </label>
+          <button type="button" id="btn-add-map" title="Add another DBC on this channel">Add</button>
           <button type="button" id="btn-project" title="Open a .loom project (Ctrl/Cmd+Shift+O)">Project</button>
           <button type="button" id="btn-save" title="Save project (Ctrl/Cmd+S)">Save</button>
           <button type="button" id="btn-help" class="icon-btn" title="Keyboard shortcuts">?</button>
         </div>
       </header>
       <p id="error" class="error" role="alert" hidden></p>
+      <p id="warn" class="warn" hidden></p>
       <div class="workspace">
         <aside class="rail">
           <section class="rail-block signals-block">
@@ -49,27 +54,107 @@
             <div id="sig-list" class="sig-list" role="list"></div>
           </section>
           <section class="rail-block marks-block">
-            <header class="rail-head">
-              <h2>Bookmarks</h2>
-            </header>
-            <form id="mark-form" class="mark-form">
-              <input id="mark-label" type="text" maxlength="80" placeholder="Label at playhead" />
-              <button type="submit">Add</button>
-            </form>
-            <div id="mark-list" class="mark-list"></div>
-            <header class="rail-head subhead">
-              <h2>Log events</h2>
-            </header>
-            <div id="event-list" class="mark-list"></div>
+            <div class="tabs" role="tablist">
+              <button type="button" data-tab="marks" class="is-on">Marks</button>
+              <button type="button" data-tab="notes">Notes</button>
+              <button type="button" data-tab="math">Math</button>
+              <button type="button" data-tab="alerts">Alerts</button>
+              <button type="button" data-tab="drive">Drive</button>
+            </div>
+            <div id="panel-marks">
+              <form id="mark-form" class="mark-form">
+                <input id="mark-label" type="text" maxlength="80" placeholder="Bookmark at playhead" />
+                <button type="submit">Add</button>
+              </form>
+              <div id="mark-list" class="mark-list"></div>
+              <header class="rail-head subhead">
+                <h2>Events</h2>
+              </header>
+              <div id="event-list" class="mark-list"></div>
+            </div>
+            <div id="panel-notes" hidden>
+              <form id="note-form" class="mark-form">
+                <input id="note-body" type="text" maxlength="2000" placeholder="Note at playhead" />
+                <button type="submit">Add</button>
+              </form>
+              <div id="note-list" class="mark-list"></div>
+            </div>
+            <div id="panel-math" hidden>
+              <form id="math-form" class="stack-form">
+                <input id="math-name" type="text" maxlength="64" placeholder="Name" autocomplete="off" />
+                <input id="math-expr" type="text" placeholder="WheelFL - WheelFR" autocomplete="off" />
+                <input id="math-unit" type="text" maxlength="16" placeholder="Unit" autocomplete="off" />
+                <button type="submit">Add channel</button>
+              </form>
+              <p class="hint">abs() and lp(signal, alpha). Example: lp(EngineRPM, 0.2)</p>
+              <div id="math-list" class="mark-list"></div>
+            </div>
+            <div id="panel-alerts" hidden>
+              <form id="trig-form" class="stack-form">
+                <input id="trig-signal" type="text" placeholder="Signal" autocomplete="off" />
+                <div class="inline">
+                  <select id="trig-op" aria-label="Comparison">
+                    <option value=">">&gt;</option>
+                    <option value="<">&lt;</option>
+                    <option value=">=">&gt;=</option>
+                    <option value="<=">&lt;=</option>
+                  </select>
+                  <input id="trig-value" type="number" step="0.1" value="0" />
+                  <button type="submit">Arm</button>
+                </div>
+              </form>
+              <div id="trig-list" class="mark-list"></div>
+            </div>
+            <div id="panel-drive" hidden>
+              <div class="stack-form">
+                <div class="inline">
+                  <button type="button" id="btn-compare">Compare</button>
+                  <button type="button" id="btn-compare-clear">Clear</button>
+                </div>
+                <label class="fine">Offset ms
+                  <input id="compare-offset" type="number" step="1" value="0" />
+                </label>
+                <p id="compare-label" class="hint">No second drive</p>
+                <div class="inline">
+                  <button type="button" id="cursor-a" title="Cursor A at playhead (1)">A</button>
+                  <button type="button" id="cursor-b" title="Cursor B at playhead (2)">B</button>
+                  <button type="button" id="cursor-clear">Clear</button>
+                </div>
+                <div class="inline">
+                  <button type="button" id="export-csv">CSV</button>
+                  <button type="button" id="export-slog">Trim log</button>
+                </div>
+                <p class="hint">Cursors measure Δt, Δvalue, min, max, and average. Export uses the cursor span, or the visible window.</p>
+                <label class="opt-in">
+                  <input id="capture-arm" type="checkbox" />
+                  Listen only. Never transmits.
+                </label>
+                <div class="inline">
+                  <input id="capture-iface" type="text" value="can0" maxlength="15" spellcheck="false" aria-label="SocketCAN interface" />
+                  <input id="capture-ms" type="number" min="100" max="30000" step="100" value="2000" aria-label="Capture length in milliseconds" />
+                  <button type="button" id="btn-capture" disabled>Capture</button>
+                </div>
+              </div>
+            </div>
           </section>
         </aside>
         <main class="viewport" id="viewport">
           <div class="viewport-body" id="viewport-body">
+            <div class="cluster-strip">
+              <canvas id="gauges" aria-label="Cluster gauges"></canvas>
+            </div>
+            <div class="bus-strip">
+              <canvas id="bus" aria-label="Bus load and message rate"></canvas>
+            </div>
             <div class="stage" id="stage">
               <canvas id="plot" aria-label="Signal overlay"></canvas>
+              <div id="crosshair" class="crosshair" hidden>
+                <div id="cross-time"></div>
+                <div id="cross-vals"></div>
+              </div>
               <div id="legend" class="legend"></div>
               <p id="scale-note" class="scale-note" hidden>Each trace is scaled across the whole log</p>
-              <p id="stage-msg" class="stage-msg">No log on the deck. Load the cluster sample or open a CAN log.</p>
+              <p id="stage-msg" class="stage-msg">No log on the deck. Load the synthetic hypercar sample or open a CAN log.</p>
             </div>
             <div class="timeline-wrap">
               <canvas id="timeline" aria-label="Recording timeline"></canvas>
@@ -83,6 +168,7 @@
                 <span class="readout dim" id="frame-readout"></span>
                 <span class="spacer"></span>
                 <span class="readout dim" id="span-readout">span —</span>
+                <span class="readout dim cursor-read" id="cursor-read"></span>
                 <button type="button" id="zoom-out" title="Zoom out ([)">−</button>
                 <button type="button" id="zoom-in" title="Zoom in (])">+</button>
                 <button type="button" id="zoom-all" title="Show the whole log">All</button>
@@ -94,7 +180,9 @@
             <div class="veil-card">
               <div class="veil-kicker">Indexing</div>
               <p id="veil-label">Reading log</p>
-              <div class="veil-bar" aria-hidden="true"></div>
+              <p id="veil-detail" class="veil-detail"></p>
+              <div class="veil-bar" aria-hidden="true"><div id="veil-fill"></div></div>
+              <button type="button" id="veil-cancel">Cancel</button>
             </div>
           </div>
           <div id="drop" class="drop" hidden>Drop a log, signal map, or .loom project</div>
@@ -117,16 +205,19 @@
           <li><span>Event / bookmark step</span><kbd>Shift</kbd><kbd>←</kbd><kbd>→</kbd></li>
           <li><span>Play / pause</span><kbd>Space</kbd></li>
           <li><span>Bookmark playhead</span><kbd>B</kbd></li>
-          <li><span>Zoom</span><kbd>[</kbd><kbd>]</kbd><span class="hint-note">wheel</span></li>
-          <li><span>Pan</span><kbd>Shift</kbd><span class="hint-note">wheel</span></li>
+          <li><span>Note</span><kbd>N</kbd></li>
+          <li><span>Cursors A / B</span><kbd>1</kbd><kbd>2</kbd></li>
+          <li><span>Zoom</span><kbd>[</kbd><kbd>]</kbd><span class="hint-note">wheel toward cursor</span></li>
+          <li><span>Pan</span><kbd>Alt</kbd><span class="hint-note">drag, or shift+wheel</span></li>
           <li><span>Filter signals</span><kbd>/</kbd></li>
           <li><span>Start / end</span><kbd>Home</kbd><kbd>End</kbd></li>
         </ul>
       </form>
     </dialog>
-    <input id="file-log" type="file" hidden accept=".slog,.slbin,.csv,.txt,.log" />
-    <input id="file-map" type="file" hidden accept=".json,application/json" />
+    <input id="file-log" type="file" hidden accept=".slog,.slbin,.csv,.txt,.log,.asc,.blf" />
+    <input id="file-map" type="file" hidden accept=".dbc,.json,application/json" />
     <input id="file-project" type="file" hidden accept=".loom,.json,application/json" />
+    <input id="file-compare" type="file" hidden accept=".slog,.slbin,.csv,.txt,.log,.asc,.blf" />
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

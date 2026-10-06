@@ -6,11 +6,63 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 const CHECKPOINT_EVERY: u64 = 256;
+const MAX_CHECKPOINTS: usize = 4_096;
 const MAX_EVENTS: usize = 5_000;
+const MAX_WARNINGS: usize = 32;
 const MAX_QUERY_POINTS: usize = 8_000;
+
+/// Shared with the UI while a path is indexed. The scan checks `cancel`
+/// every few dozen records and publishes how far the file has been read.
+#[derive(Debug, Default)]
+pub struct IndexControl {
+    cancel: AtomicBool,
+    bytes_done: AtomicU64,
+    bytes_total: AtomicU64,
+    frames: AtomicU64,
+    skipped: AtomicU64,
+}
+
+impl IndexControl {
+    pub fn reset(&self, bytes_total: u64) {
+        self.cancel.store(false, Ordering::Relaxed);
+        self.bytes_done.store(0, Ordering::Relaxed);
+        self.bytes_total.store(bytes_total, Ordering::Relaxed);
+        self.frames.store(0, Ordering::Relaxed);
+        self.skipped.store(0, Ordering::Relaxed);
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn set_total(&self, bytes_total: u64) {
+        self.bytes_total.store(bytes_total, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> (u64, u64, u64, u64) {
+        (
+            self.bytes_done.load(Ordering::Relaxed),
+            self.bytes_total.load(Ordering::Relaxed),
+            self.frames.load(Ordering::Relaxed),
+            self.skipped.load(Ordering::Relaxed),
+        )
+    }
+
+    fn observe(&self, bytes_done: u64, frames: u64, skipped: u64) -> Result<()> {
+        self.bytes_done.store(bytes_done, Ordering::Relaxed);
+        self.frames.store(frames, Ordering::Relaxed);
+        self.skipped.store(skipped, Ordering::Relaxed);
+        if self.cancel.load(Ordering::Relaxed) {
+            Err(Error::msg("indexing cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 #[derive(Clone)]
 enum Source {
@@ -51,8 +103,13 @@ struct SignalMeta {
     spec: Option<DecodeSpec>,
     min: Option<f64>,
     max: Option<f64>,
+    channel: u8,
+    mux_switch: bool,
+    mux_value: Option<u32>,
+    table: Vec<(i64, String)>,
 }
 
+#[derive(Clone)]
 struct Checkpoint {
     t_us: u64,
     offset: u64,
@@ -63,7 +120,10 @@ struct Checkpoint {
 /// nearest checkpoint and downsamples that window.
 pub struct IndexedLog {
     source: Source,
+    /// Format shown to the user. A BLF stays a BLF; containers are inflated one at a time.
     format: LogFormat,
+    /// Format the scanner reads on resume. Same as `format`.
+    body: LogFormat,
     checkpoints: Vec<Checkpoint>,
     snapshots: Vec<Vec<Option<f64>>>,
     frame_count: u64,
@@ -73,6 +133,8 @@ pub struct IndexedLog {
     t_end_us: u64,
     byte_len: u64,
     events: Vec<(u64, String)>,
+    skipped: u64,
+    warnings: Vec<String>,
     signals: Vec<SignalMeta>,
     name_index: HashMap<String, usize>,
     msg_index: HashMap<u32, Vec<usize>>,
@@ -102,6 +164,7 @@ pub struct HeldValue {
     pub name: String,
     pub unit: String,
     pub value: f64,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +173,7 @@ pub struct FrameHit {
     pub ordinal: u64,
     pub message_id: Option<u32>,
     pub message_name: String,
+    pub extended: bool,
     pub dlc: u8,
     pub data_hex: String,
 }
@@ -130,6 +194,8 @@ struct Built {
     t_start_us: u64,
     t_end_us: u64,
     events: Vec<(u64, String)>,
+    skipped: u64,
+    warnings: Vec<String>,
     signals: Vec<SignalMeta>,
     name_index: HashMap<String, usize>,
     msg_index: HashMap<u32, Vec<usize>>,
@@ -138,18 +204,26 @@ struct Built {
 
 impl IndexedLog {
     pub fn open_path(path: &Path, map: Option<&SignalMap>) -> Result<Self> {
+        Self::open_path_controlled(path, map, None)
+    }
+
+    pub fn open_path_controlled(
+        path: &Path,
+        map: Option<&SignalMap>,
+        control: Option<&IndexControl>,
+    ) -> Result<Self> {
         let format = sniff_path(path)?;
-        Self::build(Source::Path(path.to_path_buf()), format, map)
+        Self::build(Source::Path(path.to_path_buf()), format, map, control)
     }
 
     pub fn open_bytes(bytes: Vec<u8>, map: Option<&SignalMap>) -> Result<Self> {
         let format = sniff(&bytes)?;
-        Self::build(Source::Memory(Arc::new(bytes)), format, map)
+        Self::build(Source::Memory(Arc::new(bytes)), format, map, None)
     }
 
     pub fn open_shared(bytes: Arc<Vec<u8>>, map: Option<&SignalMap>) -> Result<Self> {
         let format = sniff(bytes.as_slice())?;
-        Self::build(Source::Memory(bytes), format, map)
+        Self::build(Source::Memory(bytes), format, map, None)
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -200,6 +274,14 @@ impl IndexedLog {
 
     pub fn events(&self) -> &[(u64, String)] {
         &self.events
+    }
+
+    pub fn skipped(&self) -> u64 {
+        self.skipped
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     pub fn signals(&self) -> impl Iterator<Item = SignalInfo> + '_ {
@@ -308,6 +390,13 @@ impl IndexedLog {
                     name: signal.name.clone(),
                     unit: signal.unit.clone(),
                     value,
+                    label: signal.table.iter().find_map(|(raw, text)| {
+                        if *raw == value.round() as i64 {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    }),
                 })
             })
             .collect())
@@ -359,13 +448,21 @@ impl IndexedLog {
         }
     }
 
-    fn build(source: Source, format: LogFormat, map: Option<&SignalMap>) -> Result<Self> {
+    fn build(
+        source: Source,
+        format: LogFormat,
+        map: Option<&SignalMap>,
+        control: Option<&IndexControl>,
+    ) -> Result<Self> {
         let byte_len = source.byte_len()?;
+        if let Some(control) = control {
+            control.set_total(byte_len);
+        }
         let scan_source = source.clone();
         let built = if format == LogFormat::DecodedCsv {
-            scan_decoded(&scan_source)?
+            scan_decoded(&scan_source, control)?
         } else {
-            scan_framed(&scan_source, format, map)?
+            scan_framed(&scan_source, format, map, control)?
         };
         if built.frame_count == 0 {
             return Err(Error::msg(
@@ -375,6 +472,7 @@ impl IndexedLog {
         Ok(Self {
             source,
             format,
+            body: format,
             checkpoints: built.checkpoints,
             snapshots: built.snapshots,
             frame_count: built.frame_count,
@@ -384,6 +482,8 @@ impl IndexedLog {
             t_end_us: built.t_end_us,
             byte_len,
             events: built.events,
+            skipped: built.skipped,
+            warnings: built.warnings,
             signals: built.signals,
             name_index: built.name_index,
             msg_index: built.msg_index,
@@ -413,7 +513,7 @@ impl IndexedLog {
 
     fn scan_from(&self, offset: u64, mut visit: impl FnMut(&Rec) -> bool) -> Result<()> {
         self.source.with_reader(|reader| {
-            let mut scanner = Scanner::resume(reader, self.format, offset)?;
+            let mut scanner = Scanner::resume(reader, self.body, offset)?;
             while let Some(rec) = scanner.next_rec()? {
                 if !visit(&rec) {
                     break;
@@ -428,10 +528,31 @@ impl IndexedLog {
             held.resize(self.signals.len(), None);
         }
         match &rec.kind {
-            RecKind::Frame { id, data, .. } => {
+            RecKind::Frame {
+                id, data, channel, ..
+            } => {
                 if let Some(indices) = self.msg_index.get(id) {
+                    let switch = indices.iter().find_map(|&idx| {
+                        let signal = &self.signals[idx];
+                        if !signal.mux_switch {
+                            return None;
+                        }
+                        if signal.channel != 0 && *channel != 0 && signal.channel != *channel {
+                            return None;
+                        }
+                        signal.spec.map(|spec| spec.decode(data).round() as u32)
+                    });
                     for &idx in indices {
-                        if let Some(spec) = self.signals[idx].spec {
+                        let signal = &self.signals[idx];
+                        if signal.channel != 0 && *channel != 0 && signal.channel != *channel {
+                            continue;
+                        }
+                        if let Some(expected) = signal.mux_value {
+                            if switch != Some(expected) {
+                                continue;
+                            }
+                        }
+                        if let Some(spec) = signal.spec {
                             let value = spec.decode(data);
                             held[idx] = Some(value);
                             on_update(idx, value);
@@ -449,9 +570,215 @@ impl IndexedLog {
         }
     }
 
+    pub fn bus_load(&self, t0_us: u64, t1_us: u64) -> Result<crate::dto::BusLoad> {
+        let (t0, t1) = ordered_range(t0_us, t1_us);
+        let mut frames = 0u64;
+        let mut bits = 0u64;
+        self.scan_from(self.checkpoints[self.floor_checkpoint(t0)].offset, |rec| {
+            if rec.t_us > t1 {
+                return false;
+            }
+            if rec.t_us >= t0 {
+                if let RecKind::Frame { dlc, .. } = rec.kind {
+                    frames += 1;
+                    bits += 47 + u64::from(dlc.min(8)) * 8;
+                }
+            }
+            true
+        })?;
+        let dt = ((t1.saturating_sub(t0)) as f64 / 1_000_000.0).max(1.0e-6);
+        Ok(crate::dto::BusLoad {
+            frames,
+            rate: frames as f64 / dt,
+            load: (bits as f64 / dt) / 500_000.0,
+        })
+    }
+
+    pub fn stats(&self, name: &str, t0_us: u64, t1_us: u64) -> Result<crate::dto::WindowStats> {
+        let idx = self
+            .name_index
+            .get(name)
+            .copied()
+            .ok_or_else(|| Error::msg(format!("no signal named {name}")))?;
+        let (t0, t1) = ordered_range(t0_us, t1_us);
+        let mut count = 0u64;
+        let mut sum = 0.0f64;
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        let mut first = None;
+        let mut last = None;
+        let mut held = self.snapshot(self.floor_checkpoint(t0));
+        self.scan_from(self.checkpoints[self.floor_checkpoint(t0)].offset, |rec| {
+            if rec.t_us > t1 {
+                return false;
+            }
+            self.touch(rec, &mut held, |signal, value| {
+                if signal == idx && rec.t_us >= t0 && rec.t_us <= t1 {
+                    count += 1;
+                    sum += value;
+                    min = min.min(value);
+                    max = max.max(value);
+                    if first.is_none() {
+                        first = Some(value);
+                    }
+                    last = Some(value);
+                }
+            });
+            true
+        })?;
+        if count == 0 {
+            return Err(Error::msg(format!("no samples of {name} in that window")));
+        }
+        Ok(crate::dto::WindowStats {
+            count,
+            min,
+            max,
+            avg: sum / count as f64,
+            first: first.unwrap_or(0.0),
+            last: last.unwrap_or(0.0),
+        })
+    }
+
+    pub fn export_csv(&self, names: &[String], t0_us: u64, t1_us: u64) -> Result<String> {
+        if names.is_empty() {
+            return Err(Error::msg("export needs at least one signal"));
+        }
+        let (t0, t1) = ordered_range(t0_us, t1_us);
+        let mut indexes = Vec::new();
+        for name in names {
+            let idx = self
+                .name_index
+                .get(name)
+                .copied()
+                .ok_or_else(|| Error::msg(format!("no signal named {name}")))?;
+            indexes.push(idx);
+        }
+        let mut out = String::from("t_us");
+        for name in names {
+            out.push(',');
+            out.push_str(name);
+        }
+        out.push('\n');
+        let mut rows = 0usize;
+        let mut held = self.snapshot(self.floor_checkpoint(t0));
+        let mut dirty = false;
+        self.scan_from(self.checkpoints[self.floor_checkpoint(t0)].offset, |rec| {
+            if rec.t_us > t1 {
+                return false;
+            }
+            dirty = false;
+            self.touch(rec, &mut held, |signal, _value| {
+                if indexes.contains(&signal) && rec.t_us >= t0 {
+                    dirty = true;
+                }
+            });
+            if dirty && rec.t_us >= t0 {
+                if rows >= 500_000 {
+                    return false;
+                }
+                out.push_str(&rec.t_us.to_string());
+                for idx in &indexes {
+                    out.push(',');
+                    if let Some(value) = held.get(*idx).copied().flatten() {
+                        out.push_str(&format!("{value:.6}"));
+                    }
+                }
+                out.push('\n');
+                rows += 1;
+            }
+            true
+        })?;
+        if rows == 0 {
+            return Err(Error::msg("that window has no samples to export"));
+        }
+        Ok(out)
+    }
+
+    pub fn export_slog(&self, t0_us: u64, t1_us: u64) -> Result<String> {
+        let (t0, t1) = ordered_range(t0_us, t1_us);
+        let mut out = String::from(
+            "SLOGv1\n# Trimmed by Signal Loom. Synthetic or captured, this is only the selected window.\n",
+        );
+        let mut rows = 0usize;
+        self.scan_from(self.checkpoints[self.floor_checkpoint(t0)].offset, |rec| {
+            if rec.t_us > t1 {
+                return false;
+            }
+            if rec.t_us < t0 {
+                return true;
+            }
+            if rows >= 500_000 {
+                return false;
+            }
+            match &rec.kind {
+                RecKind::Frame { id, dlc, data, .. } => {
+                    out.push_str(&format!(
+                        "F {} {id:X} {}\n",
+                        rec.t_us,
+                        hex_payload(data, *dlc)
+                    ));
+                    rows += 1;
+                }
+                RecKind::Event { label } => {
+                    out.push_str(&format!("E {} {label}\n", rec.t_us));
+                    rows += 1;
+                }
+                RecKind::Sample { .. } => {}
+            }
+            true
+        })?;
+        if rows == 0 {
+            return Err(Error::msg("that window has no frames to export"));
+        }
+        Ok(out)
+    }
+
+    pub fn crossings(&self, name: &str, op: &str, level: f64) -> Result<Vec<(u64, String)>> {
+        let idx = self
+            .name_index
+            .get(name)
+            .copied()
+            .ok_or_else(|| Error::msg(format!("no signal named {name}")))?;
+        let pred = |value: f64| match op {
+            ">" | "gt" => value > level,
+            "<" | "lt" => value < level,
+            ">=" | "ge" => value >= level,
+            "<=" | "le" => value <= level,
+            _ => false,
+        };
+        if !matches!(op, ">" | "<" | ">=" | "<=" | "gt" | "lt" | "ge" | "le") {
+            return Err(Error::msg("trigger comparison must be >, <, >=, or <="));
+        }
+        let mut events = Vec::new();
+        let mut armed = true;
+        let mut held = self.snapshot(0);
+        self.scan_from(self.checkpoints[0].offset, |rec| {
+            self.touch(rec, &mut held, |signal, value| {
+                if signal != idx {
+                    return;
+                }
+                let hot = pred(value);
+                if hot && armed {
+                    events.push((rec.t_us, format!("Trigger {name} {op} {level}")));
+                    armed = false;
+                } else if !hot {
+                    armed = true;
+                }
+            });
+            events.len() < 200
+        })?;
+        Ok(events)
+    }
+
     fn hit_from(&self, rec: &Rec, ordinal: u64) -> FrameHit {
         match &rec.kind {
-            RecKind::Frame { id, dlc, data } => FrameHit {
+            RecKind::Frame {
+                id,
+                dlc,
+                data,
+                extended,
+                ..
+            } => FrameHit {
                 t_us: rec.t_us,
                 ordinal,
                 message_id: Some(*id),
@@ -460,6 +787,7 @@ impl IndexedLog {
                     .get(id)
                     .cloned()
                     .unwrap_or_else(|| format!("0x{id:X}")),
+                extended: *extended,
                 dlc: *dlc,
                 data_hex: hex_payload(data, *dlc),
             },
@@ -468,6 +796,7 @@ impl IndexedLog {
                 ordinal,
                 message_id: None,
                 message_name: name.clone(),
+                extended: false,
                 dlc: 0,
                 data_hex: String::new(),
             },
@@ -476,6 +805,7 @@ impl IndexedLog {
                 ordinal,
                 message_id: None,
                 message_name: label.clone(),
+                extended: false,
                 dlc: 0,
                 data_hex: String::new(),
             },
@@ -509,7 +839,12 @@ fn sniff_path(path: &Path) -> Result<LogFormat> {
     sniff(&head[..n])
 }
 
-fn scan_framed(source: &Source, format: LogFormat, map: Option<&SignalMap>) -> Result<Built> {
+fn scan_framed(
+    source: &Source,
+    format: LogFormat,
+    map: Option<&SignalMap>,
+    control: Option<&IndexControl>,
+) -> Result<Built> {
     let mut signals = Vec::new();
     let mut name_index = HashMap::new();
     let mut msg_index: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -530,6 +865,10 @@ fn scan_framed(source: &Source, format: LogFormat, map: Option<&SignalMap>) -> R
                 spec: Some(mapped.spec),
                 min: None,
                 max: None,
+                channel: mapped.channel,
+                mux_switch: mapped.mux_switch,
+                mux_value: mapped.mux_value,
+                table: mapped.table.clone(),
             });
         }
     }
@@ -537,18 +876,68 @@ fn scan_framed(source: &Source, format: LogFormat, map: Option<&SignalMap>) -> R
     let mut built = empty_built(signals, name_index, msg_index, message_names);
     let mut held = vec![None; built.signals.len()];
     let mut last_t: Option<u64> = None;
+    let mut stride = CHECKPOINT_EVERY;
     let mut pending: Vec<(usize, f64)> = Vec::new();
+    let cycles: HashMap<u32, u64> = map
+        .map(|map| {
+            map.messages
+                .iter()
+                .filter_map(|message| message.cycle_us.map(|cycle| (message.id, cycle)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut last_seen: HashMap<u32, u64> = HashMap::new();
+    let mut last_counter: HashMap<usize, u64> = HashMap::new();
+    let mut pulses = 0u64;
     source.with_reader(|reader| {
         let mut scanner = Scanner::open(reader, format)?;
         while let Some(rec) = scanner.next_rec()? {
-            note_time(&mut last_t, rec.t_us)?;
+            pulses += 1;
+            if pulses.is_multiple_of(64) {
+                pulse(
+                    control,
+                    scanner.position(),
+                    built.frame_count,
+                    built.skipped.saturating_add(scanner.skipped()),
+                )?;
+            }
+            if !accept_time(&mut built, &mut last_t, rec.t_us) {
+                continue;
+            }
             match &rec.kind {
-                RecKind::Frame { id, data, .. } => {
-                    push_checkpoint(&mut built, &held, rec.t_us, rec.offset);
+                RecKind::Frame {
+                    id,
+                    dlc,
+                    data,
+                    channel,
+                    ..
+                } => {
+                    if rec.starts_container || built.frame_count.is_multiple_of(stride) {
+                        push_checkpoint(&mut built, &held, rec.t_us, rec.offset, &mut stride);
+                    }
                     pending.clear();
                     if let Some(indices) = built.msg_index.get(id) {
+                        let switch = indices.iter().find_map(|&idx| {
+                            let signal = &built.signals[idx];
+                            if !signal.mux_switch {
+                                return None;
+                            }
+                            if signal.channel != 0 && *channel != 0 && signal.channel != *channel {
+                                return None;
+                            }
+                            signal.spec.map(|spec| spec.decode(data).round() as u32)
+                        });
                         for &idx in indices {
-                            if let Some(spec) = built.signals[idx].spec {
+                            let signal = &built.signals[idx];
+                            if signal.channel != 0 && *channel != 0 && signal.channel != *channel {
+                                continue;
+                            }
+                            if let Some(expected) = signal.mux_value {
+                                if switch != Some(expected) {
+                                    continue;
+                                }
+                            }
+                            if let Some(spec) = signal.spec {
                                 pending.push((idx, spec.decode(data)));
                             }
                         }
@@ -557,6 +946,19 @@ fn scan_framed(source: &Source, format: LogFormat, map: Option<&SignalMap>) -> R
                         held[idx] = Some(value);
                         built.signals[idx].note(value);
                     }
+                    note_integrity(
+                        &mut built,
+                        &cycles,
+                        &mut last_seen,
+                        &mut last_counter,
+                        IntegrityFrame {
+                            t_us: rec.t_us,
+                            id: *id,
+                            dlc: *dlc,
+                            data,
+                            held: &held,
+                        },
+                    );
                     note_domain(&mut built, rec.t_us);
                     built.frame_count += 1;
                 }
@@ -564,32 +966,68 @@ fn scan_framed(source: &Source, format: LogFormat, map: Option<&SignalMap>) -> R
                 RecKind::Sample { .. } => {}
             }
         }
+        pulse(
+            control,
+            scanner.position(),
+            built.frame_count,
+            built.skipped.saturating_add(scanner.skipped()),
+        )?;
+        absorb_scanner(&mut built, scanner.skipped(), scanner.warnings());
         Ok(())
     })?;
     pad_snapshots(&mut built);
     Ok(built)
 }
 
-fn scan_decoded(source: &Source) -> Result<Built> {
+fn pulse(control: Option<&IndexControl>, bytes_done: u64, frames: u64, skipped: u64) -> Result<()> {
+    match control {
+        Some(control) => control.observe(bytes_done, frames, skipped),
+        None => Ok(()),
+    }
+}
+
+fn scan_decoded(source: &Source, control: Option<&IndexControl>) -> Result<Built> {
     let mut built = empty_built(Vec::new(), HashMap::new(), HashMap::new(), HashMap::new());
     let mut held: Vec<Option<f64>> = Vec::new();
     let mut last_t: Option<u64> = None;
+    let mut stride = CHECKPOINT_EVERY;
+    let mut pulses = 0u64;
     source.with_reader(|reader| {
         let mut scanner = Scanner::open(reader, LogFormat::DecodedCsv)?;
         while let Some(rec) = scanner.next_rec()? {
-            note_time(&mut last_t, rec.t_us)?;
+            pulses += 1;
+            if pulses.is_multiple_of(64) {
+                pulse(
+                    control,
+                    scanner.position(),
+                    built.frame_count,
+                    built.skipped.saturating_add(scanner.skipped()),
+                )?;
+            }
+            if !accept_time(&mut built, &mut last_t, rec.t_us) {
+                continue;
+            }
             if let RecKind::Sample { name, value, unit } = &rec.kind {
                 let idx = ensure_signal(&mut built, name, unit);
                 if held.len() < built.signals.len() {
                     held.resize(built.signals.len(), None);
                 }
-                push_checkpoint(&mut built, &held, rec.t_us, rec.offset);
+                if built.frame_count.is_multiple_of(stride) {
+                    push_checkpoint(&mut built, &held, rec.t_us, rec.offset, &mut stride);
+                }
                 held[idx] = Some(*value);
                 built.signals[idx].note(*value);
                 note_domain(&mut built, rec.t_us);
                 built.frame_count += 1;
             }
         }
+        pulse(
+            control,
+            scanner.position(),
+            built.frame_count,
+            built.skipped.saturating_add(scanner.skipped()),
+        )?;
+        absorb_scanner(&mut built, scanner.skipped(), scanner.warnings());
         Ok(())
     })?;
     pad_snapshots(&mut built);
@@ -611,6 +1049,8 @@ fn empty_built(
         t_start_us: 0,
         t_end_us: 0,
         events: Vec::new(),
+        skipped: 0,
+        warnings: Vec::new(),
         signals,
         name_index,
         msg_index,
@@ -635,6 +1075,10 @@ fn ensure_signal(built: &mut Built, name: &str, unit: &str) -> usize {
         spec: None,
         min: None,
         max: None,
+        channel: 0,
+        mux_switch: false,
+        mux_value: None,
+        table: Vec::new(),
     });
     for snap in &mut built.snapshots {
         snap.push(None);
@@ -642,9 +1086,19 @@ fn ensure_signal(built: &mut Built, name: &str, unit: &str) -> usize {
     idx
 }
 
-fn push_checkpoint(built: &mut Built, held: &[Option<f64>], t_us: u64, offset: u64) {
-    if !built.frame_count.is_multiple_of(CHECKPOINT_EVERY) {
-        return;
+fn push_checkpoint(
+    built: &mut Built,
+    held: &[Option<f64>],
+    t_us: u64,
+    offset: u64,
+    stride: &mut u64,
+) {
+    if built.checkpoints.len() >= MAX_CHECKPOINTS {
+        let checkpoints = built.checkpoints.iter().step_by(2).cloned().collect();
+        let snapshots = built.snapshots.iter().step_by(2).cloned().collect();
+        built.checkpoints = checkpoints;
+        built.snapshots = snapshots;
+        *stride = stride.saturating_mul(2).max(CHECKPOINT_EVERY);
     }
     built.checkpoints.push(Checkpoint {
         t_us,
@@ -666,6 +1120,77 @@ fn note_domain(built: &mut Built, t_us: u64) {
     built.t_end_us = built.t_end_us.max(t_us);
 }
 
+struct IntegrityFrame<'a> {
+    t_us: u64,
+    id: u32,
+    dlc: u8,
+    data: &'a [u8],
+    held: &'a [Option<f64>],
+}
+
+fn note_integrity(
+    built: &mut Built,
+    cycles: &HashMap<u32, u64>,
+    last_seen: &mut HashMap<u32, u64>,
+    last_counter: &mut HashMap<usize, u64>,
+    frame: IntegrityFrame<'_>,
+) {
+    if let Some(cycle) = cycles.get(&frame.id).copied() {
+        if let Some(prev) = last_seen.get(&frame.id).copied() {
+            let gap = frame.t_us.saturating_sub(prev);
+            if cycle > 0 && gap > cycle.saturating_mul(3) {
+                let name = built
+                    .message_names
+                    .get(&frame.id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{:03X}", frame.id));
+                note_event(built, frame.t_us, &format!("Timeout {name}"));
+            }
+        }
+        last_seen.insert(frame.id, frame.t_us);
+    }
+    let Some(indices) = built.msg_index.get(&frame.id).cloned() else {
+        return;
+    };
+    for idx in indices {
+        let Some(spec) = built.signals[idx].spec else {
+            continue;
+        };
+        let lname = built.signals[idx].name.to_ascii_lowercase();
+        if lname.contains("counter") {
+            if let Some(value) = frame.held.get(idx).copied().flatten() {
+                let bits = u32::from(spec.bit_length.min(16));
+                let modulus = 1u64 << bits;
+                let raw = value.round().clamp(0.0, (modulus - 1) as f64) as u64;
+                if let Some(prev) = last_counter.get(&idx).copied() {
+                    let expect = (prev + 1) % modulus;
+                    if raw != expect {
+                        let name = built.signals[idx].name.clone();
+                        note_event(built, frame.t_us, &format!("Counter {name}"));
+                    }
+                }
+                last_counter.insert(idx, raw);
+            }
+        }
+        if lname.contains("checksum") {
+            let byte = (spec.start_bit / 8) as usize;
+            let width = (frame.dlc as usize).min(frame.data.len());
+            if byte < width {
+                let mut xor = 0u8;
+                for (i, item) in frame.data.iter().take(width).enumerate() {
+                    if i != byte {
+                        xor ^= item;
+                    }
+                }
+                if xor != frame.data[byte] {
+                    let name = built.signals[idx].name.clone();
+                    note_event(built, frame.t_us, &format!("Checksum {name}"));
+                }
+            }
+        }
+    }
+}
+
 fn note_event(built: &mut Built, t_us: u64, label: &str) {
     if built.frame_count == 0 && built.event_count == 0 {
         built.t_start_us = t_us;
@@ -682,16 +1207,32 @@ fn note_event(built: &mut Built, t_us: u64, label: &str) {
     }
 }
 
-fn note_time(last: &mut Option<u64>, t_us: u64) -> Result<()> {
+fn accept_time(built: &mut Built, last: &mut Option<u64>, t_us: u64) -> bool {
     if let Some(prev) = *last {
         if t_us < prev {
-            return Err(Error::msg(format!(
-                "timestamps go backwards at {t_us} µs (previous {prev} µs). Logs must be time-sorted."
-            )));
+            built.skipped += 1;
+            note_warn(
+                built,
+                format!("skipped backwards timestamp at {t_us} µs (previous {prev} µs)"),
+            );
+            return false;
         }
     }
     *last = Some(t_us);
-    Ok(())
+    true
+}
+
+fn note_warn(built: &mut Built, message: String) {
+    if built.warnings.len() < MAX_WARNINGS && !built.warnings.iter().any(|have| have == &message) {
+        built.warnings.push(message);
+    }
+}
+
+fn absorb_scanner(built: &mut Built, skipped: u64, warnings: &[String]) {
+    built.skipped += skipped;
+    for warning in warnings {
+        note_warn(built, warning.clone());
+    }
 }
 
 fn pad_snapshots(built: &mut Built) {

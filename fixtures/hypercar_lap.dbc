@@ -1,0 +1,97 @@
+VERSION "synthetic-hypercar"
+
+NS_ :
+BS_:
+BU_: ECM TCU ABS ESC BCM IC BMS DIAG
+
+BO_ 256 ECM_Fast: 8 ECM
+ SG_ EngineRPM : 0|16@1+ (0.25,0) [0|16383.75] "rpm" TCU,IC
+ SG_ EngTorque : 16|16@1- (0.1,-500) [-500|6053.5] "Nm" TCU
+ SG_ Throttle : 32|8@1+ (0.5,0) [0|100] "%" IC
+ SG_ AccelPedal : 40|8@1+ (0.5,0) [0|100] "%" TCU
+ SG_ Gear : 48|4@1+ (1,0) [0|7] "" IC
+ SG_ FastCounter : 52|4@1+ (1,0) [0|15] "" DIAG
+ SG_ FastChecksum : 56|8@1+ (1,0) [0|255] "" DIAG
+
+BO_ 257 ECM_Slow: 8 ECM
+ SG_ CoolantTemp : 0|8@1+ (1,-40) [-40|215] "degC" IC
+ SG_ OilTemp : 8|8@1+ (1,-40) [-40|215] "degC" IC
+ SG_ OilPressure : 16|16@1+ (0.01,0) [0|10] "bar" IC
+ SG_ FuelLevel : 32|8@1+ (0.5,0) [0|100] "%" IC
+ SG_ MilLamp : 40|1@1+ (1,0) [0|1] "" IC
+ SG_ DtcCount : 41|7@1+ (1,0) [0|127] "" DIAG
+ SG_ SlowCounter : 48|8@1+ (1,0) [0|255] "" DIAG
+ SG_ SlowChecksum : 56|8@1+ (1,0) [0|255] "" DIAG
+
+BO_ 512 TCU_Gear: 8 TCU
+ SG_ GearActual : 0|4@1+ (1,0) [0|15] "" ECM
+ SG_ GearTarget : 4|4@1+ (1,0) [0|15] "" ECM
+ SG_ InputShaftRPM : 8|16@1+ (0.25,0) [0|16383] "rpm" ECM
+ SG_ ClutchPct : 24|8@1+ (0.5,0) [0|100] "%" ECM
+ SG_ ShiftActive : 32|1@1+ (1,0) [0|1] "" ECM
+ SG_ TcuCounter : 48|4@1+ (1,0) [0|15] "" DIAG
+ SG_ TcuChecksum : 56|8@1+ (1,0) [0|255] "" DIAG
+
+BO_ 768 ABS_Wheels: 8 ABS
+ SG_ WheelFL : 0|12@1+ (0.1,0) [0|409.5] "km/h" ESC
+ SG_ WheelFR : 12|12@1+ (0.1,0) [0|409.5] "km/h" ESC
+ SG_ WheelRL : 24|12@1+ (0.1,0) [0|409.5] "km/h" ESC
+ SG_ WheelRR : 36|12@1+ (0.1,0) [0|409.5] "km/h" ESC
+ SG_ AbsCounter : 48|8@1+ (1,0) [0|255] "" DIAG
+ SG_ AbsChecksum : 56|8@1+ (1,0) [0|255] "" DIAG
+
+BO_ 784 ESC_Dynamics: 8 ESC
+ SG_ SteeringAngle : 0|16@1- (0.1,0) [-1440|1440] "deg" IC
+ SG_ LatG : 16|16@1- (0.001,0) [-32|32] "g" IC
+ SG_ BrakePressure : 32|8@1+ (0.5,0) [0|80] "bar" ECM
+ SG_ YawRate : 40|12@1- (0.1,0) [-204|204] "deg/s" IC
+ SG_ AbsActive : 52|1@1+ (1,0) [0|1] "" IC
+ SG_ EscActive : 53|1@1+ (1,0) [0|1] "" IC
+ SG_ EscCounter : 54|2@1+ (1,0) [0|3] "" DIAG
+ SG_ EscChecksum : 56|8@1+ (1,0) [0|255] "" DIAG
+
+BO_ 1024 BCM_Body: 8 BCM
+ SG_ DoorFL : 0|1@1+ (1,0) [0|1] "" IC
+ SG_ TurnLeft : 8|1@1+ (1,0) [0|1] "" IC
+ SG_ TurnRight : 9|1@1+ (1,0) [0|1] "" IC
+ SG_ BrakeLamp : 10|1@1+ (1,0) [0|1] "" IC
+ SG_ BcmCounter : 48|8@1+ (1,0) [0|255] "" DIAG
+ SG_ BcmChecksum : 56|8@1+ (1,0) [0|255] "" DIAG
+
+BO_ 1280 IC_Cluster: 8 IC
+ SG_ VehicleSpeed : 0|16@1+ (0.01,0) [0|655] "km/h" ECM
+ SG_ DisplayedRPM : 16|16@1+ (0.25,0) [0|16383] "rpm" ECM
+ SG_ TelltaleMil : 32|1@1+ (1,0) [0|1] "" ECM
+ SG_ TelltaleAbs : 33|1@1+ (1,0) [0|1] "" ECM
+ SG_ TelltaleTemp : 34|1@1+ (1,0) [0|1] "" ECM
+ SG_ TelltaleLeft : 35|1@1+ (1,0) [0|1] "" ECM
+ SG_ TelltaleRight : 36|1@1+ (1,0) [0|1] "" ECM
+ SG_ IcCounter : 48|8@1+ (1,0) [0|255] "" DIAG
+ SG_ IcChecksum : 56|8@1+ (1,0) [0|255] "" DIAG
+
+BO_ 1536 BMS_Pack: 8 BMS
+ SG_ Soc : 0|16@1+ (0.01,0) [0|100] "%" IC
+ SG_ PackVoltage : 16|16@1+ (0.1,0) [0|800] "V" IC
+ SG_ PackCurrent : 32|16@1- (0.1,0) [-500|500] "A" IC
+ SG_ CellTemp : 48|8@1+ (1,-40) [-40|120] "degC" IC
+
+BO_ 1792 DIAG_Status: 8 DIAG
+ SG_ DtcCode : 0|16@1+ (1,0) [0|65535] "" IC
+ SG_ DtcStatus : 16|8@1+ (1,0) [0|255] "" IC
+ SG_ DtcOccurrence : 24|8@1+ (1,0) [0|255] "" IC
+ SG_ DiagCounter : 48|8@1+ (1,0) [0|255] "" ECM
+ SG_ DiagChecksum : 56|8@1+ (1,0) [0|255] "" ECM
+
+CM_ BO_ 256 "Synthetic ECM fast cycle. Not an OEM database.";
+CM_ BO_ 768 "Wheel speeds. One frame near 460 s has a bad XOR checksum.";
+CM_ BO_ 512 "Gearbox. One counter step is skipped near 200 s.";
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 3600000;
+BA_ "GenMsgCycleTime" BO_ 256 10;
+BA_ "GenMsgCycleTime" BO_ 257 100;
+BA_ "GenMsgCycleTime" BO_ 512 10;
+BA_ "GenMsgCycleTime" BO_ 768 10;
+BA_ "GenMsgCycleTime" BO_ 784 20;
+BA_ "GenMsgCycleTime" BO_ 1024 100;
+BA_ "GenMsgCycleTime" BO_ 1280 100;
+BA_ "GenMsgCycleTime" BO_ 1536 100;
+BA_ "GenMsgCycleTime" BO_ 1792 1000;

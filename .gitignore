@@ -18,3 +18,8 @@ yarn-error.log*
 pnpm-debug.log*
 
 src-tauri/gen/schemas
+
+# Generated 10-minute lap. `python3 scripts/gen_fixture.py` and CI recreate it.
+fixtures/hypercar_lap.slog
+__pycache__/
+*.pyc

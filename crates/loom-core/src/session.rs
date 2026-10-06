@@ -1,12 +1,14 @@
+use crate::analyze::compile;
 use crate::dto::{
     EventDto, FrameDto, PointDto, ProjectOpen, Query, SeriesDto, SignalDto, StepDir, Summary,
-    ValueDto,
+    ValueDto, WindowStats,
 };
 use crate::error::{Error, Result};
-use crate::index::{IndexedLog, QueryWindow};
+use crate::index::{IndexControl, IndexedLog, QueryWindow, Series};
 use crate::map::SignalMap;
-use crate::project::{self, ProjectFile};
+use crate::project::{self, MathChannel, ProjectFile, ThresholdTrigger};
 use crate::scan::LogFormat;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 const SAMPLE_SLOG: &str = include_str!("../../../fixtures/cluster_drive.slog");
@@ -22,6 +24,11 @@ pub struct Session {
     log_label: String,
     log_path: Option<PathBuf>,
     map_path: Option<PathBuf>,
+    math: Vec<MathChannel>,
+    triggers: Vec<ThresholdTrigger>,
+    compare: Option<IndexedLog>,
+    compare_offset_us: i64,
+    map_notes: Vec<String>,
 }
 
 impl Session {
@@ -30,6 +37,10 @@ impl Session {
     }
 
     pub fn open_sample(&mut self) -> Result<Summary> {
+        if let Some(path) = find_up("fixtures/hypercar_lap.slog") {
+            return self.open_path(&path);
+        }
+        self.reset_deck();
         self.map = Some(SignalMap::parse(SAMPLE_MAP)?);
         self.map_path = find_up(&format!("fixtures/{SAMPLE_MAP_NAME}"))
             .or_else(|| Some(PathBuf::from(format!("fixtures/{SAMPLE_MAP_NAME}"))));
@@ -48,22 +59,52 @@ impl Session {
     }
 
     pub fn open_path(&mut self, path: &Path) -> Result<Summary> {
+        self.open_path_controlled(path, None)
+    }
+
+    /// Index `path` without replacing the open session until the scan finishes.
+    /// `control` publishes progress and can cancel the scan.
+    pub fn open_path_controlled(
+        &mut self,
+        path: &Path,
+        control: Option<&IndexControl>,
+    ) -> Result<Summary> {
         if !path.is_file() {
             return Err(Error::msg(format!("log not found: {}", path.display())));
         }
+        let mut incoming_map = None;
+        let mut incoming_path = None;
+        let mut incoming_notes = Vec::new();
+        if let Some(sibling) = sibling_map(path) {
+            let text =
+                std::fs::read_to_string(&sibling).map_err(|err| Error::read(&sibling, err))?;
+            let mut map = parse_map_text(&text)?;
+            name_dbc_from_path(&mut map, &sibling);
+            incoming_notes = map.warnings.clone();
+            incoming_map = Some(map);
+            incoming_path = Some(sibling);
+        }
+        let map_for_index = incoming_map.as_ref().or(self.map.as_ref());
+        let indexed = IndexedLog::open_path_controlled(path, map_for_index, control)?;
+        let kept_notes = if incoming_map.is_none() {
+            self.map_notes.clone()
+        } else {
+            Vec::new()
+        };
+        self.reset_deck();
         self.log_label = path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("log")
             .to_string();
         self.log_path = Some(path.to_path_buf());
-        if let Some(sibling) = sibling_map(path) {
-            let text =
-                std::fs::read_to_string(&sibling).map_err(|err| Error::read(&sibling, err))?;
-            self.map = Some(SignalMap::parse(&text)?);
-            self.map_path = Some(sibling);
+        if let Some(map) = incoming_map {
+            self.map = Some(map);
+            self.map_path = incoming_path;
+            self.map_notes = incoming_notes;
+        } else {
+            self.map_notes = kept_notes;
         }
-        let indexed = IndexedLog::open_path(path, self.map.as_ref())?;
         self.log = Some(indexed);
         self.summary()
     }
@@ -73,6 +114,7 @@ impl Session {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("upload");
+        self.reset_deck();
         self.log_label = label.to_string();
         self.log_path = None;
         self.log = Some(IndexedLog::open_bytes(bytes, self.map.as_ref())?);
@@ -80,40 +122,255 @@ impl Session {
     }
 
     pub fn open_map_path(&mut self, path: &Path) -> Result<Summary> {
+        self.open_map_path_controlled(path, None)
+    }
+
+    pub fn open_map_path_controlled(
+        &mut self,
+        path: &Path,
+        control: Option<&IndexControl>,
+    ) -> Result<Summary> {
         let text = std::fs::read_to_string(path).map_err(|err| Error::read(path, err))?;
-        self.map = Some(SignalMap::parse(&text)?);
-        self.map_path = Some(path.to_path_buf());
-        self.reindex()?;
+        let mut map = parse_map_text(&text)?;
+        name_dbc_from_path(&mut map, path);
+        self.install_map(map, Some(path.to_path_buf()), false, 0);
+        self.reindex_controlled(control)?;
+        self.summary()
+    }
+
+    /// Append a DBC or map. Signals are limited to `channel` when it is not 0.
+    pub fn add_map_path(&mut self, path: &Path, channel: u8) -> Result<Summary> {
+        self.add_map_path_controlled(path, channel, None)
+    }
+
+    pub fn add_map_path_controlled(
+        &mut self,
+        path: &Path,
+        channel: u8,
+        control: Option<&IndexControl>,
+    ) -> Result<Summary> {
+        let text = std::fs::read_to_string(path).map_err(|err| Error::read(path, err))?;
+        let mut map = parse_map_text(&text)?;
+        name_dbc_from_path(&mut map, path);
+        self.install_map(map, Some(path.to_path_buf()), true, channel);
+        self.reindex_controlled(control)?;
         self.summary()
     }
 
     pub fn open_map_json(&mut self, json: &str) -> Result<Summary> {
-        self.map = Some(SignalMap::parse(json)?);
-        self.map_path = None;
+        let map = parse_map_text(json)?;
+        self.install_map(map, None, false, 0);
         self.reindex()?;
         self.summary()
     }
 
+    pub fn add_map_json(&mut self, json: &str, channel: u8) -> Result<Summary> {
+        let map = parse_map_text(json)?;
+        self.install_map(map, None, true, channel);
+        self.reindex()?;
+        self.summary()
+    }
+
+    fn install_map(
+        &mut self,
+        mut map: SignalMap,
+        path: Option<PathBuf>,
+        append: bool,
+        channel: u8,
+    ) {
+        if append {
+            if let Some(existing) = &mut self.map {
+                let notes = map.warnings.clone();
+                existing.append(map, channel);
+                extend_notes(&mut self.map_notes, &notes);
+                return;
+            }
+        }
+        if channel != 0 {
+            for signal in &mut map.signals {
+                if signal.channel == 0 {
+                    signal.channel = channel;
+                }
+            }
+        }
+        self.map_notes = map.warnings.clone();
+        self.map = Some(map);
+        if !append || self.map_path.is_none() {
+            self.map_path = path;
+        }
+    }
+
     pub fn query(&self, query: &Query) -> Result<Vec<SeriesDto>> {
         let log = self.log()?;
-        let series = log.query(&QueryWindow {
-            t0_us: query.t0_us,
-            t1_us: query.t1_us,
-            signals: query.signals.clone(),
-            max_points: query.max_points,
-        })?;
+        let mut physical = Vec::new();
+        let mut derived = Vec::new();
+        for name in &query.signals {
+            if let Some(channel) = self.math.iter().find(|channel| &channel.name == name) {
+                derived.push(channel.clone());
+                for dep in compile(&channel.expr)?.dependencies() {
+                    if !physical.contains(&dep) && self.math.iter().all(|item| item.name != dep) {
+                        physical.push(dep);
+                    }
+                }
+            } else if !physical.contains(name) {
+                physical.push(name.clone());
+            }
+        }
+        let mut series = if physical.is_empty() {
+            Vec::new()
+        } else {
+            log.query(&QueryWindow {
+                t0_us: query.t0_us,
+                t1_us: query.t1_us,
+                signals: physical.clone(),
+                max_points: query.max_points,
+            })?
+        };
+        if query.include_compare {
+            if let Some(compare) = &self.compare {
+                series.extend(compare_series(
+                    compare,
+                    &physical,
+                    query,
+                    self.compare_offset_us,
+                )?);
+            }
+        }
+        for channel in &derived {
+            series.push(eval_channel(channel, &series)?);
+        }
+        let wanted: Vec<&str> = query.signals.iter().map(String::as_str).collect();
         Ok(series
             .into_iter()
-            .map(|series| SeriesDto {
-                name: series.name,
-                unit: series.unit,
-                points: series
-                    .points
-                    .into_iter()
-                    .map(|(t, v)| PointDto { t, v })
-                    .collect(),
+            .filter(|series| {
+                wanted.iter().any(|name| series.name == *name)
+                    || (query.include_compare && series.name.ends_with(" · B"))
             })
+            .map(series_dto)
             .collect())
+    }
+
+    pub fn set_math(&mut self, channels: Vec<MathChannel>) -> Result<Summary> {
+        for channel in &channels {
+            let name = channel.name.trim();
+            if name.is_empty() || name.len() > 64 {
+                return Err(Error::msg("math channel name must be 1 to 64 characters"));
+            }
+            if name.ends_with(" · B") {
+                return Err(Error::msg(
+                    "math channel names cannot end with the compare suffix",
+                ));
+            }
+            compile(&channel.expr)?;
+        }
+        self.math = channels;
+        self.summary()
+    }
+
+    pub fn set_triggers(&mut self, triggers: Vec<ThresholdTrigger>) -> Result<Summary> {
+        for trigger in &triggers {
+            if !matches!(
+                trigger.op.as_str(),
+                ">" | "<" | ">=" | "<=" | "gt" | "lt" | "ge" | "le"
+            ) {
+                return Err(Error::msg("trigger comparison must be >, <, >=, or <="));
+            }
+            if !trigger.value.is_finite() {
+                return Err(Error::msg("trigger level must be finite"));
+            }
+        }
+        self.triggers = triggers;
+        self.summary()
+    }
+
+    pub fn open_compare_path(&mut self, path: &Path) -> Result<Summary> {
+        if !path.is_file() {
+            return Err(Error::msg(format!(
+                "compare log not found: {}",
+                path.display()
+            )));
+        }
+        self.compare = Some(IndexedLog::open_path(path, self.map.as_ref())?);
+        self.summary()
+    }
+
+    pub fn open_compare_bytes(&mut self, bytes: Vec<u8>) -> Result<Summary> {
+        self.compare = Some(IndexedLog::open_bytes(bytes, self.map.as_ref())?);
+        self.summary()
+    }
+
+    pub fn set_compare_offset(&mut self, offset_us: i64) {
+        self.compare_offset_us = offset_us;
+    }
+
+    pub fn clear_compare(&mut self) {
+        self.compare = None;
+        self.compare_offset_us = 0;
+    }
+
+    /// A newly opened recording starts without the previous deck setup.
+    fn reset_deck(&mut self) {
+        self.math.clear();
+        self.triggers.clear();
+        self.compare = None;
+        self.compare_offset_us = 0;
+        self.map_notes.clear();
+    }
+
+    pub fn stats(&self, name: &str, t0_us: u64, t1_us: u64) -> Result<WindowStats> {
+        if let Some(channel) = self.math.iter().find(|channel| channel.name == name) {
+            let series = eval_channel(
+                channel,
+                &self.log()?.query(&QueryWindow {
+                    t0_us,
+                    t1_us,
+                    signals: compile(&channel.expr)?.dependencies(),
+                    max_points: 500_000,
+                })?,
+            )?;
+            return stats_of_points(name, &series);
+        }
+        self.log()?.stats(name, t0_us, t1_us)
+    }
+
+    pub fn export_csv(&self, names: &[String], t0_us: u64, t1_us: u64) -> Result<String> {
+        let physical: Vec<String> = names
+            .iter()
+            .filter(|name| self.math.iter().all(|channel| channel.name != **name))
+            .cloned()
+            .collect();
+        let mut csv = if physical.is_empty() {
+            "t_us\n".to_string()
+        } else {
+            self.log()?.export_csv(&physical, t0_us, t1_us)?
+        };
+        if names
+            .iter()
+            .any(|name| self.math.iter().any(|channel| &channel.name == name))
+            && physical.len() != names.len()
+        {
+            return Err(Error::msg(
+                "export the math channel on its own, or export physical signals on their own",
+            ));
+        }
+        if physical.is_empty() {
+            csv = export_math_csv(self, names, t0_us, t1_us)?;
+        }
+        Ok(csv)
+    }
+
+    pub fn export_slog(&self, t0_us: u64, t1_us: u64) -> Result<String> {
+        self.log()?.export_slog(t0_us, t1_us)
+    }
+
+    pub fn bus_load(&self, t0_us: u64, t1_us: u64) -> Result<crate::dto::BusLoad> {
+        self.log()?.bus_load(t0_us, t1_us)
+    }
+
+    /// Read frames from a SocketCAN interface. This does not transmit.
+    pub fn capture_socketcan(&mut self, iface: &str, duration_ms: u64) -> Result<Summary> {
+        let text = crate::socketcan::capture_slog(iface, duration_ms)?;
+        self.open_bytes(&format!("{iface}.slog"), text.into_bytes())
     }
 
     pub fn values_at(&self, t_us: u64) -> Result<Vec<ValueDto>> {
@@ -125,6 +382,7 @@ impl Session {
                 name: value.name,
                 unit: value.unit,
                 value: value.value,
+                label: value.label,
             })
             .collect())
     }
@@ -145,6 +403,7 @@ impl Session {
                 name: value.name,
                 unit: value.unit,
                 value: value.value,
+                label: value.label,
             })
             .collect();
         Ok(Some(FrameDto {
@@ -152,6 +411,7 @@ impl Session {
             ordinal: hit.ordinal,
             message_id: hit.message_id,
             message_name: hit.message_name,
+            extended: hit.extended,
             dlc: hit.dlc,
             data_hex: hit.data_hex,
             values,
@@ -185,26 +445,39 @@ impl Session {
             t_start_us: log.t_start_us(),
             t_end_us: log.t_end_us(),
             bytes: log.byte_len(),
-            signals: log
-                .signals()
-                .map(|signal| SignalDto {
-                    name: signal.name,
-                    unit: signal.unit,
-                    message_name: signal.message_name,
-                    message_id: signal.message_id,
-                    min: signal.min,
-                    max: signal.max,
-                    from_map: signal.from_map,
-                })
-                .collect(),
-            events: log
-                .events()
-                .iter()
-                .map(|(t_us, label)| EventDto {
-                    t_us: *t_us,
-                    label: label.clone(),
-                })
-                .collect(),
+            signals: {
+                let mut signals: Vec<SignalDto> = log
+                    .signals()
+                    .map(|signal| SignalDto {
+                        name: signal.name,
+                        unit: signal.unit,
+                        message_name: signal.message_name,
+                        message_id: signal.message_id,
+                        min: signal.min,
+                        max: signal.max,
+                        from_map: signal.from_map,
+                    })
+                    .collect();
+                for channel in &self.math {
+                    signals.push(SignalDto {
+                        name: channel.name.clone(),
+                        unit: channel.unit.clone(),
+                        message_name: "Math".to_string(),
+                        message_id: None,
+                        min: None,
+                        max: None,
+                        from_map: false,
+                    });
+                }
+                signals
+            },
+            events: self.merged_events(log)?,
+            skipped_records: log.skipped(),
+            warnings: {
+                let mut warnings = self.map_notes.clone();
+                warnings.extend(log.warnings().iter().cloned());
+                warnings
+            },
         })
     }
 
@@ -224,8 +497,10 @@ impl Session {
 
         match resolve_map(&base, project.signal_map_path.as_deref()) {
             MapLoad::File(path) => {
-                let json = std::fs::read_to_string(&path).map_err(|err| Error::read(&path, err))?;
-                self.map = Some(SignalMap::parse(&json)?);
+                let text = std::fs::read_to_string(&path).map_err(|err| Error::read(&path, err))?;
+                let mut map = parse_map_text(&text)?;
+                name_dbc_from_path(&mut map, &path);
+                self.map = Some(map);
                 self.map_path = Some(path);
             }
             MapLoad::Embedded => {
@@ -274,11 +549,53 @@ impl Session {
             }
         }
 
+        self.math = project.math.clone();
+        self.triggers = project.triggers.clone();
+        self.compare_offset_us = project.compare_offset_us;
+        self.compare = None;
+        if let Some(stored) = project
+            .compare_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(path) = project::resolve_existing(&base, stored) {
+                match IndexedLog::open_path(&path, self.map.as_ref()) {
+                    Ok(log) => self.compare = Some(log),
+                    Err(err) => warnings.push(format!("Compare log did not open: {err}")),
+                }
+            } else {
+                warnings.push(format!("Compare log not found ({stored})."));
+            }
+        }
+
         Ok(ProjectOpen {
             project,
             summary: self.summary()?,
             warnings,
         })
+    }
+
+    fn merged_events(&self, log: &IndexedLog) -> Result<Vec<EventDto>> {
+        let mut events: Vec<EventDto> = log
+            .events()
+            .iter()
+            .map(|(t_us, label)| EventDto {
+                t_us: *t_us,
+                label: label.clone(),
+            })
+            .collect();
+        for trigger in &self.triggers {
+            let Ok(hits) = log.crossings(&trigger.signal, &trigger.op, trigger.value) else {
+                continue;
+            };
+            for (t_us, label) in hits {
+                events.push(EventDto { t_us, label });
+            }
+        }
+        events.sort_by_key(|event| event.t_us);
+        events.truncate(5_000);
+        Ok(events)
     }
 
     pub fn write_project(&self, path: &Path, project: &ProjectFile) -> Result<()> {
@@ -292,6 +609,10 @@ impl Session {
     }
 
     fn reindex(&mut self) -> Result<()> {
+        self.reindex_controlled(None)
+    }
+
+    fn reindex_controlled(&mut self, control: Option<&IndexControl>) -> Result<()> {
         let path = self
             .log
             .as_ref()
@@ -305,7 +626,7 @@ impl Session {
             return Ok(());
         }
         let rebuilt = if let Some(path) = path {
-            IndexedLog::open_path(&path, self.map.as_ref())?
+            IndexedLog::open_path_controlled(&path, self.map.as_ref(), control)?
         } else if let Some(bytes) = bytes {
             IndexedLog::open_shared(bytes, self.map.as_ref())?
         } else {
@@ -313,6 +634,17 @@ impl Session {
         };
         self.log = Some(rebuilt);
         Ok(())
+    }
+}
+
+fn extend_notes(notes: &mut Vec<String>, extra: &[String]) {
+    for warning in extra {
+        if notes.len() >= 32 {
+            break;
+        }
+        if !notes.iter().any(|have| have == warning) {
+            notes.push(warning.clone());
+        }
     }
 }
 
@@ -352,10 +684,189 @@ fn resolve_log(base: &Path, stored: &str) -> LogLoad {
     LogLoad::Missing(stored.to_string())
 }
 
+fn name_dbc_from_path(map: &mut SignalMap, path: &Path) {
+    if !map.name.starts_with("DBC import") {
+        return;
+    }
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return;
+    };
+    map.name = format!("{stem} — {}", map.name);
+}
+
+fn series_dto(series: Series) -> SeriesDto {
+    SeriesDto {
+        name: series.name,
+        unit: series.unit,
+        points: series
+            .points
+            .into_iter()
+            .map(|(t, v)| PointDto { t, v })
+            .collect(),
+    }
+}
+
+fn compare_series(
+    compare: &IndexedLog,
+    signals: &[String],
+    query: &Query,
+    offset_us: i64,
+) -> Result<Vec<Series>> {
+    let start = query.t0_us as i64 - offset_us;
+    let end = query.t1_us as i64 - offset_us;
+    if end < 0 {
+        return Ok(Vec::new());
+    }
+    let series = compare.query(&QueryWindow {
+        t0_us: start.max(0) as u64,
+        t1_us: end.max(0) as u64,
+        signals: signals.to_vec(),
+        max_points: query.max_points,
+    })?;
+    Ok(series
+        .into_iter()
+        .map(|mut series| {
+            series.name = format!("{} · B", series.name);
+            for (t, _) in &mut series.points {
+                let shifted = *t as i64 + offset_us;
+                *t = shifted.max(0) as u64;
+            }
+            series
+        })
+        .collect())
+}
+
+fn eval_channel(channel: &MathChannel, base: &[Series]) -> Result<Series> {
+    let compiled = compile(&channel.expr)?;
+    let deps = compiled.dependencies();
+    let mut times = BTreeSet::new();
+    for dep in &deps {
+        let series = base
+            .iter()
+            .find(|series| series.name == *dep)
+            .ok_or_else(|| Error::msg(format!("math channel {} needs {dep}", channel.name)))?;
+        for (t, _) in &series.points {
+            times.insert(*t);
+        }
+    }
+    let mut cursors = HashMap::<String, usize>::new();
+    let mut last = HashMap::<String, f64>::new();
+    let mut vars = HashMap::<String, f64>::new();
+    let mut lp_state = Vec::new();
+    let mut points = Vec::new();
+    for t in times {
+        vars.clear();
+        let mut ready = true;
+        for dep in &deps {
+            let series = base.iter().find(|series| series.name == *dep).unwrap();
+            let mut cursor = cursors.get(dep).copied().unwrap_or(0);
+            while cursor < series.points.len() && series.points[cursor].0 <= t {
+                last.insert(dep.clone(), series.points[cursor].1);
+                cursor += 1;
+            }
+            cursors.insert(dep.clone(), cursor);
+            match last.get(dep).copied() {
+                Some(value) => {
+                    vars.insert(dep.clone(), value);
+                }
+                None => ready = false,
+            }
+        }
+        if ready {
+            points.push((t, compiled.eval(&vars, &mut lp_state)?));
+        }
+    }
+    Ok(Series {
+        name: channel.name.clone(),
+        unit: channel.unit.clone(),
+        points,
+    })
+}
+
+fn stats_of_points(name: &str, series: &Series) -> Result<WindowStats> {
+    if series.points.is_empty() {
+        return Err(Error::msg(format!("no samples of {name} in that window")));
+    }
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut sum = 0.0;
+    for (_, value) in &series.points {
+        min = min.min(*value);
+        max = max.max(*value);
+        sum += value;
+    }
+    let count = series.points.len() as u64;
+    Ok(WindowStats {
+        count,
+        min,
+        max,
+        avg: sum / count as f64,
+        first: series.points[0].1,
+        last: series.points[series.points.len() - 1].1,
+    })
+}
+
+fn export_math_csv(session: &Session, names: &[String], t0_us: u64, t1_us: u64) -> Result<String> {
+    let mut header = String::from("t_us");
+    let mut columns = Vec::new();
+    for name in names {
+        let channel = session
+            .math
+            .iter()
+            .find(|channel| &channel.name == name)
+            .ok_or_else(|| Error::msg(format!("no math channel named {name}")))?;
+        let series = eval_channel(
+            channel,
+            &session.log()?.query(&QueryWindow {
+                t0_us,
+                t1_us,
+                signals: compile(&channel.expr)?.dependencies(),
+                max_points: 500_000,
+            })?,
+        )?;
+        header.push(',');
+        header.push_str(name);
+        columns.push(series);
+    }
+    let mut times = BTreeSet::new();
+    for series in &columns {
+        for (t, _) in &series.points {
+            times.insert(*t);
+        }
+    }
+    let mut out = header;
+    out.push('\n');
+    for t in times {
+        out.push_str(&t.to_string());
+        for series in &columns {
+            out.push(',');
+            if let Some((_, value)) = series.points.iter().find(|(stamp, _)| *stamp == t) {
+                out.push_str(&format!("{value:.6}"));
+            }
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn parse_map_text(text: &str) -> Result<SignalMap> {
+    if crate::dbc::looks_like(text) {
+        crate::dbc::parse(text)
+    } else {
+        SignalMap::parse(text)
+    }
+}
+
+/// Prefer a sibling `.dbc`, then a sibling `.map.json`.
 fn sibling_map(log: &Path) -> Option<PathBuf> {
-    let mut candidate = log.to_path_buf();
-    candidate.set_extension("map.json");
-    candidate.is_file().then_some(candidate)
+    for extension in ["dbc", "map.json"] {
+        let mut candidate = log.to_path_buf();
+        candidate.set_extension(extension);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn find_up(relative: &str) -> Option<PathBuf> {
