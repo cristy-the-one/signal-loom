@@ -63,7 +63,7 @@ python3 scripts/gen_fixture.py
 
 - **SLOGv1 text**, **SLB1 binary**, **CAN CSV** (`t_us,id,data`), **decoded CSV** (`t_us,signal,value`), **Vector ASC** (absolute or relative time, CAN FD, extended ids, several channels), **Vector BLF** (classic CAN, CAN FD, error frames, zlib containers streamed one at a time), and **candump** lines with or without an interface name are parsed and indexed.
 - A large file is streamed. The index keeps at most 4096 checkpoints and does not load the recording into one buffer. Opening a path shows percent, frame count, and a cancel button. A bad line or a truncated record is skipped, counted, and listed; the rest of the log still opens.
-- JSON signal maps and Vector `.dbc` files are decoded for real: little-endian (Intel) and big-endian (Motorola) bit layouts, signed values, factor, offset, multiplexed signals, and `VAL_` labels. A second DBC can be added on a channel. Channel 0 applies everywhere.
+- JSON signal maps and Vector `.dbc` files are decoded for real: little-endian (Intel) and big-endian (Motorola) bit layouts, signed values, factor, offset, multiplexed signals, and `VAL_` labels. A second DBC can be added on a channel. Channel 0 applies everywhere. Signals can sit anywhere in a 64-byte CAN FD payload. A signal name that repeats across messages, such as `Counter` or `CRC`, is kept as `Name@<id>`, and a signal with a broken layout is skipped and listed; the rest of the DBC still loads.
 - `.loom` projects store the log path, map path, bookmarks, playhead, span, plotted signals, math channels, triggers, notes, cursors, and an optional compare log.
 - Scrub, frame step, event step, playback, and overlay plots call that indexer. The plot keeps a hover crosshair, measurement cursors, and wheel zoom anchored on the cursor.
 - A cluster strip (speed, rpm, gear, temperatures, SoC or fuel, telltales) and a one-second bus-load strip follow the playhead. The timeline is a minimap of the whole drive, with an event lane coloured by severity.
@@ -77,7 +77,6 @@ python3 scripts/gen_fixture.py
 - No cloud account. The app stays offline. Logs are read from local disk; nothing is uploaded.
 - SocketCAN never sends a frame. There is no transmit path.
 - The browser preview upload is capped at 32MB. Multi-gigabyte logs are opened by path.
-- CAN FD frames keep up to 64 data bytes. DBC bit layouts are still checked against an 8-byte window.
 - The checksum watch is an XOR of the other payload bytes, matched by signal name. It is not an AUTOSAR CRC.
 - BLF objects other than classic CAN, CAN FD, error frames, and zlib containers are skipped.
 - The 10-minute lap is read from disk. A packaged build without the fixture falls back to the short cluster sample.

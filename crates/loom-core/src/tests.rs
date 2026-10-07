@@ -1033,6 +1033,78 @@ VAL_ 100 Gear 0 "N" 1 "D" 2 "R" ;
 }
 
 #[test]
+fn repeated_dbc_signal_names_are_renamed_and_still_decode() {
+    let text = r#"
+BO_ 1 Brake: 8 ESC
+ SG_ Pressure : 0|8@1+ (1,0) [0|255] "bar" IC
+ SG_ Checksum : 56|8@1+ (1,0) [0|255] "" IC
+BO_ 2 Steer: 8 SWM
+ SG_ Angle : 0|8@1+ (1,0) [0|255] "deg" IC
+ SG_ Checksum : 56|8@1+ (1,0) [0|255] "" IC
+VAL_ 2 Checksum 171 "Fixed" ;
+"#;
+    let map = crate::dbc::parse(text).expect("a repeated name must not reject the DBC");
+    let names: Vec<&str> = map
+        .signals
+        .iter()
+        .map(|signal| signal.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["Pressure", "Checksum", "Angle", "Checksum@2"]);
+    assert!(map
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("Checksum@2")));
+
+    let log = "F 0 1 11000000000000AA\nF 0 2 22000000000000AB\n";
+    let log = IndexedLog::open_bytes(log.as_bytes().to_vec(), Some(&map)).unwrap();
+    let values = log.values_at(0).unwrap();
+    let get = |name: &str| values.iter().find(|value| value.name == name).unwrap();
+    assert_eq!(get("Checksum").value, 0xAA as f64);
+    assert_eq!(get("Checksum@2").value, 0xAB as f64);
+    assert_eq!(get("Checksum@2").label.as_deref(), Some("Fixed"));
+}
+
+#[test]
+fn a_bad_layout_skips_one_signal_and_can_fd_signals_decode_past_byte_8() {
+    let text = r#"
+BO_ 1 Fd: 64 ADAS
+ SG_ Head : 0|8@1+ (1,0) [0|255] "" IC
+ SG_ LateLe : 400|16@1+ (0.5,0) [0|1000] "" IC
+ SG_ LateBe : 407|16@0+ (1,0) [0|65535] "" IC
+ SG_ PastTheEnd : 600|16@1+ (1,0) [0|65535] "" IC
+"#;
+    let map = crate::dbc::parse(text).expect("one bad layout must not reject the DBC");
+    let names: Vec<&str> = map
+        .signals
+        .iter()
+        .map(|signal| signal.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["Head", "LateLe", "LateBe"]);
+    assert!(map
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("PastTheEnd")));
+
+    // Byte 50-51 little-endian 0x0123 (291 × 0.5), byte 50-51 big-endian 0x2301.
+    let mut payload = [0u8; 64];
+    payload[0] = 7;
+    payload[50] = 0x23;
+    payload[51] = 0x01;
+    let line = format!("F 0 1 {}\n", hex(&payload));
+    let log = IndexedLog::open_bytes(line.into_bytes(), Some(&map)).unwrap();
+    let values = log.values_at(0).unwrap();
+    let get = |name: &str| {
+        values
+            .iter()
+            .find(|value| value.name == name)
+            .map(|value| value.value)
+    };
+    assert_eq!(get("Head"), Some(7.0));
+    assert_eq!(get("LateLe"), Some(145.5));
+    assert_eq!(get("LateBe"), Some(0x2301 as f64));
+}
+
+#[test]
 fn a_broken_signal_does_not_drop_the_rest_of_the_dbc() {
     let text = "\
 BO_ 1 Only: 8 ECM

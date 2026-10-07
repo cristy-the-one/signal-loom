@@ -8,7 +8,7 @@
 
 use crate::decode::{DecodeSpec, Endian};
 use crate::error::{Error, Result};
-use crate::map::{MapMessage, MappedSignal, SignalMap};
+use crate::map::{unique_name, MapMessage, MappedSignal, SignalMap};
 use std::collections::{HashMap, HashSet};
 
 pub fn parse(text: &str) -> Result<SignalMap> {
@@ -77,6 +77,7 @@ pub fn parse(text: &str) -> Result<SignalMap> {
 
     let mut signals = Vec::new();
     let mut seen = HashSet::new();
+    let mut renamed: Vec<String> = Vec::new();
     let mut map_messages = Vec::new();
     for message in &messages {
         let cycle_us = cycles
@@ -90,18 +91,22 @@ pub fn parse(text: &str) -> Result<SignalMap> {
             cycle_us,
         });
         for signal in &message.signals {
-            if !seen.insert(signal.name.clone()) {
-                return Err(Error::msg(format!(
-                    "DBC has two signals named {}. Rename one before import.",
-                    signal.name
-                )));
+            if let Err(err) = signal.spec.validate() {
+                push_warn(
+                    &mut warnings,
+                    format!("skipped {} in {}: {err}", signal.name, message.name),
+                );
+                continue;
             }
-            signal
-                .spec
-                .validate()
-                .map_err(|err| Error::msg(format!("signal {}: {err}", signal.name)))?;
+            // `Counter` or `CRC` in several messages is normal. Later ones
+            // take the same `Name@<id>` form a second DBC uses.
+            let name = unique_name(&seen, &signal.name, 0, message.id);
+            if name != signal.name {
+                renamed.push(name.clone());
+            }
+            seen.insert(name.clone());
             signals.push(MappedSignal {
-                name: signal.name.clone(),
+                name,
                 unit: signal.unit.clone(),
                 message_name: message.name.clone(),
                 message_id: message.id,
@@ -112,6 +117,22 @@ pub fn parse(text: &str) -> Result<SignalMap> {
                 table: signal.table.clone(),
             });
         }
+    }
+    if !renamed.is_empty() {
+        let shown: Vec<&str> = renamed.iter().take(6).map(String::as_str).collect();
+        let more = if renamed.len() > shown.len() {
+            ", …"
+        } else {
+            ""
+        };
+        push_warn(
+            &mut warnings,
+            format!(
+                "{} signal names repeat across messages and were renamed: {}{more}",
+                renamed.len(),
+                shown.join(", ")
+            ),
+        );
     }
     if signals.is_empty() {
         let extra = warnings
@@ -165,7 +186,7 @@ fn parse_bo(rest: &str) -> Result<MessageBuild> {
     Ok(MessageBuild {
         id,
         name,
-        dlc: dlc.min(8),
+        dlc: dlc.min(64),
         signals: Vec::new(),
     })
 }
