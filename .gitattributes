@@ -1,0 +1,15 @@
+# Fixtures are byte-exact: tests pin their sizes and hashes, `include_str!`
+# embeds them, and `scripts/gen_fixture.py` writes them with LF. Keep LF on
+# every platform so a Windows checkout does not show them as modified.
+*.slog text eol=lf
+*.dbc  text eol=lf
+*.asc  text eol=lf
+*.loom text eol=lf
+fixtures/*.csv  text eol=lf
+fixtures/*.json text eol=lf
+
+# Binary logs and images must never be converted.
+*.blf  binary
+*.png  binary
+*.ico  binary
+*.icns binary

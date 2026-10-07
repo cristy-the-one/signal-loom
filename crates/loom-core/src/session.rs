@@ -133,9 +133,7 @@ impl Session {
         let text = std::fs::read_to_string(path).map_err(|err| Error::read(path, err))?;
         let mut map = parse_map_text(&text)?;
         name_dbc_from_path(&mut map, path);
-        self.install_map(map, Some(path.to_path_buf()), false, 0);
-        self.reindex_controlled(control)?;
-        self.summary()
+        self.apply_map(map, Some(path.to_path_buf()), false, 0, control)
     }
 
     /// Append a DBC or map. Signals are limited to `channel` when it is not 0.
@@ -152,22 +150,39 @@ impl Session {
         let text = std::fs::read_to_string(path).map_err(|err| Error::read(path, err))?;
         let mut map = parse_map_text(&text)?;
         name_dbc_from_path(&mut map, path);
-        self.install_map(map, Some(path.to_path_buf()), true, channel);
-        self.reindex_controlled(control)?;
-        self.summary()
+        self.apply_map(map, Some(path.to_path_buf()), true, channel, control)
     }
 
     pub fn open_map_json(&mut self, json: &str) -> Result<Summary> {
         let map = parse_map_text(json)?;
-        self.install_map(map, None, false, 0);
-        self.reindex()?;
-        self.summary()
+        self.apply_map(map, None, false, 0, None)
     }
 
     pub fn add_map_json(&mut self, json: &str, channel: u8) -> Result<Summary> {
         let map = parse_map_text(json)?;
-        self.install_map(map, None, true, channel);
-        self.reindex()?;
+        self.apply_map(map, None, true, channel, None)
+    }
+
+    /// Install a map and reindex. A failed or cancelled reindex puts the
+    /// previous map back, so a retry does not stack the same DBC twice.
+    fn apply_map(
+        &mut self,
+        map: SignalMap,
+        path: Option<PathBuf>,
+        append: bool,
+        channel: u8,
+        control: Option<&IndexControl>,
+    ) -> Result<Summary> {
+        let before = (
+            self.map.clone(),
+            self.map_path.clone(),
+            self.map_notes.clone(),
+        );
+        self.install_map(map, path, append, channel);
+        if let Err(err) = self.reindex_controlled(control) {
+            (self.map, self.map_path, self.map_notes) = before;
+            return Err(err);
+        }
         self.summary()
     }
 
@@ -319,44 +334,25 @@ impl Session {
 
     pub fn stats(&self, name: &str, t0_us: u64, t1_us: u64) -> Result<WindowStats> {
         if let Some(channel) = self.math.iter().find(|channel| channel.name == name) {
-            let series = eval_channel(
-                channel,
-                &self.log()?.query(&QueryWindow {
-                    t0_us,
-                    t1_us,
-                    signals: compile(&channel.expr)?.dependencies(),
-                    max_points: 500_000,
-                })?,
-            )?;
+            let deps = compile(&channel.expr)?.dependencies();
+            let series = eval_channel(channel, &self.log()?.samples(&deps, t0_us, t1_us)?)?;
             return stats_of_points(name, &series);
         }
         self.log()?.stats(name, t0_us, t1_us)
     }
 
     pub fn export_csv(&self, names: &[String], t0_us: u64, t1_us: u64) -> Result<String> {
-        let physical: Vec<String> = names
+        let (math, physical): (Vec<String>, Vec<String>) = names
             .iter()
-            .filter(|name| self.math.iter().all(|channel| channel.name != **name))
             .cloned()
-            .collect();
-        let mut csv = if physical.is_empty() {
-            "t_us\n".to_string()
-        } else {
-            self.log()?.export_csv(&physical, t0_us, t1_us)?
-        };
-        if names
-            .iter()
-            .any(|name| self.math.iter().any(|channel| &channel.name == name))
-            && physical.len() != names.len()
-        {
-            return Err(Error::msg(
+            .partition(|name| self.math.iter().any(|channel| &channel.name == name));
+        match (math.is_empty(), physical.is_empty()) {
+            (true, _) => self.log()?.export_csv(&physical, t0_us, t1_us),
+            (false, true) => export_math_csv(self, &math, t0_us, t1_us),
+            (false, false) => Err(Error::msg(
                 "export the math channel on its own, or export physical signals on their own",
-            ));
+            )),
         }
-        if physical.is_empty() {
-            csv = export_math_csv(self, names, t0_us, t1_us)?;
-        }
-        Ok(csv)
     }
 
     pub fn export_slog(&self, t0_us: u64, t1_us: u64) -> Result<String> {
@@ -497,60 +493,65 @@ impl Session {
             .unwrap_or_else(|| PathBuf::from("."));
         let mut warnings = Vec::new();
 
-        match resolve_map(&base, project.signal_map_path.as_deref()) {
+        // Open the map and log into locals first. A project that fails to load
+        // leaves the deck that was open untouched.
+        let (map, map_path) = match resolve_map(&base, project.signal_map_path.as_deref()) {
             MapLoad::File(path) => {
                 let text = std::fs::read_to_string(&path).map_err(|err| Error::read(&path, err))?;
                 let mut map = parse_map_text(&text)?;
                 name_dbc_from_path(&mut map, &path);
-                self.map = Some(map);
-                self.map_path = Some(path);
+                (Some(map), Some(path))
             }
-            MapLoad::Embedded => {
-                self.map = Some(SignalMap::parse(SAMPLE_MAP)?);
-                self.map_path = Some(PathBuf::from(format!("fixtures/{SAMPLE_MAP_NAME}")));
-            }
+            MapLoad::Embedded => (
+                Some(SignalMap::parse(SAMPLE_MAP)?),
+                Some(PathBuf::from(format!("fixtures/{SAMPLE_MAP_NAME}"))),
+            ),
             MapLoad::Missing(stored) => {
                 warnings.push(format!(
                     "Signal map not found ({stored}). Frames will load without decode."
                 ));
-                self.map = None;
-                self.map_path = None;
+                (None, None)
             }
-            MapLoad::None => {
-                self.map = None;
-                self.map_path = None;
-            }
-        }
+            MapLoad::None => (None, None),
+        };
 
-        match resolve_log(&base, &project.log_path) {
+        let (log, log_label, log_path) = match resolve_log(&base, &project.log_path) {
             LogLoad::File(path) => {
-                self.log_label = path
+                let label = path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(SAMPLE_LOG_NAME)
                     .to_string();
-                self.log_path = Some(path.clone());
-                self.log = Some(IndexedLog::open_path(&path, self.map.as_ref())?);
+                (IndexedLog::open_path(&path, map.as_ref())?, label, path)
             }
             LogLoad::Embedded => {
-                self.log_label = SAMPLE_LOG_NAME.to_string();
-                self.log_path = Some(PathBuf::from(format!("fixtures/{SAMPLE_LOG_NAME}")));
-                self.log = Some(IndexedLog::open_bytes(
-                    SAMPLE_SLOG.as_bytes().to_vec(),
-                    self.map.as_ref(),
-                )?);
+                let log = IndexedLog::open_bytes(SAMPLE_SLOG.as_bytes().to_vec(), map.as_ref())?;
                 warnings.push(
                     "Opened the built-in cluster sample because the project log path was not on disk."
                         .into(),
                 );
+                (
+                    log,
+                    SAMPLE_LOG_NAME.to_string(),
+                    PathBuf::from(format!("fixtures/{SAMPLE_LOG_NAME}")),
+                )
             }
             LogLoad::Missing(stored) => {
                 return Err(Error::msg(format!(
                     "project log not found: {stored}. Open the log, then save the project again."
                 )));
             }
-        }
+        };
 
+        self.map_notes = map
+            .as_ref()
+            .map(|map| map.warnings.clone())
+            .unwrap_or_default();
+        self.map = map;
+        self.map_path = map_path;
+        self.log_label = log_label;
+        self.log_path = Some(log_path);
+        self.log = Some(log);
         self.math = project.math.clone();
         self.triggers = project.triggers.clone();
         self.compare_offset_us = project.compare_offset_us;
@@ -608,10 +609,6 @@ impl Session {
         self.log
             .as_ref()
             .ok_or_else(|| Error::msg("no log is open"))
-    }
-
-    fn reindex(&mut self) -> Result<()> {
-        self.reindex_controlled(None)
     }
 
     fn reindex_controlled(&mut self, control: Option<&IndexControl>) -> Result<()> {
@@ -775,7 +772,9 @@ fn eval_channel(channel: &MathChannel, base: &[Series]) -> Result<Series> {
             }
         }
         if ready {
-            points.push((t, compiled.eval(&vars, &mut lp_state)?));
+            if let Some(value) = compiled.eval(&vars, &mut lp_state)? {
+                points.push((t, value));
+            }
         }
     }
     Ok(Series {
@@ -817,15 +816,8 @@ fn export_math_csv(session: &Session, names: &[String], t0_us: u64, t1_us: u64) 
             .iter()
             .find(|channel| &channel.name == name)
             .ok_or_else(|| Error::msg(format!("no math channel named {name}")))?;
-        let series = eval_channel(
-            channel,
-            &session.log()?.query(&QueryWindow {
-                t0_us,
-                t1_us,
-                signals: compile(&channel.expr)?.dependencies(),
-                max_points: 500_000,
-            })?,
-        )?;
+        let deps = compile(&channel.expr)?.dependencies();
+        let series = eval_channel(channel, &session.log()?.samples(&deps, t0_us, t1_us)?)?;
         header.push(',');
         header.push_str(name);
         columns.push(series);
@@ -838,11 +830,15 @@ fn export_math_csv(session: &Session, names: &[String], t0_us: u64, t1_us: u64) 
     }
     let mut out = header;
     out.push('\n');
+    let mut cursors = vec![0usize; columns.len()];
     for t in times {
         out.push_str(&t.to_string());
-        for series in &columns {
+        for (series, cursor) in columns.iter().zip(cursors.iter_mut()) {
             out.push(',');
-            if let Some((_, value)) = series.points.iter().find(|(stamp, _)| *stamp == t) {
+            while *cursor < series.points.len() && series.points[*cursor].0 < t {
+                *cursor += 1;
+            }
+            if let Some((_, value)) = series.points.get(*cursor).filter(|(stamp, _)| *stamp == t) {
                 out.push_str(&format!("{value:.6}"));
             }
         }

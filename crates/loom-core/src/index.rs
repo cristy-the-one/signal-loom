@@ -1,7 +1,7 @@
 use crate::decode::DecodeSpec;
 use crate::error::{Error, Result};
 use crate::map::SignalMap;
-use crate::scan::{hex_payload, sniff, LogFormat, ReadSeek, Rec, RecKind, Scanner};
+use crate::scan::{hex_payload, sniff, FrameData, LogFormat, ReadSeek, Rec, RecKind, Scanner};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Read};
@@ -14,6 +14,8 @@ const MAX_CHECKPOINTS: usize = 4_096;
 const MAX_EVENTS: usize = 5_000;
 const MAX_WARNINGS: usize = 32;
 const MAX_QUERY_POINTS: usize = 8_000;
+/// Full-resolution reads for statistics and export. 16 bytes per sample.
+const MAX_WINDOW_SAMPLES: usize = 4_000_000;
 
 /// Shared with the UI while a path is indexed. The scan checks `cancel`
 /// every few dozen records and publishes how far the file has been read.
@@ -392,13 +394,15 @@ impl IndexedLog {
                     name: signal.name.clone(),
                     unit: signal.unit.clone(),
                     value,
-                    label: signal.table.iter().find_map(|(raw, text)| {
-                        if *raw == value.round() as i64 {
-                            Some(text.clone())
-                        } else {
-                            None
-                        }
-                    }),
+                    label: signal
+                        .spec
+                        .and_then(|spec| spec.raw_of(value))
+                        .and_then(|raw| {
+                            signal
+                                .table
+                                .iter()
+                                .find_map(|(key, text)| (*key == raw).then(|| text.clone()))
+                        }),
                 })
             })
             .collect())
@@ -531,35 +535,24 @@ impl IndexedLog {
         }
         match &rec.kind {
             RecKind::Frame {
-                id, data, channel, ..
+                id,
+                dlc,
+                data,
+                channel,
+                ..
             } => {
                 if let Some(indices) = self.msg_index.get(id) {
-                    let switch = indices.iter().find_map(|&idx| {
-                        let signal = &self.signals[idx];
-                        if !signal.mux_switch {
-                            return None;
-                        }
-                        if signal.channel != 0 && *channel != 0 && signal.channel != *channel {
-                            return None;
-                        }
-                        signal.spec.map(|spec| spec.decode(data).round() as u32)
-                    });
-                    for &idx in indices {
-                        let signal = &self.signals[idx];
-                        if signal.channel != 0 && *channel != 0 && signal.channel != *channel {
-                            continue;
-                        }
-                        if let Some(expected) = signal.mux_value {
-                            if switch != Some(expected) {
-                                continue;
-                            }
-                        }
-                        if let Some(spec) = signal.spec {
-                            let value = spec.decode(data);
+                    decode_frame(
+                        &self.signals,
+                        indices,
+                        *channel,
+                        *dlc,
+                        data,
+                        |idx, value| {
                             held[idx] = Some(value);
                             on_update(idx, value);
-                        }
-                    }
+                        },
+                    );
                 }
             }
             RecKind::Sample { name, value, .. } => {
@@ -594,6 +587,74 @@ impl IndexedLog {
             rate: frames as f64 / dt,
             load: (bits as f64 / dt) / 500_000.0,
         })
+    }
+
+    /// Every sample of `names` in the window, each series led by the value held
+    /// at `t0`. Unlike `query`, nothing is bucketed, so statistics and exports
+    /// see each sample. A window over `MAX_WINDOW_SAMPLES` is refused, not cut.
+    pub fn samples(&self, names: &[String], t0_us: u64, t1_us: u64) -> Result<Vec<Series>> {
+        let (t0, t1) = ordered_range(t0_us, t1_us);
+        let mut wanted = Vec::with_capacity(names.len());
+        let mut series = Vec::with_capacity(names.len());
+        for name in names {
+            let idx = self
+                .name_index
+                .get(name)
+                .copied()
+                .ok_or_else(|| Error::msg(format!("no signal named {name}")))?;
+            wanted.push(idx);
+            series.push(Series {
+                name: name.clone(),
+                unit: self.signals[idx].unit.clone(),
+                points: Vec::new(),
+            });
+        }
+        if self.checkpoints.is_empty() {
+            return Ok(series);
+        }
+        let start = self.floor_checkpoint(t0);
+        let mut held = self.snapshot(start);
+        let mut seeded = false;
+        let mut total = 0usize;
+        let seed = |held: &[Option<f64>], series: &mut [Series]| {
+            for (out, idx) in series.iter_mut().zip(&wanted) {
+                if let Some(value) = held.get(*idx).copied().flatten() {
+                    out.points.push((t0, value));
+                }
+            }
+        };
+        self.scan_from(self.checkpoints[start].offset, |rec| {
+            if rec.t_us > t1 {
+                return false;
+            }
+            if !seeded && rec.t_us >= t0 {
+                seed(&held, &mut series);
+                seeded = true;
+            }
+            self.touch(rec, &mut held, |signal, value| {
+                if rec.t_us < t0 {
+                    return;
+                }
+                if let Some(pos) = wanted.iter().position(|&idx| idx == signal) {
+                    let points = &mut series[pos].points;
+                    if points.last().is_some_and(|(t, _)| *t == rec.t_us) {
+                        points.pop();
+                    }
+                    points.push((rec.t_us, value));
+                    total += 1;
+                }
+            });
+            total <= MAX_WINDOW_SAMPLES
+        })?;
+        if total > MAX_WINDOW_SAMPLES {
+            return Err(Error::msg(format!(
+                "that window holds more than {MAX_WINDOW_SAMPLES} samples. Narrow it and try again"
+            )));
+        }
+        if !seeded {
+            seed(&held, &mut series);
+        }
+        Ok(series)
     }
 
     pub fn stats(&self, name: &str, t0_us: u64, t1_us: u64) -> Result<crate::dto::WindowStats> {
@@ -815,6 +876,45 @@ impl IndexedLog {
     }
 }
 
+/// Decode one frame's signals for a message. The mux switch and the selected
+/// branch compare raw values, and a frame too short for a signal leaves it held.
+fn decode_frame(
+    signals: &[SignalMeta],
+    indices: &[usize],
+    channel: u8,
+    dlc: u8,
+    data: &FrameData,
+    mut emit: impl FnMut(usize, f64),
+) {
+    let carried = |signal: &SignalMeta| {
+        let on_channel = signal.channel == 0 || channel == 0 || signal.channel == channel;
+        let spec = signal
+            .spec
+            .filter(|spec| spec.bytes_needed() <= usize::from(dlc));
+        spec.filter(|_| on_channel)
+    };
+    let switch = indices.iter().find_map(|&idx| {
+        let signal = &signals[idx];
+        signal
+            .mux_switch
+            .then(|| carried(signal))
+            .flatten()
+            .and_then(|spec| spec.switch_value(data))
+    });
+    for &idx in indices {
+        let signal = &signals[idx];
+        if signal
+            .mux_value
+            .is_some_and(|expected| switch != Some(expected))
+        {
+            continue;
+        }
+        if let Some(spec) = carried(signal) {
+            emit(idx, spec.decode(data));
+        }
+    }
+}
+
 impl SignalMeta {
     fn info(&self) -> SignalInfo {
         SignalInfo {
@@ -923,30 +1023,14 @@ fn scan_framed(
                     }
                     pending.clear();
                     if let Some(indices) = built.msg_index.get(id) {
-                        let switch = indices.iter().find_map(|&idx| {
-                            let signal = &built.signals[idx];
-                            if !signal.mux_switch {
-                                return None;
-                            }
-                            if signal.channel != 0 && *channel != 0 && signal.channel != *channel {
-                                return None;
-                            }
-                            signal.spec.map(|spec| spec.decode(data).round() as u32)
-                        });
-                        for &idx in indices {
-                            let signal = &built.signals[idx];
-                            if signal.channel != 0 && *channel != 0 && signal.channel != *channel {
-                                continue;
-                            }
-                            if let Some(expected) = signal.mux_value {
-                                if switch != Some(expected) {
-                                    continue;
-                                }
-                            }
-                            if let Some(spec) = signal.spec {
-                                pending.push((idx, spec.decode(data)));
-                            }
-                        }
+                        decode_frame(
+                            &built.signals,
+                            indices,
+                            *channel,
+                            *dlc,
+                            data,
+                            |idx, value| pending.push((idx, value)),
+                        );
                     }
                     for (idx, value) in pending.iter().copied() {
                         held[idx] = Some(value);

@@ -49,13 +49,16 @@ impl Compiled {
     }
 
     /// Evaluate one sample. `lp_state` keeps one-pole memory in walk order.
-    pub fn eval(&self, vars: &HashMap<String, f64>, lp_state: &mut Vec<f64>) -> Result<f64> {
+    /// A non-finite result, such as a division by zero, is `None`: that sample
+    /// is a gap in the channel, not an error for the whole query.
+    pub fn eval(
+        &self,
+        vars: &HashMap<String, f64>,
+        lp_state: &mut Vec<f64>,
+    ) -> Result<Option<f64>> {
         let mut slot = 0usize;
         let value = self.root.eval(vars, lp_state, &mut slot)?;
-        if !value.is_finite() {
-            return Err(Error::msg("math channel produced a non-finite value"));
-        }
-        Ok(value)
+        Ok(value.is_finite().then_some(value))
     }
 }
 
@@ -94,6 +97,10 @@ impl Node {
                 let sample = inner.eval(vars, lp_state, slot)?;
                 let index = *slot;
                 *slot += 1;
+                if !sample.is_finite() {
+                    // Keep the filter's memory clean; this sample is a gap.
+                    return Ok(sample);
+                }
                 if lp_state.len() <= index {
                     lp_state.resize(index + 1, sample);
                     return Ok(sample);
@@ -288,16 +295,29 @@ mod tests {
             ("WheelFR".to_string(), 98.5),
         ]);
         let mut state = Vec::new();
-        let value = compiled.eval(&vars, &mut state).unwrap();
+        let value = compiled.eval(&vars, &mut state).unwrap().unwrap();
         assert!((value - 1.5).abs() < 1e-9);
 
         let filtered = compile("lp(EngineRPM, 0.5)").unwrap();
         vars.insert("EngineRPM".to_string(), 0.0);
         let mut state = Vec::new();
-        assert!((filtered.eval(&vars, &mut state).unwrap() - 0.0).abs() < 1e-9);
+        assert!((filtered.eval(&vars, &mut state).unwrap().unwrap() - 0.0).abs() < 1e-9);
         vars.insert("EngineRPM".to_string(), 100.0);
-        let mid = filtered.eval(&vars, &mut state).unwrap();
+        let mid = filtered.eval(&vars, &mut state).unwrap().unwrap();
         assert!((mid - 50.0).abs() < 1e-6, "{mid}");
+    }
+
+    #[test]
+    fn a_zero_divisor_is_a_gap_and_keeps_the_filter_clean() {
+        let ratio = compile("lp(Torque / Speed, 0.5)").unwrap();
+        let mut state = Vec::new();
+        let mut vars = HashMap::from([("Torque".to_string(), 10.0), ("Speed".to_string(), 5.0)]);
+        assert_eq!(ratio.eval(&vars, &mut state).unwrap(), Some(2.0));
+        vars.insert("Speed".to_string(), 0.0);
+        assert_eq!(ratio.eval(&vars, &mut state).unwrap(), None);
+        vars.insert("Speed".to_string(), 2.5);
+        // 2 + 0.5 * (4 - 2): the gap did not reach the filter.
+        assert_eq!(ratio.eval(&vars, &mut state).unwrap(), Some(3.0));
     }
 
     #[test]

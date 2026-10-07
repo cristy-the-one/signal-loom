@@ -43,12 +43,55 @@ impl DecodeSpec {
 
     pub fn decode(self, data: &[u8]) -> f64 {
         let raw = extract_bits(data, self.start_bit, self.bit_length, self.endian);
-        let signed = if self.signed {
-            sign_extend(raw, self.bit_length)
+        let raw = if self.signed {
+            sign_extend(raw, self.bit_length) as f64
         } else {
-            raw as i64
+            raw as f64
         };
-        signed as f64 * self.factor + self.offset
+        raw * self.factor + self.offset
+    }
+
+    /// The raw multiplexer value. `VAL_` and mux ids name raw values, not scaled ones.
+    pub fn switch_value(self, data: &[u8]) -> Option<u32> {
+        u32::try_from(extract_bits(
+            data,
+            self.start_bit,
+            self.bit_length,
+            self.endian,
+        ))
+        .ok()
+    }
+
+    /// The raw integer behind a decoded value, for `VAL_` lookups.
+    pub fn raw_of(self, value: f64) -> Option<i64> {
+        if self.factor == 0.0 {
+            return None;
+        }
+        let raw = ((value - self.offset) / self.factor).round();
+        raw.is_finite().then_some(raw as i64)
+    }
+
+    /// Bytes the signal reads. A shorter frame does not carry it.
+    pub fn bytes_needed(self) -> usize {
+        match self.endian {
+            Endian::Little => {
+                let last = u32::from(self.start_bit) + u32::from(self.bit_length).max(1) - 1;
+                last as usize / 8 + 1
+            }
+            Endian::Big => {
+                let mut bit = self.start_bit;
+                let mut last = bit / 8;
+                for _ in 1..self.bit_length {
+                    bit = if bit.is_multiple_of(8) {
+                        bit.saturating_add(15)
+                    } else {
+                        bit - 1
+                    };
+                    last = last.max(bit / 8);
+                }
+                usize::from(last) + 1
+            }
+        }
     }
 }
 

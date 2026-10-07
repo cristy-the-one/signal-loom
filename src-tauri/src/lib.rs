@@ -11,6 +11,7 @@ struct AppState {
     phase: Arc<Mutex<Phase>>,
 }
 
+#[derive(Clone)]
 enum Phase {
     Idle,
     Running,
@@ -65,13 +66,13 @@ fn begin_add_map(state: State<'_, AppState>, path: String, channel: u8) -> Resul
 
 #[tauri::command(async)]
 fn index_progress(state: State<'_, AppState>) -> Result<IndexStatus, String> {
-    progress(&state)
+    progress(&state, true)
 }
 
 #[tauri::command(async)]
 fn cancel_index(state: State<'_, AppState>) -> Result<IndexStatus, String> {
     state.control.request_cancel();
-    progress(&state)
+    progress(&state, false)
 }
 
 fn begin(
@@ -112,7 +113,9 @@ fn begin(
     Ok(())
 }
 
-fn progress(state: &AppState) -> Result<IndexStatus, String> {
+/// `take` hands a finished result to the caller and resets to idle. Cancel
+/// only peeks, so a result that lands as Cancel is clicked still reaches the poll.
+fn progress(state: &AppState, take: bool) -> Result<IndexStatus, String> {
     let mut phase = state.phase.lock().map_err(|err| err.to_string())?;
     let (bytes_done, bytes_total, frames, skipped) = state.control.snapshot();
     let mut status = IndexStatus {
@@ -126,7 +129,12 @@ fn progress(state: &AppState) -> Result<IndexStatus, String> {
         summary: None,
         error: None,
     };
-    match std::mem::replace(&mut *phase, Phase::Idle) {
+    let current = if take {
+        std::mem::replace(&mut *phase, Phase::Idle)
+    } else {
+        phase.clone()
+    };
+    match current {
         Phase::Idle => status.idle = true,
         Phase::Running => {
             *phase = Phase::Running;

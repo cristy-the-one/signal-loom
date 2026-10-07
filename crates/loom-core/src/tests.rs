@@ -814,6 +814,172 @@ base hex timestamps absolute
 }
 
 #[test]
+fn a_cancelled_or_failed_load_keeps_the_deck_that_was_open() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let mut session = Session::new();
+    session.open_path(&root.join("cluster_drive.slog")).unwrap();
+    let before = session
+        .open_map_path(&root.join("cluster.map.json"))
+        .unwrap();
+    let names = |summary: &crate::Summary| {
+        summary
+            .signals
+            .iter()
+            .map(|signal| signal.name.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let cancelled = crate::IndexControl::default();
+    cancelled.request_cancel();
+    let dbc = root.join("hypercar_lap.dbc");
+    assert!(session
+        .add_map_path_controlled(&dbc, 0, Some(&cancelled))
+        .is_err());
+    let after_cancel = session.summary().unwrap();
+    assert_eq!(names(&after_cancel), names(&before));
+    assert_eq!(after_cancel.map_label, before.map_label);
+
+    let added = session.add_map_path(&dbc, 0).unwrap();
+    let mut once = Session::new();
+    once.open_path(&root.join("cluster_drive.slog")).unwrap();
+    once.open_map_path(&root.join("cluster.map.json")).unwrap();
+    let expected = once.add_map_path(&dbc, 0).unwrap();
+    assert_eq!(
+        names(&added),
+        names(&expected),
+        "the retry added the DBC once"
+    );
+
+    let broken = r#"{"format":"signal-loom","version":1,"logPath":"nowhere.slog",
+        "signalMapPath":"hypercar_lap.dbc","view":{"playheadUs":0,"spanUs":1000000,"plotted":[]}}"#;
+    let mut fresh = Session::new();
+    fresh.open_path(&root.join("cluster_drive.slog")).unwrap();
+    let kept = fresh.open_map_path(&root.join("cluster.map.json")).unwrap();
+    assert!(fresh.load_project_json(broken, Some(&root)).is_err());
+    let after_project = fresh.summary().unwrap();
+    assert_eq!(after_project.map_label, kept.map_label);
+    assert_eq!(names(&after_project), names(&kept));
+}
+
+#[test]
+fn math_stats_and_export_read_every_sample() {
+    // 20,000 samples: 0 with a 100 spike every 100th, so the true average is 1.
+    let mut csv = String::from("t_us,signal,value,unit\n");
+    for i in 0..20_000u64 {
+        let value = if i % 100 == 0 { 100 } else { 0 };
+        csv.push_str(&format!("{},A,{value},\n", i * 1000));
+    }
+    let mut session = Session::new();
+    session.open_bytes("spiky.csv", csv.into_bytes()).unwrap();
+    session
+        .set_math(vec![crate::MathChannel {
+            name: "Copy".into(),
+            unit: String::new(),
+            expr: "A * 1".into(),
+        }])
+        .unwrap();
+    let stats = session.stats("Copy", 0, 19_999_000).unwrap();
+    assert_eq!(stats.count, 20_000);
+    assert!((stats.avg - 1.0).abs() < 1e-9, "{}", stats.avg);
+    let exported = session.export_csv(&["Copy".into()], 0, 19_999_000).unwrap();
+    assert_eq!(
+        exported.lines().count(),
+        20_001,
+        "header plus one row per sample"
+    );
+}
+
+#[test]
+fn a_zero_divisor_leaves_a_gap_not_a_blank_plot() {
+    let csv = "t_us,signal,value,unit\n0,T,10,\n0,S,5,\n1000,S,0,\n2000,S,2,\n";
+    let mut session = Session::new();
+    session
+        .open_bytes("ratio.csv", csv.as_bytes().to_vec())
+        .unwrap();
+    session
+        .set_math(vec![crate::MathChannel {
+            name: "Ratio".into(),
+            unit: String::new(),
+            expr: "T / S".into(),
+        }])
+        .unwrap();
+    let series = session
+        .query(&crate::Query {
+            t0_us: 0,
+            t1_us: 2000,
+            signals: vec!["T".into(), "Ratio".into()],
+            max_points: 100,
+            include_compare: false,
+        })
+        .expect("one zero divisor must not fail the whole query");
+    let ratio = series.iter().find(|series| series.name == "Ratio").unwrap();
+    let points: Vec<(u64, f64)> = ratio
+        .points
+        .iter()
+        .map(|point| (point.t, point.v))
+        .collect();
+    assert_eq!(points, vec![(0, 2.0), (2000, 5.0)]);
+}
+
+#[test]
+fn value_tables_and_mux_ids_match_raw_values() {
+    let dbc = r#"
+BO_ 200 Scaled: 8 ECM
+ SG_ Sel M : 0|8@1+ (0.5,10) [0|255] "" Vector__XXX
+ SG_ Mode : 8|8@1+ (2,-4) [0|255] "" Vector__XXX
+ SG_ Branch m3 : 16|8@1+ (1,0) [0|255] "" Vector__XXX
+VAL_ 200 Mode 3 "Sport" 2 "Comfort" ;
+"#;
+    let map = crate::dbc::parse(dbc).unwrap();
+    // Sel raw 3 (11.5 scaled), Mode raw 3 (2 scaled), Branch 42.
+    let log = IndexedLog::open_bytes(b"F 0 C8 03032A0000000000\n".to_vec(), Some(&map)).unwrap();
+    let values = log.values_at(0).unwrap();
+    let get = |name: &str| values.iter().find(|value| value.name == name);
+    let mode = get("Mode").expect("Mode");
+    assert_eq!(mode.value, 2.0);
+    assert_eq!(mode.label.as_deref(), Some("Sport"));
+    assert_eq!(get("Branch").map(|value| value.value), Some(42.0));
+}
+
+#[test]
+fn short_frames_leave_their_missing_signals_unset() {
+    let dbc = r#"
+BO_ 300 Short: 8 ECM
+ SG_ Head : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ TailLe : 48|16@1+ (1,0) [0|65535] "" Vector__XXX
+ SG_ TailBe : 55|16@0+ (1,0) [0|65535] "" Vector__XXX
+BO_ 400 Wide: 8 ECM
+ SG_ Odo : 0|64@1+ (1,0) [0|0] "" Vector__XXX
+"#;
+    let map = crate::dbc::parse(dbc).unwrap();
+    let text = "F 0 12C 07\nF 1000 190 FFFFFFFFFFFFFFFF\n";
+    let log = IndexedLog::open_bytes(text.as_bytes().to_vec(), Some(&map)).unwrap();
+    let values = log.values_at(1000).unwrap();
+    let get = |name: &str| {
+        values
+            .iter()
+            .find(|value| value.name == name)
+            .map(|value| value.value)
+    };
+    assert_eq!(get("Head"), Some(7.0));
+    assert_eq!(
+        get("TailLe"),
+        None,
+        "a 1-byte frame does not carry bytes 6-7"
+    );
+    assert_eq!(
+        get("TailBe"),
+        None,
+        "a 1-byte frame does not carry bytes 6-7"
+    );
+    assert_eq!(
+        get("Odo"),
+        Some(u64::MAX as f64),
+        "unsigned 64-bit stays positive"
+    );
+}
+
+#[test]
 fn multiplex_value_table_and_a_second_dbc() {
     let dbc = r#"
 BO_ 100 MuxMsg: 8 ECM
