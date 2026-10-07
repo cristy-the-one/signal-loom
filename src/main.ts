@@ -31,6 +31,7 @@ import type {
   ProjectFile,
   ProjectOpen,
   Series,
+  SignalInfo,
   Summary,
   ThresholdTrigger,
   ValueRead,
@@ -186,11 +187,25 @@ function duration(summary: Summary): number {
   return Math.max(1, summary.tEndUs - summary.tStartUs);
 }
 
+/** A signal has data when the log decoded at least one sample of it. */
+function hasData(signal: SignalInfo): boolean {
+  return signal.min != null || signal.messageName === "Math";
+}
+
+/** Three signals worth a first look: ones with data, not checksums or counters. */
 function defaultPlotted(summary: Summary): string[] {
-  const names = new Set(summary.signals.map((signal) => signal.name));
+  const live = summary.signals.filter(hasData);
+  const names = new Set(live.map((signal) => signal.name));
   const preferred = ["VehicleSpeed", "EngineRPM", "BrakePressure"].filter((name) => names.has(name));
   if (preferred.length) return preferred;
-  return summary.signals.slice(0, 3).map((signal) => signal.name);
+  const housekeeping = /checksum|counter|crc|alive/i;
+  const useful = live.filter((signal) => !housekeeping.test(signal.name));
+  const pool = useful.length ? useful : live;
+  // A signal that never changes draws a flat line: prefer ones that move.
+  const moves = (signal: SignalInfo) => signal.min != null && signal.max != null && signal.max > signal.min;
+  return [...pool.filter(moves), ...pool.filter((signal) => !moves(signal))]
+    .slice(0, 3)
+    .map((signal) => signal.name);
 }
 
 function colorFor(name: string): string {
@@ -334,7 +349,8 @@ function renderChrome(): void {
     return;
   }
   els.logName.textContent = summary.logLabel;
-  const map = summary.mapLabel ?? "no signal map";
+  const fit = summary.mapMatch ? ` (fits ${summary.mapMatch.matched} of ${summary.mapMatch.total} messages)` : "";
+  const map = summary.mapLabel ? `${summary.mapLabel}${fit}` : "no signal map";
   const skipped = summary.skippedRecords ? ` · ${formatCount(summary.skippedRecords)} skipped` : "";
   els.logMeta.textContent = `${formatCount(summary.frameCount)} frames · ${formatCount(summary.checkpointCount)} checkpoints · ${formatBytes(summary.bytes)} · ${summary.format}${skipped} · ${map}`;
   const warnings = summary.warnings ?? [];
@@ -398,9 +414,12 @@ function renderSignals(): void {
     els.sigList.append(note);
     return;
   }
-  for (const signal of signals) {
+  // Signals this log carries first; the rest of the map is listed, dimmed.
+  const ordered = [...signals.filter(hasData), ...signals.filter((signal) => !hasData(signal))];
+  for (const signal of ordered) {
     const row = document.createElement("label");
-    row.className = "sig";
+    row.className = hasData(signal) ? "sig" : "sig is-empty";
+    if (!hasData(signal)) row.title = "No frame in this log carries this signal";
     const input = document.createElement("input");
     input.type = "checkbox";
     input.checked = state.plotted.includes(signal.name);
@@ -770,7 +789,8 @@ function adoptSummary(summary: Summary, mode: "fresh" | "keep"): void {
     resetDeck();
   } else {
     state.plotted = state.plotted.filter((name) => summary.signals.some((signal) => signal.name === name));
-    if (state.plotted.length === 0) state.plotted = defaultPlotted(summary);
+    const plottedWithData = summary.signals.some((signal) => hasData(signal) && state.plotted.includes(signal.name));
+    if (!plottedWithData) state.plotted = defaultPlotted(summary);
     state.playhead = clamp(state.playhead, summary.tStartUs, summary.tEndUs);
     state.span = clamp(state.span, MIN_SPAN, duration(summary));
     state.overview = null;

@@ -17,6 +17,8 @@ export interface Summary {
   warnings: string[];
   /** Cycle times without a frame before a message is marked late. */
   timeoutFactor: number;
+  /** How many of the map's messages appear in this log. */
+  mapMatch: { matched: number; total: number } | null;
 }
 
 export interface IndexStatus {

@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 pub struct Summary {
     /// Message timeout in cycle times.
     pub timeout_factor: f64,
+    /// How many of the map's messages appear in the log. `None` without a
+    /// map, or for a log without CAN frames.
+    pub map_match: Option<MapMatch>,
     pub log_label: String,
     pub log_path: Option<String>,
     pub map_label: Option<String>,
@@ -21,6 +24,13 @@ pub struct Summary {
     pub events: Vec<EventDto>,
     pub skipped_records: u64,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapMatch {
+    pub matched: u32,
+    pub total: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

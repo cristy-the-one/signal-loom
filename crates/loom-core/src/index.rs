@@ -2,7 +2,7 @@ use crate::decode::DecodeSpec;
 use crate::error::{Error, Result};
 use crate::map::SignalMap;
 use crate::scan::{hex_payload, sniff, FrameData, LogFormat, ReadSeek, Rec, RecKind, Scanner};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -141,6 +141,8 @@ pub struct IndexedLog {
     name_index: HashMap<String, usize>,
     msg_index: HashMap<u32, Vec<usize>>,
     message_names: HashMap<u32, String>,
+    /// Every CAN id that has at least one frame in the log.
+    seen_ids: HashSet<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +208,7 @@ struct Built {
     name_index: HashMap<String, usize>,
     msg_index: HashMap<u32, Vec<usize>>,
     message_names: HashMap<u32, String>,
+    seen_ids: HashSet<u32>,
 }
 
 impl IndexedLog {
@@ -252,6 +255,11 @@ impl IndexedLog {
 
     pub fn frame_count(&self) -> u64 {
         self.frame_count
+    }
+
+    /// Whether any frame in the log carries this CAN id.
+    pub fn carries_id(&self, id: u32) -> bool {
+        self.seen_ids.contains(&id)
     }
 
     pub fn event_count(&self) -> u64 {
@@ -496,6 +504,7 @@ impl IndexedLog {
             name_index: built.name_index,
             msg_index: built.msg_index,
             message_names: built.message_names,
+            seen_ids: built.seen_ids,
         })
     }
 
@@ -1067,6 +1076,7 @@ fn scan_framed(
                             held: &held,
                         },
                     );
+                    built.seen_ids.insert(*id);
                     note_domain(&mut built, rec.t_us);
                     built.frame_count += 1;
                 }
@@ -1165,6 +1175,7 @@ fn empty_built(
         name_index,
         msg_index,
         message_names,
+        seen_ids: HashSet::new(),
     }
 }
 
