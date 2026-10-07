@@ -1005,6 +1005,7 @@ fn scan_framed(
         .unwrap_or_default();
     let mut last_seen: HashMap<u32, u64> = HashMap::new();
     let mut last_counter: HashMap<usize, u64> = HashMap::new();
+    let checksums = source.with_reader(|reader| probe_checksums(&mut built, reader, format))?;
     let mut pulses = 0u64;
     source.with_reader(|reader| {
         let mut scanner = Scanner::open(reader, format)?;
@@ -1053,6 +1054,7 @@ fn scan_framed(
                         &cycles,
                         &mut last_seen,
                         &mut last_counter,
+                        &checksums,
                         IntegrityFrame {
                             t_us: rec.t_us,
                             id: *id,
@@ -1237,6 +1239,7 @@ fn note_integrity(
     cycles: &HashMap<u32, u64>,
     last_seen: &mut HashMap<u32, u64>,
     last_counter: &mut HashMap<usize, u64>,
+    checksums: &HashMap<usize, ChecksumAlgo>,
     frame: IntegrityFrame<'_>,
 ) {
     if let Some(cycle) = cycles.get(&frame.id).copied() {
@@ -1256,7 +1259,33 @@ fn note_integrity(
     let Some(indices) = built.msg_index.get(&frame.id).cloned() else {
         return;
     };
-    for idx in indices {
+    // Checksums first, as an ECU checks them: a frame that fails its checksum
+    // is rejected, so its counter neither raises an event nor moves the reference.
+    let mut corrupt = false;
+    for &idx in &indices {
+        let Some(spec) = built.signals[idx].spec else {
+            continue;
+        };
+        let lname = built.signals[idx].name.to_ascii_lowercase();
+        if lname.contains("checksum") && spec.bit_length == 8 {
+            let byte = (spec.start_bit / 8) as usize;
+            let width = (frame.dlc as usize).min(frame.data.len());
+            if byte < width {
+                if let Some(algo) = checksums.get(&idx) {
+                    let covered = covered_bytes(frame.data, width, byte);
+                    if algo.compute(&covered) != frame.data[byte] {
+                        corrupt = true;
+                        let name = built.signals[idx].name.clone();
+                        note_event(built, frame.t_us, &format!("Checksum {name}"));
+                    }
+                }
+            }
+        }
+    }
+    if corrupt {
+        return;
+    }
+    for &idx in &indices {
         let Some(spec) = built.signals[idx].spec else {
             continue;
         };
@@ -1276,23 +1305,160 @@ fn note_integrity(
                 last_counter.insert(idx, raw);
             }
         }
-        if lname.contains("checksum") {
-            let byte = (spec.start_bit / 8) as usize;
-            let width = (frame.dlc as usize).min(frame.data.len());
-            if byte < width {
-                let mut xor = 0u8;
-                for (i, item) in frame.data.iter().take(width).enumerate() {
-                    if i != byte {
-                        xor ^= item;
-                    }
-                }
-                if xor != frame.data[byte] {
-                    let name = built.signals[idx].name.clone();
-                    note_event(built, frame.t_us, &format!("Checksum {name}"));
-                }
+    }
+}
+
+/// 8-bit checksum schemes a probe can recognise. Each covers every payload
+/// byte except the checksum byte itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChecksumAlgo {
+    Xor,
+    Sum,
+    /// SAE J1850: polynomial 0x1D, init 0xFF, final XOR 0xFF.
+    CrcJ1850,
+    /// AUTOSAR CRC8H2F: polynomial 0x2F, init 0xFF, final XOR 0xFF.
+    Crc8H2F,
+}
+
+impl ChecksumAlgo {
+    /// XOR first: it is what a mostly-good short log falls back to.
+    const ALL: [ChecksumAlgo; 4] = [Self::Xor, Self::Sum, Self::CrcJ1850, Self::Crc8H2F];
+
+    pub(crate) fn compute(self, bytes: &[u8]) -> u8 {
+        match self {
+            Self::Xor => bytes.iter().fold(0, |acc, byte| acc ^ byte),
+            Self::Sum => bytes.iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte)),
+            Self::CrcJ1850 => crc8(bytes, 0x1D),
+            Self::Crc8H2F => crc8(bytes, 0x2F),
+        }
+    }
+}
+
+fn crc8(bytes: &[u8], poly: u8) -> u8 {
+    let mut crc = 0xFFu8;
+    for byte in bytes {
+        crc ^= byte;
+        for _ in 0..8 {
+            crc = if crc & 0x80 != 0 {
+                (crc << 1) ^ poly
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc ^ 0xFF
+}
+
+/// Frames a checksum is watched for before its scheme is judged.
+const CHECKSUM_PROBE: usize = 16;
+/// The pre-pass stops here even if a checksum message never shows up.
+const CHECKSUM_PROBE_RECORDS: u64 = 200_000;
+
+fn covered_bytes(data: &[u8], width: usize, checksum_byte: usize) -> Vec<u8> {
+    (0..width)
+        .filter(|&i| i != checksum_byte)
+        .map(|i| data[i])
+        .collect()
+}
+
+/// A DBC names checksum signals but not their scheme. Read the start of the
+/// log once, before the build, and settle each one: a scheme that matches 90%
+/// of its first frames is used; otherwise XOR stays if it matched at least
+/// half, as before; otherwise the signal is not checked, with a note. Settling
+/// first means the build checks every frame, from the first, the same way.
+fn probe_checksums(
+    built: &mut Built,
+    reader: &mut dyn ReadSeek,
+    format: LogFormat,
+) -> Result<HashMap<usize, ChecksumAlgo>> {
+    let mut seen: HashMap<usize, Vec<u8>> = built
+        .signals
+        .iter()
+        .enumerate()
+        .filter(|(_, signal)| {
+            signal.name.to_ascii_lowercase().contains("checksum")
+                && signal.spec.is_some_and(|spec| spec.bit_length == 8)
+        })
+        .map(|(idx, _)| (idx, Vec::new()))
+        .collect();
+    if seen.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut scanner = Scanner::open(reader, format)?;
+    let mut records = 0u64;
+    while let Some(rec) = scanner.next_rec()? {
+        records += 1;
+        if records > CHECKSUM_PROBE_RECORDS {
+            break;
+        }
+        let RecKind::Frame { id, dlc, data, .. } = &rec.kind else {
+            continue;
+        };
+        let Some(indices) = built.msg_index.get(id) else {
+            continue;
+        };
+        let width = usize::from(*dlc).min(data.len());
+        for idx in indices {
+            let Some(masks) = seen
+                .get_mut(idx)
+                .filter(|masks| masks.len() < CHECKSUM_PROBE)
+            else {
+                continue;
+            };
+            let Some(spec) = built.signals[*idx].spec else {
+                continue;
+            };
+            let byte = usize::from(spec.start_bit / 8);
+            if byte >= width {
+                continue;
+            }
+            let covered = covered_bytes(data, width, byte);
+            let mask = ChecksumAlgo::ALL
+                .iter()
+                .enumerate()
+                .filter(|(_, algo)| algo.compute(&covered) == data[byte])
+                .fold(0u8, |mask, (bit, _)| mask | 1 << bit);
+            masks.push(mask);
+        }
+        if seen.values().all(|masks| masks.len() >= CHECKSUM_PROBE) {
+            break;
+        }
+    }
+    let mut settled = HashMap::new();
+    let mut probed: Vec<(usize, Vec<u8>)> = seen
+        .into_iter()
+        .filter(|(_, masks)| !masks.is_empty())
+        .collect();
+    probed.sort_unstable_by_key(|(idx, _)| *idx);
+    for (idx, masks) in probed {
+        let hits = |bit: usize| masks.iter().filter(|mask| *mask & (1 << bit) != 0).count();
+        let (best, best_hits) = (0..ChecksumAlgo::ALL.len())
+            .map(|bit| (bit, hits(bit)))
+            .max_by_key(|&(bit, count)| (count, std::cmp::Reverse(bit)))
+            .unwrap_or((0, 0));
+        let chosen = if best_hits * 10 >= masks.len() * 9 {
+            Some(best)
+        } else if hits(0) * 2 >= masks.len() {
+            Some(0)
+        } else {
+            None
+        };
+        match chosen {
+            Some(bit) => {
+                settled.insert(idx, ChecksumAlgo::ALL[bit]);
+            }
+            None => {
+                let name = built.signals[idx].name.clone();
+                note_warn(
+                    built,
+                    format!(
+                        "{name} is not an XOR, byte sum, SAE J1850 or CRC-8H2F checksum of the other bytes, so it is not checked"
+                    ),
+                );
             }
         }
     }
+    Ok(settled)
 }
 
 fn note_event(built: &mut Built, t_us: u64, label: &str) {

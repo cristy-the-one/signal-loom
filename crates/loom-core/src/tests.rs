@@ -341,26 +341,20 @@ fn math_stats_export_and_integrity() {
         ]}"#,
     )
     .unwrap();
-    // counter 1 then 4 (skip), checksum byte 7 is XOR of the rest, second frame is wrong
-    let good = {
+    // Checksum byte 7 is the XOR of the rest. Counter 1, then 4 (a skip) in a
+    // good frame, then a frame with a bad checksum: rejected before its counter.
+    let frame = |counter: u8| {
         let mut data = [0u8; 8];
-        data[0] = 1;
-        let mut xor = 0u8;
-        for byte in &data[..7] {
-            xor ^= byte;
-        }
-        data[7] = xor;
+        data[0] = counter;
+        data[7] = data[..7].iter().fold(0, |acc, byte| acc ^ byte);
         data
     };
-    let bad = {
-        let mut data = good;
-        data[0] = 4;
-        data[7] ^= 0xFF;
-        data
-    };
+    let mut bad = frame(5);
+    bad[7] ^= 0xFF;
     let text = format!(
-        "SLOGv1\nF 0 100 {}\nF 80000 100 {}\n",
-        hex(&good),
+        "SLOGv1\nF 0 100 {}\nF 80000 100 {}\nF 90000 100 {}\n",
+        hex(&frame(1)),
+        hex(&frame(4)),
         hex(&bad)
     );
     let wheels = "F 0 300 6460\nF 10000 300 6260\n";
@@ -1034,6 +1028,74 @@ VAL_ 100 Gear 0 "N" 1 "D" 2 "R" ;
     assert!(
         names.iter().any(|name| name.starts_with("Mode@")),
         "{names:?}"
+    );
+}
+
+#[test]
+fn checksum_crcs_match_their_published_check_values() {
+    use crate::index::ChecksumAlgo;
+    assert_eq!(ChecksumAlgo::CrcJ1850.compute(b"123456789"), 0x4B);
+    assert_eq!(ChecksumAlgo::Crc8H2F.compute(b"123456789"), 0xDF);
+}
+
+/// An SWM-style message: CRC-8/SAE-J1850 in byte 0 over bytes 1..DLC-1, a
+/// 4-bit counter in the low nibble of byte 1, DLC 5, 100 ms apart.
+fn swm_style_log(checksum_of: impl Fn(usize, &[u8]) -> u8) -> String {
+    let mut text = String::new();
+    for i in 0..20usize {
+        let mut frame = [0u8, ((i + 1) % 16) as u8 | 0x30, 0x12, i as u8, 0x7F];
+        frame[0] = checksum_of(i, &frame[1..]);
+        text.push_str(&format!("F {} 334 {}\n", i * 100_000, hex(&frame)));
+    }
+    text
+}
+
+const SWM_DBC: &str = r#"
+BO_ 820 ZcuLeds: 5 ZCU
+ SG_ Checksum : 0|8@1+ (1,0) [0|255] "" SWM
+ SG_ Counter : 8|4@1+ (1,0) [0|15] "" SWM
+ SG_ Led : 12|4@1+ (1,0) [0|15] "" SWM
+"#;
+
+#[test]
+fn a_crc_checksum_is_recognised_and_a_bad_frame_is_seen_as_the_ecu_sees_it() {
+    use crate::index::ChecksumAlgo;
+    let map = crate::dbc::parse(SWM_DBC).unwrap();
+    // Frame 10 is corrupted in its checksum byte only.
+    let text = swm_style_log(|i, covered| {
+        let crc = ChecksumAlgo::CrcJ1850.compute(covered);
+        if i == 10 {
+            crc ^ 0x55
+        } else {
+            crc
+        }
+    });
+    let log = IndexedLog::open_bytes(text.into_bytes(), Some(&map)).unwrap();
+    let mut events: Vec<(u64, String)> = log.events().to_vec();
+    events.sort();
+    // The rejected frame leaves the counter reference at frame 9, so frame 11
+    // arrives as a jump, as the receiving ECU sees it.
+    assert_eq!(
+        events,
+        vec![
+            (1_000_000, "Checksum Checksum".to_string()),
+            (1_100_000, "Counter Counter".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn an_unknown_checksum_scheme_is_noted_not_flagged() {
+    let map = crate::dbc::parse(SWM_DBC).unwrap();
+    let text = swm_style_log(|i, _| (i as u8).wrapping_mul(37).wrapping_add(11));
+    let log = IndexedLog::open_bytes(text.into_bytes(), Some(&map)).unwrap();
+    assert!(log.events().is_empty(), "{:?}", log.events());
+    assert!(
+        log.warnings()
+            .iter()
+            .any(|warning| warning.contains("not checked")),
+        "{:?}",
+        log.warnings()
     );
 }
 
