@@ -392,6 +392,20 @@ impl Session {
         self.log()?.export_slog(t0_us, t1_us)
     }
 
+    /// Export to a `.csv` file on disk. Returns the bytes written.
+    pub fn save_csv(&self, path: &Path, names: &[String], t0_us: u64, t1_us: u64) -> Result<u64> {
+        let text = self.export_csv(names, t0_us, t1_us)?;
+        project::write_as(path, "csv", &text)?;
+        Ok(text.len() as u64)
+    }
+
+    /// Trim the log to a `.slog` file on disk. Returns the bytes written.
+    pub fn save_slog(&self, path: &Path, t0_us: u64, t1_us: u64) -> Result<u64> {
+        let text = self.export_slog(t0_us, t1_us)?;
+        project::write_as(path, "slog", &text)?;
+        Ok(text.len() as u64)
+    }
+
     pub fn bus_load(&self, t0_us: u64, t1_us: u64) -> Result<crate::dto::BusLoad> {
         self.log()?.bus_load(t0_us, t1_us)
     }

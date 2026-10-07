@@ -309,6 +309,16 @@ async function textCall(path: string, command: string, args: Record<string, unkn
   return data.text;
 }
 
+/** Desktop only: write a CSV export to `path` (.csv). Resolves to the bytes written. */
+export function saveCsv(path: string, names: string[], t0Us: number, t1Us: number): Promise<number> {
+  return invoke<number>("save_csv", { path, names, t0Us: us(t0Us), t1Us: us(t1Us) });
+}
+
+/** Desktop only: write the trimmed log to `path` (.slog). Resolves to the bytes written. */
+export function saveSlog(path: string, t0Us: number, t1Us: number): Promise<number> {
+  return invoke<number>("save_slog", { path, t0Us: us(t0Us), t1Us: us(t1Us) });
+}
+
 export function writeProject(path: string, project: ProjectFile): Promise<void> {
   if (!inTauri()) return Promise.reject(new Error("Saving to a path needs the desktop app."));
   return invoke<void>("write_project", { path, project });

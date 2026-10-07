@@ -67,7 +67,7 @@ python3 scripts/gen_fixture.py
 - `.loom` projects store the log path, map path, bookmarks, playhead, span, plotted signals, math channels, triggers, notes, cursors, and an optional compare log.
 - Scrub, frame step, event step, playback, and overlay plots call that indexer. The plot keeps a hover crosshair, measurement cursors, and wheel zoom anchored on the cursor.
 - A cluster strip (speed, rpm, gear, temperatures, SoC or fuel, telltales) and a one-second bus-load strip follow the playhead. The timeline is a minimap of the whole drive, with an event lane coloured by severity.
-- Math channels (`WheelFL - WheelFR`, `abs`, `lp`), threshold triggers, cursor statistics, CSV and trimmed SLOGv1 export, and a second log aligned by a time offset.
+- Math channels (`WheelFL - WheelFR`, `abs`, `lp`), threshold triggers, cursor statistics, CSV and trimmed SLOGv1 export (a Save dialog on the desktop, a download in the browser preview), and a second log aligned by a time offset.
 - With a DBC or map loaded, a message late by more than 2.5 cycle times (set on the Alerts tab and saved with the project), a broken counter, or a bad checksum is marked on the event lane. The checksum scheme is recognised from the first 16 frames: XOR, byte sum, CRC-8/SAE-J1850 or CRC-8H2F over the other bytes. A frame with a bad checksum is rejected before its counter is checked, as an ECU does.
 - SocketCAN capture is opt-in and Linux-only. The socket is opened read-only. Signal Loom does not transmit.
 - While a log is indexing, the viewport blurs and dims and the veil shows progress. The signal list stays put.

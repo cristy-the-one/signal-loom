@@ -233,6 +233,27 @@ fn export_slog(state: State<'_, AppState>, t0_us: u64, t1_us: u64) -> Result<Str
 }
 
 #[tauri::command(async)]
+fn save_csv(
+    state: State<'_, AppState>,
+    path: String,
+    names: Vec<String>,
+    t0_us: u64,
+    t1_us: u64,
+) -> Result<u64, String> {
+    lift(lock(&state)?.save_csv(PathBuf::from(path).as_path(), &names, t0_us, t1_us))
+}
+
+#[tauri::command(async)]
+fn save_slog(
+    state: State<'_, AppState>,
+    path: String,
+    t0_us: u64,
+    t1_us: u64,
+) -> Result<u64, String> {
+    lift(lock(&state)?.save_slog(PathBuf::from(path).as_path(), t0_us, t1_us))
+}
+
+#[tauri::command(async)]
 fn set_math(
     state: State<'_, AppState>,
     channels: Vec<MathChannel>,
@@ -332,6 +353,8 @@ pub fn run() {
             signal_stats,
             export_csv,
             export_slog,
+            save_csv,
+            save_slog,
             set_math,
             set_triggers,
             set_timeout_factor,

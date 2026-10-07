@@ -228,6 +228,20 @@ function setError(message: string, fromQuery = false): void {
   els.error.textContent = message;
 }
 
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** A short confirmation, such as a saved export. It clears itself. */
+function setNotice(message: string): void {
+  const notice = document.getElementById("notice") as HTMLElement;
+  notice.textContent = message;
+  notice.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    notice.hidden = true;
+    notice.textContent = "";
+  }, 6000);
+}
+
 function clearError(): void {
   queryError = false;
   els.error.hidden = true;
@@ -925,7 +939,8 @@ function download(name: string, text: string, type = "application/json"): void {
   link.href = url;
   link.download = name;
   link.click();
-  URL.revokeObjectURL(url);
+  // Revoking at once can cancel the download before it starts.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 async function pick(filters: { name: string; extensions: string[] }[]): Promise<string | null> {
@@ -934,6 +949,18 @@ async function pick(filters: { name: string; extensions: string[] }[]): Promise<
   if (typeof picked === "string") return picked;
   if (Array.isArray(picked)) return picked[0] ?? null;
   return null;
+}
+
+async function pickExport(kind: "csv" | "slog", suggested: string): Promise<string | null> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  return save({
+    defaultPath: suggested,
+    filters: [
+      kind === "csv"
+        ? { name: "CSV", extensions: ["csv"] }
+        : { name: "Signal Loom log", extensions: ["slog"] },
+    ],
+  });
 }
 
 async function pickSave(): Promise<string | null> {
@@ -1555,14 +1582,28 @@ async function exportRange(kind: "csv" | "slog"): Promise<void> {
     setError("Open a log before exporting.");
     return;
   }
+  const names = state.plotted.length ? state.plotted : state.summary.signals.slice(0, 1).map((signal) => signal.name);
+  const suggested = `signal-loom-${Math.round(window.t0)}-${Math.round(window.t1)}.${kind}`;
+  if (api.inTauri()) {
+    // The desktop webview has no download UI: ask where, and let Rust write it.
+    let path = await pickExport(kind, suggested);
+    if (!path) return;
+    if (!path.toLowerCase().endsWith(`.${kind}`)) path += `.${kind}`;
+    const target = path;
+    await withBusy(kind === "csv" ? "Exporting CSV" : "Trimming log", async () => {
+      const bytes =
+        kind === "csv"
+          ? await api.saveCsv(target, names, window.t0, window.t1)
+          : await api.saveSlog(target, window.t0, window.t1);
+      setNotice(`Saved ${basename(target)} (${formatBytes(bytes)})`);
+    });
+    return;
+  }
   await withBusy(kind === "csv" ? "Exporting CSV" : "Trimming log", async () => {
     if (kind === "csv") {
-      const names = state.plotted.length ? state.plotted : state.summary!.signals.slice(0, 1).map((signal) => signal.name);
-      const text = await api.exportCsv(names, window.t0, window.t1);
-      download(`signal-loom-${Math.round(window.t0)}-${Math.round(window.t1)}.csv`, text, "text/csv");
+      download(suggested, await api.exportCsv(names, window.t0, window.t1), "text/csv");
     } else {
-      const text = await api.exportSlog(window.t0, window.t1);
-      download(`signal-loom-${Math.round(window.t0)}-${Math.round(window.t1)}.slog`, text, "text/plain");
+      download(suggested, await api.exportSlog(window.t0, window.t1), "text/plain");
     }
   });
 }
