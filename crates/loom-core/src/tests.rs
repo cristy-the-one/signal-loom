@@ -174,16 +174,21 @@ fn query_window_stays_bounded_on_a_large_log() {
 
 #[test]
 fn skips_backwards_time_and_rejects_duplicate_signals() {
-    let text = "SLOGv1\nF 10 1A0 0000\nF 5 1A0 0000\nF 20 1A0 0100\n";
+    // 5 µs back is Tx/Rx interleave: kept at 10. 80 ms back is a broken log: skipped.
+    let text = "SLOGv1\nF 10 1A0 0000\nF 5 1A0 0000\nF 20 1A0 0100\nF 100000 1A0 0000\nF 20000 1A0 0000\nF 100010 1A0 0000\n";
     let log = IndexedLog::open_bytes(text.as_bytes().to_vec(), None).unwrap();
-    assert_eq!(log.frame_count(), 2);
-    assert!(log.skipped() >= 1);
-    assert!(
+    assert_eq!(log.frame_count(), 5);
+    assert_eq!(log.skipped(), 1);
+    let warned = |needle: &str| {
         log.warnings()
             .iter()
-            .any(|warning| warning.contains("backwards")),
-        "{:?}",
-        log.warnings()
+            .any(|warning| warning.contains(needle))
+    };
+    assert!(warned("backwards"), "{:?}", log.warnings());
+    assert!(warned("out of order"), "{:?}", log.warnings());
+    assert!(
+        log.step_frame(10, false).unwrap().is_none(),
+        "replay keeps the 5 µs frame at 10 too, so nothing comes before 10"
     );
 
     let err = SignalMap::parse(
@@ -1030,6 +1035,48 @@ VAL_ 100 Gear 0 "N" 1 "D" 2 "R" ;
         names.iter().any(|name| name.starts_with("Mode@")),
         "{names:?}"
     );
+}
+
+#[test]
+fn asc_from_a_logger_that_writes_microseconds_and_names() {
+    // Whole-number stamps in µs, a Start marker, a tool-level `Node.Message`
+    // line, a hex DLC code (c = 24 bytes) and one Rx line 2 ms out of order.
+    let text = "\
+date Fri, Jul 24, 2026, 13:16:47
+base hex  timestamps absolute
+internal events logged
+Begin Triggerblock Fri, Jul 24, 2026, 13:16:47
+0.000000 Start of measurement
+0.000000 1  335             Rx   d 8 01 02 03 04 05 06 07 08
+9843.000000 1  335             Rx   d 8 01 02 03 04 05 06 07 08
+10356.000000 1  33A             Rx   d 8 01 02 03 04 05 06 07 08
+12000.000000 1  NODE_1.TRANSFERDATA Tx   d f 01 02 03
+29257.000000 1  339             Tx   d 5 01 02 03 04 05
+27257.000000 1  336             Rx   d 5 01 02 03 04 05
+48690.000000 1  336             Rx   d c 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17
+100609.000000 1  334             Tx   d 5 01 02 03 04 05
+133699.000000 1  337             Tx   d 5 01 02 03 04 05
+85710697.000000 1  334             Tx   d 5 01 02 03 04 05
+End TriggerBlock
+";
+    let log = IndexedLog::open_bytes(text.as_bytes().to_vec(), None).unwrap();
+    assert_eq!(log.t_end_us(), 85_710_697, "the stamps are microseconds");
+    assert_eq!(log.frame_count(), 9);
+    assert_eq!(log.skipped(), 0, "{:?}", log.warnings());
+    let warned = |needle: &str| {
+        log.warnings()
+            .iter()
+            .any(|warning| warning.contains(needle))
+    };
+    assert!(warned("microseconds"), "{:?}", log.warnings());
+    assert!(warned("1 symbolic Node.Message"), "{:?}", log.warnings());
+    assert!(warned("out of order"), "{:?}", log.warnings());
+    let wide = log
+        .step_frame(48_000, true)
+        .unwrap()
+        .expect("the 24-byte frame");
+    assert_eq!(wide.t_us, 48_690);
+    assert_eq!(wide.dlc, 24);
 }
 
 #[test]
