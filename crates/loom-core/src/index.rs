@@ -149,6 +149,8 @@ pub struct SignalInfo {
     pub message_id: Option<u32>,
     pub min: Option<f64>,
     pub max: Option<f64>,
+    /// The decoder's scale factor: the smallest change the value can show.
+    pub step: Option<f64>,
     pub from_map: bool,
 }
 
@@ -822,6 +824,10 @@ impl SignalMeta {
             message_id: self.message_id,
             min: self.min,
             max: self.max,
+            step: self
+                .spec
+                .map(|spec| spec.factor.abs())
+                .filter(|step| *step > 0.0),
             from_map: self.spec.is_some(),
         }
     }

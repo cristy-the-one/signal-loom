@@ -14,10 +14,12 @@ import {
   errText,
   formatBytes,
   formatCount,
+  formatReading,
   formatSpan,
   formatUs,
   formatValue,
   hexId,
+  readoutFor,
 } from "./format";
 import type {
   Bookmark,
@@ -512,11 +514,12 @@ function renderLegend(): void {
     label.textContent = name;
     const reading = document.createElement("span");
     reading.className = "val";
+    const readout = readoutFor(signal);
     reading.textContent = held
       ? held.label
-        ? `${formatValue(held.value)} ${held.label}`
-        : formatValue(held.value)
-      : "—";
+        ? `${formatReading(held.value, readout)} ${held.label}`
+        : formatReading(held.value, readout)
+      : "—".padStart(readout.width);
     const unit = document.createElement("span");
     unit.className = "unit";
     unit.textContent = signal?.unit ?? "";
@@ -605,9 +608,11 @@ function placeCrosshair(traces: Trace[]): void {
   els.crosshair.style.left = `${left}px`;
   els.crosshair.style.top = "18px";
   els.crossTime.textContent = formatUs(state.hoverT);
+  const nameWidth = Math.max(0, ...traces.map((trace) => trace.name.length));
   const lines = traces.map((trace) => {
     const signal = state.summary?.signals.find((item) => item.name === trace.name.replace(/ · B$/, ""));
-    return formatHover(trace.name, heldValue(trace.points, state.hoverT ?? 0), signal?.unit ?? "");
+    const value = heldValue(trace.points, state.hoverT ?? 0);
+    return formatHover(trace.name.padEnd(nameWidth), value, signal?.unit ?? "", readoutFor(signal));
   });
   els.crossVals.textContent = lines.join("\n");
 }

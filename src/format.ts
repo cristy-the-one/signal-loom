@@ -38,6 +38,49 @@ export function formatValue(v: number): string {
   return v.toFixed(3);
 }
 
+/** How one signal's live value is printed. Fixed per signal, so a reading never changes width. */
+export interface Readout {
+  decimals: number;
+  width: number;
+}
+
+const READOUT_DIGITS = 4;
+
+/**
+ * Decimals come from the decoder step (0.1 shows one), else from the range,
+ * capped at four significant digits. The width fits the widest value in the log.
+ */
+export function readoutFor(signal: { min: number | null; max: number | null; step: number | null } | undefined): Readout {
+  const lo = signal?.min ?? 0;
+  const hi = signal?.max ?? 0;
+  const mag = Math.max(Math.abs(lo), Math.abs(hi));
+  const intDigits = mag >= 1 ? Math.floor(Math.log10(mag)) + 1 : 1;
+  const wanted = signal?.step ? stepDecimals(signal.step) : mag >= 100 ? 1 : mag >= 10 ? 2 : 3;
+  const decimals = Math.min(wanted, Math.max(0, READOUT_DIGITS - intDigits));
+  const sized = { decimals, width: 0 };
+  // Math channels have no range yet: leave room for a sign and three whole digits.
+  const floor = signal?.min == null || signal?.max == null ? 5 + decimals : 0;
+  return {
+    decimals,
+    width: Math.max(floor, formatReading(lo, sized).length, formatReading(hi, sized).length),
+  };
+}
+
+/** A value in its signal's readout, left-padded so it keeps its width in a monospace font. */
+export function formatReading(value: number, readout: Readout): string {
+  if (!Number.isFinite(value)) return "—".padStart(readout.width);
+  const text = value.toFixed(readout.decimals);
+  return (/^-0(\.0+)?$/.test(text) ? text.slice(1) : text).padStart(readout.width);
+}
+
+function stepDecimals(step: number): number {
+  for (let decimals = 0; decimals < 6; decimals++) {
+    const scaled = step * 10 ** decimals;
+    if (Math.abs(scaled - Math.round(scaled)) < 1e-6 * Math.max(1, scaled)) return decimals;
+  }
+  return 6;
+}
+
 export function formatCount(n: number): string {
   return new Intl.NumberFormat("en-US").format(n);
 }

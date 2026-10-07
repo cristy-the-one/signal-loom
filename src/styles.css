@@ -357,7 +357,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   font-size: 11px;
 }
 .legend-item i { width: 8px; height: 8px; display: inline-block; align-self: center; }
-.legend-item .val { color: var(--text); }
+.legend-item .val { color: var(--text); white-space: pre; }
 .legend-item .unit, .legend-item .name { color: var(--muted); }
 
 .scale-note {
