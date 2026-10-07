@@ -29,6 +29,8 @@ pub struct Session {
     compare: Option<IndexedLog>,
     compare_offset_us: i64,
     map_notes: Vec<String>,
+    /// Set by the user or a project; `None` is the default.
+    timeout_factor: Option<f64>,
 }
 
 impl Session {
@@ -41,7 +43,9 @@ impl Session {
             return self.open_path(&path);
         }
         self.reset_deck();
-        self.map = Some(SignalMap::parse(SAMPLE_MAP)?);
+        let mut map = SignalMap::parse(SAMPLE_MAP)?;
+        map.timeout_factor = self.timeout_factor();
+        self.map = Some(map);
         self.map_path = find_up(&format!("fixtures/{SAMPLE_MAP_NAME}"))
             .or_else(|| Some(PathBuf::from(format!("fixtures/{SAMPLE_MAP_NAME}"))));
         self.log_label = SAMPLE_LOG_NAME.to_string();
@@ -81,6 +85,7 @@ impl Session {
             let mut map = parse_map_text(&text)?;
             name_dbc_from_path(&mut map, &sibling);
             incoming_notes = map.warnings.clone();
+            map.timeout_factor = self.timeout_factor();
             incoming_map = Some(map);
             incoming_path = Some(sibling);
         }
@@ -209,6 +214,7 @@ impl Session {
             }
         }
         self.map_notes = map.warnings.clone();
+        map.timeout_factor = self.timeout_factor();
         self.map = Some(map);
         if !append || self.map_path.is_none() {
             self.map_path = path;
@@ -324,6 +330,33 @@ impl Session {
     }
 
     /// A newly opened recording starts without the previous deck setup.
+    pub fn timeout_factor(&self) -> f64 {
+        self.timeout_factor
+            .unwrap_or(crate::map::DEFAULT_TIMEOUT_FACTOR)
+    }
+
+    /// Mark a message late after `factor` cycle times without a frame, and
+    /// reindex so the event lane follows. A failed reindex keeps the old factor.
+    pub fn set_timeout_factor(&mut self, factor: f64) -> Result<Summary> {
+        if !factor.is_finite() || !(1.0..=100.0).contains(&factor) {
+            return Err(Error::msg("timeout must be between 1 and 100 cycle times"));
+        }
+        let before = self.timeout_factor;
+        self.timeout_factor = Some(factor);
+        if let Some(map) = &mut self.map {
+            map.timeout_factor = factor;
+        }
+        if let Err(err) = self.reindex_controlled(None) {
+            self.timeout_factor = before;
+            let restored = self.timeout_factor();
+            if let Some(map) = &mut self.map {
+                map.timeout_factor = restored;
+            }
+            return Err(err);
+        }
+        self.summary()
+    }
+
     fn reset_deck(&mut self) {
         self.math.clear();
         self.triggers.clear();
@@ -418,6 +451,7 @@ impl Session {
         let log = self.log()?;
         let uses_map = log.format() != LogFormat::DecodedCsv;
         Ok(Summary {
+            timeout_factor: self.timeout_factor(),
             log_label: self.log_label.clone(),
             log_path: self
                 .log_path
@@ -514,6 +548,14 @@ impl Session {
             }
             MapLoad::None => (None, None),
         };
+        // The project's timeout applies to the index built for it.
+        let timeout_factor = project
+            .timeout_factor
+            .filter(|factor| factor.is_finite() && (1.0..=100.0).contains(factor));
+        let mut map = map;
+        if let Some(map) = &mut map {
+            map.timeout_factor = timeout_factor.unwrap_or(crate::map::DEFAULT_TIMEOUT_FACTOR);
+        }
 
         let (log, log_label, log_path) = match resolve_log(&base, &project.log_path) {
             LogLoad::File(path) => {
@@ -547,6 +589,7 @@ impl Session {
             .as_ref()
             .map(|map| map.warnings.clone())
             .unwrap_or_default();
+        self.timeout_factor = timeout_factor;
         self.map = map;
         self.map_path = map_path;
         self.log_label = log_label;

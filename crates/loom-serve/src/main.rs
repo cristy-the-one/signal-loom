@@ -214,6 +214,10 @@ fn dispatch(hub: &Hub, request: &mut Request) -> Response<std::io::Cursor<Vec<u8
                 let req: TriggerBody = parse_json(&body)?;
                 json(&lift(session.set_triggers(req.triggers))?)
             }
+            (Method::Post, "/api/timeout-factor") => {
+                let req: TimeoutBody = parse_json(&body)?;
+                json(&lift(session.set_timeout_factor(req.factor))?)
+            }
             (Method::Post, "/api/compare-path") => {
                 let req: PathBody = parse_json(&body)?;
                 json(&lift(
@@ -423,6 +427,11 @@ struct CaptureBody {
 #[serde(rename_all = "camelCase")]
 struct OffsetBody {
     offset_us: i64,
+}
+
+#[derive(Deserialize)]
+struct TimeoutBody {
+    factor: f64,
 }
 
 fn json_text(body: &[u8]) -> Result<String, String> {

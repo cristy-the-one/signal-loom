@@ -15,6 +15,8 @@ export interface Summary {
   events: LogEvent[];
   skippedRecords: number;
   warnings: string[];
+  /** Cycle times without a frame before a message is marked late. */
+  timeoutFactor: number;
 }
 
 export interface IndexStatus {
@@ -132,6 +134,7 @@ export interface ProjectFile {
   cursorBUs?: number | null;
   comparePath?: string | null;
   compareOffsetUs?: number;
+  timeoutFactor?: number;
 }
 
 export interface ProjectOpen {

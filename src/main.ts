@@ -219,12 +219,17 @@ function windowFor(playhead: number, span: number, summary: Summary): View {
   return { t0: a, t1: b };
 }
 
-function setError(message: string): void {
+/** True while the banner shows a plot query's error; a later good query clears only that. */
+let queryError = false;
+
+function setError(message: string, fromQuery = false): void {
+  queryError = fromQuery;
   els.error.hidden = false;
   els.error.textContent = message;
 }
 
 function clearError(): void {
+  queryError = false;
   els.error.hidden = true;
   els.error.textContent = "";
 }
@@ -667,10 +672,10 @@ async function refresh(): Promise<void> {
     state.held = held;
     state.bus = load;
     state.view = view;
-    clearError();
+    if (queryError) clearError();
     draw();
   } catch (err) {
-    if (token === queryToken) setError(errText(err));
+    if (token === queryToken) setError(errText(err), true);
   } finally {
     queryFlight = false;
     if (queryAgain) {
@@ -737,6 +742,7 @@ function resetDeck(): void {
 
 function adoptSummary(summary: Summary, mode: "fresh" | "keep"): void {
   state.summary = summary;
+  timeoutInput().value = String(summary.timeoutFactor);
   if (mode === "fresh") {
     state.bookmarks = [];
     state.selectedMark = null;
@@ -814,6 +820,7 @@ function currentProject(): ProjectFile {
     cursorBUs: state.cursorB,
     comparePath: state.comparePath,
     compareOffsetUs: state.compareOffsetUs,
+    timeoutFactor: state.summary?.timeoutFactor,
   };
 }
 
@@ -1414,6 +1421,28 @@ async function addTrigger(): Promise<void> {
   await syncTriggers();
 }
 
+function timeoutInput(): HTMLInputElement {
+  return document.getElementById("timeout-factor") as HTMLInputElement;
+}
+
+async function applyTimeoutFactor(): Promise<void> {
+  const factor = Number(timeoutInput().value);
+  const current = state.summary?.timeoutFactor;
+  if (!state.summary || factor === current) return;
+  if (!Number.isFinite(factor) || factor < 1 || factor > 100) {
+    setError("The timeout must be between 1 and 100 cycle times.");
+    timeoutInput().value = String(current);
+    return;
+  }
+  await withBusy("Re-indexing timeouts", async () => {
+    adoptSummary(await api.setTimeoutFactor(factor), "keep");
+    state.dirty = true;
+    renderChrome();
+  });
+  // A refused value leaves the field showing the factor in effect.
+  timeoutInput().value = String(state.summary?.timeoutFactor ?? current);
+}
+
 async function syncTriggers(): Promise<void> {
   await withBusy("Arming triggers", async () => {
     adoptSummary(await api.setTriggers(state.triggers), "keep");
@@ -1625,6 +1654,7 @@ function bind(): void {
     event.preventDefault();
     void addTrigger();
   });
+  timeoutInput().addEventListener("change", () => void applyTimeoutFactor());
   document.getElementById("btn-compare")?.addEventListener("click", () => void openCompare());
   document.getElementById("btn-compare-clear")?.addEventListener("click", () => void clearCompareDrive());
   els.compareOffset.addEventListener("change", () => void applyOffset());

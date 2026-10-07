@@ -1003,6 +1003,9 @@ fn scan_framed(
                 .collect()
         })
         .unwrap_or_default();
+    let timeout_factor = map
+        .map(|map| map.timeout_factor)
+        .unwrap_or(crate::map::DEFAULT_TIMEOUT_FACTOR);
     let mut last_seen: HashMap<u32, u64> = HashMap::new();
     let mut last_counter: HashMap<usize, u64> = HashMap::new();
     let checksums = source.with_reader(|reader| probe_checksums(&mut built, reader, format))?;
@@ -1052,6 +1055,7 @@ fn scan_framed(
                     note_integrity(
                         &mut built,
                         &cycles,
+                        timeout_factor,
                         &mut last_seen,
                         &mut last_counter,
                         &checksums,
@@ -1237,6 +1241,7 @@ struct IntegrityFrame<'a> {
 fn note_integrity(
     built: &mut Built,
     cycles: &HashMap<u32, u64>,
+    timeout_factor: f64,
     last_seen: &mut HashMap<u32, u64>,
     last_counter: &mut HashMap<usize, u64>,
     checksums: &HashMap<usize, ChecksumAlgo>,
@@ -1245,7 +1250,7 @@ fn note_integrity(
     if let Some(cycle) = cycles.get(&frame.id).copied() {
         if let Some(prev) = last_seen.get(&frame.id).copied() {
             let gap = frame.t_us.saturating_sub(prev);
-            if cycle > 0 && gap > cycle.saturating_mul(3) {
+            if cycle > 0 && gap as f64 > cycle as f64 * timeout_factor {
                 let name = built
                     .message_names
                     .get(&frame.id)
