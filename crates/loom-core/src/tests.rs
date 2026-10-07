@@ -1032,6 +1032,48 @@ VAL_ 100 Gear 0 "N" 1 "D" 2 "R" ;
 }
 
 #[test]
+fn the_timeout_factor_is_a_setting_with_a_2_5_cycle_default() {
+    // A 100 ms message with gaps of 260 ms and 290 ms.
+    let log = "F 0 120 00\nF 100000 120 00\nF 200000 120 00\nF 460000 120 00\nF 750000 120 00\n";
+    let map = r#"{"name":"bus","version":1,"messages":[
+        {"id":"0x120","name":"Leds","cycleUs":100000,"signals":[
+            {"name":"Lamp","startBit":0,"bitLength":8}]}]}"#;
+    let timeouts = |summary: &crate::Summary| {
+        summary
+            .events
+            .iter()
+            .filter(|event| event.label.starts_with("Timeout"))
+            .map(|event| event.t_us)
+            .collect::<Vec<_>>()
+    };
+    let mut session = Session::new();
+    session
+        .open_bytes("leds.slog", log.as_bytes().to_vec())
+        .unwrap();
+    let summary = session.open_map_json(map).unwrap();
+    assert_eq!(summary.timeout_factor, 2.5);
+    assert_eq!(timeouts(&summary), vec![460_000, 750_000]);
+
+    let relaxed = session.set_timeout_factor(3.0).unwrap();
+    assert!(timeouts(&relaxed).is_empty(), "both gaps are under 300 ms");
+    assert!(session.set_timeout_factor(0.5).is_err());
+    assert_eq!(session.summary().unwrap().timeout_factor, 3.0);
+
+    // A project carries its factor, and it applies to the log it opens.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let text = std::fs::read_to_string(root.join("demo.loom")).unwrap();
+    let mut project = ProjectFile::parse(&text).unwrap();
+    assert_eq!(project.timeout_factor, None, "older projects have none");
+    project.timeout_factor = Some(4.0);
+    let saved = project.to_json().unwrap();
+    assert!(saved.contains("\"timeoutFactor\": 4.0"), "{saved}");
+    let opened = Session::new()
+        .load_project_json(&saved, Some(&root))
+        .unwrap();
+    assert_eq!(opened.summary.timeout_factor, 4.0);
+}
+
+#[test]
 fn checksum_crcs_match_their_published_check_values() {
     use crate::index::ChecksumAlgo;
     assert_eq!(ChecksumAlgo::CrcJ1850.compute(b"123456789"), 0x4B);

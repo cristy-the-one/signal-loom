@@ -240,6 +240,15 @@ export function setMath(channels: MathChannel[]): Promise<Summary> {
   });
 }
 
+export function setTimeoutFactor(factor: number): Promise<Summary> {
+  if (inTauri()) return invoke<Summary>("set_timeout_factor", { factor });
+  return http<Summary>("/api/timeout-factor", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ factor }),
+  });
+}
+
 export function setTriggers(triggers: ThresholdTrigger[]): Promise<Summary> {
   if (inTauri()) return invoke<Summary>("set_triggers", { triggers });
   return http<Summary>("/api/triggers", {

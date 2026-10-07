@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
+    /// Message timeout in cycle times.
+    pub timeout_factor: f64,
     pub log_label: String,
     pub log_path: Option<String>,
     pub map_label: Option<String>,

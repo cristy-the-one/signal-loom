@@ -10,7 +10,13 @@ pub struct SignalMap {
     pub signals: Vec<MappedSignal>,
     pub messages: Vec<MapMessage>,
     pub warnings: Vec<String>,
+    /// A message is late after this many of its cycle times without a frame.
+    pub timeout_factor: f64,
 }
+
+/// 2.5 cycles: a 100 ms message times out after 250 ms, as receiving ECUs
+/// commonly configure it. One lost frame still stays inside it.
+pub const DEFAULT_TIMEOUT_FACTOR: f64 = 2.5;
 
 /// One CAN message described by a map or a DBC.
 #[derive(Debug, Clone)]
@@ -119,6 +125,7 @@ impl SignalMap {
             signals,
             messages,
             warnings: Vec::new(),
+            timeout_factor: DEFAULT_TIMEOUT_FACTOR,
         })
     }
 

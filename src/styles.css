@@ -269,6 +269,8 @@ button:disabled { opacity: 0.45; cursor: default; }
   gap: 4px;
   padding: 6px 8px 0;
 }
+/* One column that can shrink below a field's default width, so every row fits the rail. */
+.stack-form { grid-template-columns: minmax(0, 1fr); }
 .stack-form input, .stack-form select, .fine input, .inline input, .inline select {
   height: 22px;
   background: #0c0f12;

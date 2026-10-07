@@ -249,6 +249,14 @@ fn set_triggers(
 }
 
 #[tauri::command(async)]
+fn set_timeout_factor(
+    state: State<'_, AppState>,
+    factor: f64,
+) -> Result<loom_core::Summary, String> {
+    lift(lock(&state)?.set_timeout_factor(factor))
+}
+
+#[tauri::command(async)]
 fn open_compare(state: State<'_, AppState>, path: String) -> Result<loom_core::Summary, String> {
     lift(lock(&state)?.open_compare_path(PathBuf::from(path).as_path()))
 }
@@ -326,6 +334,7 @@ pub fn run() {
             export_slog,
             set_math,
             set_triggers,
+            set_timeout_factor,
             open_compare,
             set_compare_offset,
             clear_compare,

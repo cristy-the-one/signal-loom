@@ -29,6 +29,9 @@ pub struct ProjectFile {
     pub compare_path: Option<String>,
     #[serde(default)]
     pub compare_offset_us: i64,
+    /// Message timeout in cycle times. Absent in older projects: 2.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_factor: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

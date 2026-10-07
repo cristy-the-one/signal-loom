@@ -104,6 +104,10 @@
                 </div>
               </form>
               <div id="trig-list" class="mark-list"></div>
+              <label class="fine" title="A message with a cycle time in the DBC is marked late after this many cycles without a frame.">Timeout ×
+                <input id="timeout-factor" type="number" min="1" max="100" step="0.5" value="2.5" />
+              </label>
+              <p class="hint">Cycle times without a frame before a message is marked late: 2.5 × 100 ms is 250 ms.</p>
             </div>
             <div id="panel-drive" hidden>
               <div class="stack-form">
