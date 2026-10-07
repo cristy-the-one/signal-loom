@@ -199,6 +199,8 @@ struct Built {
     t_end_us: u64,
     events: Vec<(u64, String)>,
     skipped: u64,
+    /// Records kept at the previous time after a small step back.
+    reordered: u64,
     warnings: Vec<String>,
     signals: Vec<SignalMeta>,
     name_index: HashMap<String, usize>,
@@ -319,7 +321,7 @@ impl IndexedLog {
         let idx = self.floor_checkpoint(t0);
         let mut held = self.snapshot(idx);
         let mut seeded = false;
-        self.scan_from(self.checkpoints[idx].offset, |rec| {
+        self.scan_from(idx, |rec| {
             if rec.t_us < t0 {
                 self.touch(rec, &mut held, |_, _| {});
                 return true;
@@ -378,7 +380,7 @@ impl IndexedLog {
         }
         let idx = self.floor_checkpoint(t_us);
         let mut held = self.snapshot(idx);
-        self.scan_from(self.checkpoints[idx].offset, |rec| {
+        self.scan_from(idx, |rec| {
             if rec.t_us > t_us {
                 return false;
             }
@@ -416,7 +418,7 @@ impl IndexedLog {
             let idx = self.floor_checkpoint(t_us);
             let mut ordinal = self.checkpoints[idx].frame_ordinal;
             let mut found = None;
-            self.scan_from(self.checkpoints[idx].offset, |rec| {
+            self.scan_from(idx, |rec| {
                 let current = ordinal;
                 if is_timed_sample(rec) {
                     ordinal += 1;
@@ -434,7 +436,7 @@ impl IndexedLog {
         loop {
             let mut ordinal = self.checkpoints[idx].frame_ordinal;
             let mut last = None;
-            self.scan_from(self.checkpoints[idx].offset, |rec| {
+            self.scan_from(idx, |rec| {
                 if rec.t_us >= t_us {
                     return false;
                 }
@@ -517,10 +519,19 @@ impl IndexedLog {
         held
     }
 
-    fn scan_from(&self, offset: u64, mut visit: impl FnMut(&Rec) -> bool) -> Result<()> {
+    /// Replay from checkpoint `idx`. Times pass through the same `order_time`
+    /// the build used, seeded with the checkpoint's time, so a replay sees the
+    /// timestamps the index stored.
+    fn scan_from(&self, idx: usize, mut visit: impl FnMut(&Rec) -> bool) -> Result<()> {
+        let checkpoint = &self.checkpoints[idx];
         self.source.with_reader(|reader| {
-            let mut scanner = Scanner::resume(reader, self.body, offset)?;
-            while let Some(rec) = scanner.next_rec()? {
+            let mut scanner = Scanner::resume(reader, self.body, checkpoint.offset)?;
+            let mut last = Some(checkpoint.t_us);
+            while let Some(mut rec) = scanner.next_rec()? {
+                match order_time(&mut last, rec.t_us) {
+                    TimeOrder::InOrder(t_us) | TimeOrder::Clamped(t_us) => rec.t_us = t_us,
+                    TimeOrder::Skipped => continue,
+                }
                 if !visit(&rec) {
                     break;
                 }
@@ -569,7 +580,7 @@ impl IndexedLog {
         let (t0, t1) = ordered_range(t0_us, t1_us);
         let mut frames = 0u64;
         let mut bits = 0u64;
-        self.scan_from(self.checkpoints[self.floor_checkpoint(t0)].offset, |rec| {
+        self.scan_from(self.floor_checkpoint(t0), |rec| {
             if rec.t_us > t1 {
                 return false;
             }
@@ -623,7 +634,7 @@ impl IndexedLog {
                 }
             }
         };
-        self.scan_from(self.checkpoints[start].offset, |rec| {
+        self.scan_from(start, |rec| {
             if rec.t_us > t1 {
                 return false;
             }
@@ -671,7 +682,7 @@ impl IndexedLog {
         let mut first = None;
         let mut last = None;
         let mut held = self.snapshot(self.floor_checkpoint(t0));
-        self.scan_from(self.checkpoints[self.floor_checkpoint(t0)].offset, |rec| {
+        self.scan_from(self.floor_checkpoint(t0), |rec| {
             if rec.t_us > t1 {
                 return false;
             }
@@ -725,7 +736,7 @@ impl IndexedLog {
         let mut rows = 0usize;
         let mut held = self.snapshot(self.floor_checkpoint(t0));
         let mut dirty = false;
-        self.scan_from(self.checkpoints[self.floor_checkpoint(t0)].offset, |rec| {
+        self.scan_from(self.floor_checkpoint(t0), |rec| {
             if rec.t_us > t1 {
                 return false;
             }
@@ -763,7 +774,7 @@ impl IndexedLog {
             "SLOGv1\n# Trimmed by Signal Loom. Synthetic or captured, this is only the selected window.\n",
         );
         let mut rows = 0usize;
-        self.scan_from(self.checkpoints[self.floor_checkpoint(t0)].offset, |rec| {
+        self.scan_from(self.floor_checkpoint(t0), |rec| {
             if rec.t_us > t1 {
                 return false;
             }
@@ -815,7 +826,7 @@ impl IndexedLog {
         let mut events = Vec::new();
         let mut armed = true;
         let mut held = self.snapshot(0);
-        self.scan_from(self.checkpoints[0].offset, |rec| {
+        self.scan_from(0, |rec| {
             self.touch(rec, &mut held, |signal, value| {
                 if signal != idx {
                     return;
@@ -997,7 +1008,7 @@ fn scan_framed(
     let mut pulses = 0u64;
     source.with_reader(|reader| {
         let mut scanner = Scanner::open(reader, format)?;
-        while let Some(rec) = scanner.next_rec()? {
+        while let Some(mut rec) = scanner.next_rec()? {
             pulses += 1;
             if pulses.is_multiple_of(64) {
                 pulse(
@@ -1007,9 +1018,10 @@ fn scan_framed(
                     built.skipped.saturating_add(scanner.skipped()),
                 )?;
             }
-            if !accept_time(&mut built, &mut last_t, rec.t_us) {
+            let Some(t_us) = accept_time(&mut built, &mut last_t, rec.t_us) else {
                 continue;
-            }
+            };
+            rec.t_us = t_us;
             match &rec.kind {
                 RecKind::Frame {
                     id,
@@ -1062,7 +1074,7 @@ fn scan_framed(
             built.frame_count,
             built.skipped.saturating_add(scanner.skipped()),
         )?;
-        absorb_scanner(&mut built, scanner.skipped(), scanner.warnings());
+        absorb_scanner(&mut built, scanner.skipped(), &scanner.notes());
         Ok(())
     })?;
     pad_snapshots(&mut built);
@@ -1084,7 +1096,7 @@ fn scan_decoded(source: &Source, control: Option<&IndexControl>) -> Result<Built
     let mut pulses = 0u64;
     source.with_reader(|reader| {
         let mut scanner = Scanner::open(reader, LogFormat::DecodedCsv)?;
-        while let Some(rec) = scanner.next_rec()? {
+        while let Some(mut rec) = scanner.next_rec()? {
             pulses += 1;
             if pulses.is_multiple_of(64) {
                 pulse(
@@ -1094,9 +1106,10 @@ fn scan_decoded(source: &Source, control: Option<&IndexControl>) -> Result<Built
                     built.skipped.saturating_add(scanner.skipped()),
                 )?;
             }
-            if !accept_time(&mut built, &mut last_t, rec.t_us) {
+            let Some(t_us) = accept_time(&mut built, &mut last_t, rec.t_us) else {
                 continue;
-            }
+            };
+            rec.t_us = t_us;
             if let RecKind::Sample { name, value, unit } = &rec.kind {
                 let idx = ensure_signal(&mut built, name, unit);
                 if held.len() < built.signals.len() {
@@ -1117,7 +1130,7 @@ fn scan_decoded(source: &Source, control: Option<&IndexControl>) -> Result<Built
             built.frame_count,
             built.skipped.saturating_add(scanner.skipped()),
         )?;
-        absorb_scanner(&mut built, scanner.skipped(), scanner.warnings());
+        absorb_scanner(&mut built, scanner.skipped(), &scanner.notes());
         Ok(())
     })?;
     pad_snapshots(&mut built);
@@ -1140,6 +1153,7 @@ fn empty_built(
         t_end_us: 0,
         events: Vec::new(),
         skipped: 0,
+        reordered: 0,
         warnings: Vec::new(),
         signals,
         name_index,
@@ -1297,19 +1311,53 @@ fn note_event(built: &mut Built, t_us: u64, label: &str) {
     }
 }
 
-fn accept_time(built: &mut Built, last: &mut Option<u64>, t_us: u64) -> bool {
-    if let Some(prev) = *last {
-        if t_us < prev {
+/// Real captures interleave Tx and Rx lines a few milliseconds out of order.
+const REORDER_TOLERANCE_US: u64 = 50_000;
+
+enum TimeOrder {
+    InOrder(u64),
+    /// A small step back: kept, at the previous time.
+    Clamped(u64),
+    /// A jump back past the tolerance: a broken log, so the record is dropped.
+    Skipped,
+}
+
+fn order_time(last: &mut Option<u64>, t_us: u64) -> TimeOrder {
+    match *last {
+        Some(prev) if t_us < prev => {
+            if prev - t_us <= REORDER_TOLERANCE_US {
+                TimeOrder::Clamped(prev)
+            } else {
+                TimeOrder::Skipped
+            }
+        }
+        _ => {
+            *last = Some(t_us);
+            TimeOrder::InOrder(t_us)
+        }
+    }
+}
+
+fn accept_time(built: &mut Built, last: &mut Option<u64>, t_us: u64) -> Option<u64> {
+    let prev = *last;
+    match order_time(last, t_us) {
+        TimeOrder::InOrder(t_us) => Some(t_us),
+        TimeOrder::Clamped(t_us) => {
+            built.reordered += 1;
+            Some(t_us)
+        }
+        TimeOrder::Skipped => {
             built.skipped += 1;
             note_warn(
                 built,
-                format!("skipped backwards timestamp at {t_us} µs (previous {prev} µs)"),
+                format!(
+                    "skipped backwards timestamp at {t_us} µs (previous {} µs)",
+                    prev.unwrap_or(0)
+                ),
             );
-            return false;
+            None
         }
     }
-    *last = Some(t_us);
-    true
 }
 
 fn note_warn(built: &mut Built, message: String) {
@@ -1320,6 +1368,16 @@ fn note_warn(built: &mut Built, message: String) {
 
 fn absorb_scanner(built: &mut Built, skipped: u64, warnings: &[String]) {
     built.skipped += skipped;
+    if built.reordered > 0 {
+        let reordered = built.reordered;
+        note_warn(
+            built,
+            format!(
+                "{reordered} records were up to {} ms out of order and were kept at the previous timestamp",
+                REORDER_TOLERANCE_US / 1000
+            ),
+        );
+    }
     for warning in warnings {
         note_warn(built, warning.clone());
     }

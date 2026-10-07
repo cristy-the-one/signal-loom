@@ -155,6 +155,10 @@ pub struct Scanner<'a> {
     /// Running clock for `timestamps relative`.
     last_stamp_us: u64,
     asc_relative: bool,
+    /// Some loggers write whole microseconds in the seconds column.
+    asc_micros: bool,
+    /// Tool-level `Node.Message` lines left out of the frame stream.
+    asc_symbolic: u64,
     skipped: u64,
     warnings: Vec<String>,
     buf: Vec<u8>,
@@ -175,10 +179,10 @@ impl<'a> Scanner<'a> {
         reader
             .seek(SeekFrom::Start(0))
             .map_err(|err| Error::msg(format!("could not rewind log: {err}")))?;
-        let (asc_hex, asc_relative) = if format == LogFormat::Asc {
+        let asc = if format == LogFormat::Asc {
             peek_asc_mode(reader)?
         } else {
-            (true, false)
+            AscMode::default()
         };
         let time_origin_us = if format == LogFormat::Candump {
             peek_candump_origin(reader)?
@@ -195,12 +199,21 @@ impl<'a> Scanner<'a> {
             pos: 0,
             line_no: 0,
             header_pending,
-            asc_hex,
+            asc_hex: asc.hex,
             time_origin_us,
             last_stamp_us: 0,
-            asc_relative,
+            asc_relative: asc.relative,
+            asc_micros: asc.micros,
+            asc_symbolic: 0,
             skipped: 0,
-            warnings: Vec::new(),
+            warnings: if asc.micros {
+                vec![
+                    "ASC timestamps are whole numbers in microseconds, not seconds; read them as microseconds"
+                        .to_string(),
+                ]
+            } else {
+                Vec::new()
+            },
             buf: vec![0; 64 * 1024],
             buf_at: 0,
             buf_len: 0,
@@ -221,11 +234,12 @@ impl<'a> Scanner<'a> {
 
     /// Continue at a record boundary recorded in the checkpoint index.
     pub fn resume(reader: &'a mut dyn ReadSeek, format: LogFormat, offset: u64) -> Result<Self> {
-        let (asc_hex, asc_relative) = if format == LogFormat::Asc {
+        let asc = if format == LogFormat::Asc {
             peek_asc_mode(reader)?
         } else {
-            (true, false)
+            AscMode::default()
         };
+        let asc_relative = asc.relative;
         let time_origin_us = if format == LogFormat::Candump {
             peek_candump_origin(reader)?
         } else {
@@ -241,10 +255,12 @@ impl<'a> Scanner<'a> {
             pos: start,
             line_no: 0,
             header_pending: false,
-            asc_hex,
+            asc_hex: asc.hex,
             time_origin_us,
             last_stamp_us: 0,
             asc_relative,
+            asc_micros: asc.micros,
+            asc_symbolic: 0,
             skipped: 0,
             warnings: Vec::new(),
             buf: vec![0; 64 * 1024],
@@ -269,8 +285,16 @@ impl<'a> Scanner<'a> {
         self.skipped
     }
 
-    pub fn warnings(&self) -> &[String] {
-        &self.warnings
+    /// Warnings, plus one summary line for tool-level messages left out.
+    pub fn notes(&self) -> Vec<String> {
+        let mut notes = self.warnings.clone();
+        if self.asc_symbolic > 0 {
+            notes.push(format!(
+                "{} symbolic Node.Message lines were left out: they are tool-level messages, not CAN frames with an id",
+                self.asc_symbolic
+            ));
+        }
+        notes
     }
 
     pub fn position(&self) -> u64 {
@@ -445,6 +469,15 @@ impl<'a> Scanner<'a> {
             if trimmed == "SLOGv1" || (self.format == LogFormat::Asc && is_asc_preamble(trimmed)) {
                 continue;
             }
+            if self.format == LogFormat::Asc {
+                if is_asc_marker(trimmed) {
+                    continue;
+                }
+                if is_asc_symbolic(trimmed) {
+                    self.asc_symbolic += 1;
+                    continue;
+                }
+            }
             if self.header_pending {
                 self.header_pending = false;
                 csv_format(trimmed)?;
@@ -543,7 +576,12 @@ impl<'a> Scanner<'a> {
         if parts.len() < 3 {
             return self.bad("ASC line is too short");
         }
-        let stamp = seconds_to_us(parts[0]).map_err(|message| self.err_msg(&message))?;
+        let stamp = if self.asc_micros {
+            whole_us(parts[0])
+        } else {
+            seconds_to_us(parts[0])
+        }
+        .map_err(|message| self.err_msg(&message))?;
         let t_us = if self.asc_relative {
             self.last_stamp_us = self.last_stamp_us.saturating_add(stamp);
             self.last_stamp_us
@@ -574,9 +612,7 @@ impl<'a> Scanner<'a> {
             return self.bad("ASC frame is missing the data marker");
         };
         let dlc_tok = parts.get(marker + 1).copied().unwrap_or("0");
-        let dlc: usize = dlc_tok
-            .parse()
-            .map_err(|_| self.err_msg("ASC dlc is not a number"))?;
+        let dlc = asc_dlc_len(dlc_tok).ok_or_else(|| self.err_msg("ASC dlc is not a number"))?;
         let available = parts.get(marker + 2..).unwrap_or(&[]);
         let (data, n) = read_hex_bytes(available, dlc).map_err(|message| self.err_msg(&message))?;
         Ok(frame_rec(t_us, id, extended, channel, n, data))
@@ -1054,6 +1090,63 @@ fn split_csv(line: &str) -> Vec<&str> {
     line.split(',').map(|c| c.trim()).collect()
 }
 
+/// `0.000000 Start of measurement` and similar markers carry no frame.
+fn is_asc_marker(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    parts.next();
+    let rest: Vec<&str> = parts.take(3).collect();
+    rest.len() == 3
+        && rest[0].eq_ignore_ascii_case("start")
+        && rest[1].eq_ignore_ascii_case("of")
+        && rest[2].eq_ignore_ascii_case("measurement")
+}
+
+/// `<t> <ch> Node.Message Tx d <len> …`: a message a tool logged by name after
+/// reassembling it (a whole UDS transfer, say). It has no CAN id, and its
+/// CAN frames are usually logged on their own lines.
+fn is_asc_symbolic(line: &str) -> bool {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 5 || !parts[1].chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let name = parts[2].trim_end_matches(['x', 'X']);
+    let symbolic = !name.is_empty() && !name.chars().all(|c| c.is_ascii_hexdigit());
+    let direction = parts[3].eq_ignore_ascii_case("rx") || parts[3].eq_ignore_ascii_case("tx");
+    let marker = parts[4] == "d" || parts[4] == "D";
+    symbolic && direction && marker
+}
+
+/// A decimal byte count, or a single hex digit as a CAN FD DLC code.
+fn asc_dlc_len(token: &str) -> Option<usize> {
+    if token.chars().all(|c| c.is_ascii_digit()) {
+        return token.parse().ok();
+    }
+    let code = u8::from_str_radix(token, 16)
+        .ok()
+        .filter(|_| token.len() == 1)?;
+    Some(match code {
+        0..=8 => usize::from(code),
+        9 => 12,
+        10 => 16,
+        11 => 20,
+        12 => 24,
+        13 => 32,
+        14 => 48,
+        _ => 64,
+    })
+}
+
+fn whole_us(text: &str) -> std::result::Result<u64, String> {
+    let value: f64 = text
+        .trim()
+        .parse()
+        .map_err(|_| format!("bad timestamp {text}"))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!("bad timestamp {text}"));
+    }
+    Ok(value.round() as u64)
+}
+
 fn is_asc_preamble(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower.starts_with("date ")
@@ -1107,24 +1200,59 @@ fn peek_prefix(reader: &mut dyn ReadSeek) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
 }
 
-fn peek_asc_mode(reader: &mut dyn ReadSeek) -> Result<(bool, bool)> {
+struct AscMode {
+    hex: bool,
+    relative: bool,
+    micros: bool,
+}
+
+impl Default for AscMode {
+    fn default() -> Self {
+        Self {
+            hex: true,
+            relative: false,
+            micros: false,
+        }
+    }
+}
+
+/// Read the preamble, and decide whether the time column is microseconds.
+/// Vector writes seconds with six decimals. A log whose stamps are all whole
+/// numbers, with one above 1000 in the first lines, is microseconds: a real
+/// seconds log would need its frames on exact seconds for over 16 minutes.
+fn peek_asc_mode(reader: &mut dyn ReadSeek) -> Result<AscMode> {
     let text = peek_prefix(reader)?;
-    let mut hex = true;
-    let mut relative = false;
+    let mut mode = AscMode::default();
+    let mut stamps = 0usize;
+    let mut whole = true;
+    let mut large = false;
     for raw in text.lines() {
         let lower = raw.trim().to_ascii_lowercase();
         if lower.starts_with("base dec") {
-            hex = false;
+            mode.hex = false;
         } else if lower.starts_with("base hex") {
-            hex = true;
+            mode.hex = true;
         }
         if lower.contains("timestamps relative") {
-            relative = true;
+            mode.relative = true;
         } else if lower.contains("timestamps absolute") {
-            relative = false;
+            mode.relative = false;
         }
+        let Some(first) = lower.split_whitespace().next() else {
+            continue;
+        };
+        let Ok(value) = first.parse::<f64>() else {
+            continue;
+        };
+        if !first.contains('.') || !value.is_finite() {
+            continue;
+        }
+        stamps += 1;
+        whole &= value.fract() == 0.0;
+        large |= value > 1000.0;
     }
-    Ok((hex, relative))
+    mode.micros = stamps >= 8 && whole && large;
+    Ok(mode)
 }
 
 fn peek_candump_origin(reader: &mut dyn ReadSeek) -> Result<u64> {
