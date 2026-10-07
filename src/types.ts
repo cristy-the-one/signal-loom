@@ -137,6 +137,8 @@ export interface ProjectFile {
   comparePath?: string | null;
   compareOffsetUs?: number;
   timeoutFactor?: number;
+  /** Cluster slot to the signal shown in it. */
+  cluster?: Record<string, string>;
 }
 
 export interface ProjectOpen {
