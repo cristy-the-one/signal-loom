@@ -7,6 +7,9 @@ pub enum Endian {
     Big,
 }
 
+/// A CAN FD payload is up to 64 bytes. A frame shorter than a signal skips it.
+const MAX_PAYLOAD_BITS: u32 = 64 * 8;
+
 /// How to turn payload bits into a physical value.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeSpec {
@@ -29,9 +32,9 @@ impl DecodeSpec {
         match self.endian {
             Endian::Little => {
                 let end = u32::from(self.start_bit) + u32::from(self.bit_length);
-                if end > 64 {
+                if end > MAX_PAYLOAD_BITS {
                     return Err(format!(
-                        "little-endian signal starting at bit {} length {} does not fit in 8 bytes",
+                        "little-endian signal starting at bit {} length {} does not fit in 64 bytes",
                         self.start_bit, self.bit_length
                     ));
                 }
@@ -152,14 +155,14 @@ fn extract_be(data: &[u8], start_bit: u16, bit_length: u16) -> u64 {
 
 fn walk_be(start_bit: u16, bit_length: u16) -> Result<(), String> {
     let mut bit = start_bit;
-    if (start_bit / 8) >= 8 {
+    if u32::from(start_bit) >= MAX_PAYLOAD_BITS {
         return Err(format!(
-            "big-endian start bit {start_bit} is outside 8 bytes"
+            "big-endian start bit {start_bit} is outside 64 bytes"
         ));
     }
     for _ in 0..bit_length {
-        if (bit / 8) >= 8 {
-            return Err("big-endian signal walks outside the 8-byte payload".into());
+        if u32::from(bit) >= MAX_PAYLOAD_BITS {
+            return Err("big-endian signal walks outside the 64-byte payload".into());
         }
         let b = bit % 8;
         if b == 0 {

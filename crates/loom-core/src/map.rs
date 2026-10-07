@@ -110,7 +110,7 @@ impl SignalMap {
             .map(|message| MapMessage {
                 id: message.id,
                 name: message.name.trim().to_string(),
-                dlc: message.dlc.unwrap_or(8).min(8),
+                dlc: message.dlc.unwrap_or(8).min(64),
                 cycle_us: message.cycle_us,
             })
             .collect();
@@ -163,7 +163,12 @@ impl SignalMap {
     }
 }
 
-fn unique_name(seen: &HashSet<String>, name: &str, channel: u8, message_id: u32) -> String {
+pub(crate) fn unique_name(
+    seen: &HashSet<String>,
+    name: &str,
+    channel: u8,
+    message_id: u32,
+) -> String {
     if !seen.contains(name) {
         return name.to_string();
     }
