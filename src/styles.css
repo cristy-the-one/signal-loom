@@ -49,6 +49,9 @@ button:disabled { opacity: 0.45; cursor: default; }
   grid-template-rows: 40px auto minmax(0, 1fr);
 }
 
+/* Error, warning and notice share the one auto row, however many show. */
+.banners { min-width: 0; }
+
 .topbar {
   display: flex;
   align-items: center;
@@ -95,7 +98,17 @@ button:disabled { opacity: 0.45; cursor: default; }
   font-size: 12px;
 }
 
-.error[hidden], .warn[hidden] { display: none; }
+.error[hidden], .warn[hidden], .notice[hidden] { display: none; }
+
+.notice {
+  margin: 0;
+  padding: 4px 12px;
+  background: #142026;
+  color: var(--text);
+  border-bottom: 1px solid #24404a;
+  font-family: var(--mono);
+  font-size: 11px;
+}
 
 .warn {
   margin: 0;

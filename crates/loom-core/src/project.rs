@@ -123,13 +123,21 @@ pub fn write_project(path: &Path, project: &ProjectFile) -> Result<()> {
     if project.format != PROJECT_FORMAT || project.version != 1 {
         return Err(Error::msg("refusing to write an unsupported project"));
     }
+    let text = project.to_json()?;
+    write_as(path, "loom", &text)
+}
+
+/// Write `text` to `path`, which must end in `.{extension}`. The app only
+/// writes its own file types, so a webview cannot clobber anything else.
+pub fn write_as(path: &Path, extension: &str, text: &str) -> Result<()> {
     if !path
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("loom"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
     {
-        return Err(Error::msg("projects are saved only as .loom files"));
+        return Err(Error::msg(format!(
+            "this file is saved only as a .{extension} file"
+        )));
     }
-    let text = project.to_json()?;
     std::fs::write(path, text).map_err(|err| Error::write(path, err))
 }
 

@@ -733,6 +733,40 @@ fn projects_are_written_only_as_loom_files() {
 }
 
 #[test]
+fn exports_save_to_disk_only_as_csv_and_slog() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let mut session = Session::new();
+    session.open_path(&root.join("cluster_drive.slog")).unwrap();
+    session
+        .open_map_path(&root.join("cluster.map.json"))
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!("loom-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let names = vec!["VehicleSpeed".to_string()];
+
+    let csv = dir.join("speed.csv");
+    let bytes = session.save_csv(&csv, &names, 0, 5_000_000).unwrap();
+    let written = std::fs::read_to_string(&csv).unwrap();
+    assert_eq!(bytes, written.len() as u64);
+    assert_eq!(written, session.export_csv(&names, 0, 5_000_000).unwrap());
+
+    let slog = dir.join("trim.SLOG");
+    session.save_slog(&slog, 0, 5_000_000).unwrap();
+    assert!(std::fs::read_to_string(&slog)
+        .unwrap()
+        .starts_with("SLOGv1\n"));
+
+    for refused in ["speed.bat", "speed", "trim.slog.exe"] {
+        assert!(session
+            .save_csv(&dir.join(refused), &names, 0, 5_000_000)
+            .is_err());
+        assert!(session.save_slog(&dir.join(refused), 0, 5_000_000).is_err());
+        assert!(!dir.join(refused).exists(), "{refused} must not be created");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn non_ascii_payloads_are_skipped_not_panics() {
     let slog = "SLOGv1\nF 0 1A0 0102\nF 1000 1A0 a\u{e9}0\nF 2000 1A0 0304\n";
     let log = IndexedLog::open_bytes(slog.as_bytes().to_vec(), None).unwrap();
