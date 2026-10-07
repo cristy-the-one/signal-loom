@@ -75,6 +75,7 @@ python3 scripts/gen_fixture.py
 ## What is not in this build
 
 - No cloud account. The app stays offline. Logs are read from local disk; nothing is uploaded.
+- A `.loom` project does not follow a network path (`\\server\share\…`) for its log, map, or compare log: on Windows, merely checking such a path signs in to that server. Open a network file with Open instead.
 - SocketCAN never sends a frame. There is no transmit path.
 - The browser preview upload is capped at 32MB. Multi-gigabyte logs are opened by path.
 - The checksum watch is an XOR of the other payload bytes, matched by signal name. It is not an AUTOSAR CRC.

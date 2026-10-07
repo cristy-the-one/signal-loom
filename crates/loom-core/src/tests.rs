@@ -733,6 +733,71 @@ fn projects_are_written_only_as_loom_files() {
 }
 
 #[test]
+fn projects_do_not_follow_network_paths() {
+    use crate::project::is_network_path;
+    for network in [
+        r"\\server\share\drive.slog",
+        "//server/share/drive.slog",
+        r"\\?\UNC\server\x",
+    ] {
+        assert!(is_network_path(network), "{network}");
+    }
+    for local in [
+        r"C:\logs\drive.slog",
+        "fixtures/drive.slog",
+        "drive.slog",
+        "/home/me/drive.slog",
+    ] {
+        assert!(!is_network_path(local), "{local}");
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let project = |log: &str, map: &str, compare: &str| {
+        format!(
+            r#"{{"format":"signal-loom","version":1,"logPath":{log:?},"signalMapPath":{map:?},
+            "comparePath":{compare:?},"view":{{"playheadUs":0,"spanUs":1000000,"plotted":[]}}}}"#
+        )
+    };
+    let err = Session::new()
+        .load_project_json(&project(r"\\server\share\drive.slog", "", ""), Some(&root))
+        .unwrap_err();
+    assert!(err.to_string().contains("network path"), "{err}");
+
+    let opened = Session::new()
+        .load_project_json(
+            &project(
+                "cluster_drive.slog",
+                r"\\server\maps\x.dbc",
+                "//server/logs/b.slog",
+            ),
+            Some(&root),
+        )
+        .unwrap();
+    assert!(
+        opened.summary.map_label.is_none(),
+        "the network map is not read"
+    );
+    let network_notes = opened
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("network path"))
+        .count();
+    assert_eq!(network_notes, 2, "{:?}", opened.warnings);
+}
+
+#[test]
+fn oversized_text_files_are_refused() {
+    let dir = std::env::temp_dir().join(format!("loom-cap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("big.dbc");
+    std::fs::write(&file, vec![b'x'; 2 * 1024 * 1024 + 1]).unwrap();
+    let err = crate::project::read_text_capped(&file, 2 * 1024 * 1024, "signal map").unwrap_err();
+    assert!(err.to_string().contains("at most 2 MB"), "{err}");
+    assert!(crate::project::read_text_capped(&file, 3 * 1024 * 1024, "signal map").is_ok());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn exports_save_to_disk_only_as_csv_and_slog() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
     let mut session = Session::new();

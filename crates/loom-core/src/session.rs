@@ -11,6 +11,10 @@ use crate::scan::LogFormat;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
+/// A DBC or JSON map larger than this is not a signal map.
+const MAX_MAP_BYTES: u64 = 32 * 1024 * 1024;
+/// A `.loom` holds paths, bookmarks and notes: far below this.
+const MAX_PROJECT_BYTES: u64 = 4 * 1024 * 1024;
 const SAMPLE_SLOG: &str = include_str!("../../../fixtures/cluster_drive.slog");
 const SAMPLE_MAP: &str = include_str!("../../../fixtures/cluster.map.json");
 const SAMPLE_LOG_NAME: &str = "cluster_drive.slog";
@@ -80,8 +84,7 @@ impl Session {
         let mut incoming_path = None;
         let mut incoming_notes = Vec::new();
         if let Some(sibling) = sibling_map(path) {
-            let text =
-                std::fs::read_to_string(&sibling).map_err(|err| Error::read(&sibling, err))?;
+            let text = project::read_text_capped(&sibling, MAX_MAP_BYTES, "signal map")?;
             let mut map = parse_map_text(&text)?;
             name_dbc_from_path(&mut map, &sibling);
             incoming_notes = map.warnings.clone();
@@ -135,7 +138,7 @@ impl Session {
         path: &Path,
         control: Option<&IndexControl>,
     ) -> Result<Summary> {
-        let text = std::fs::read_to_string(path).map_err(|err| Error::read(path, err))?;
+        let text = project::read_text_capped(path, MAX_MAP_BYTES, "signal map")?;
         let mut map = parse_map_text(&text)?;
         name_dbc_from_path(&mut map, path);
         self.apply_map(map, Some(path.to_path_buf()), false, 0, control)
@@ -152,7 +155,7 @@ impl Session {
         channel: u8,
         control: Option<&IndexControl>,
     ) -> Result<Summary> {
-        let text = std::fs::read_to_string(path).map_err(|err| Error::read(path, err))?;
+        let text = project::read_text_capped(path, MAX_MAP_BYTES, "signal map")?;
         let mut map = parse_map_text(&text)?;
         name_dbc_from_path(&mut map, path);
         self.apply_map(map, Some(path.to_path_buf()), true, channel, control)
@@ -528,7 +531,7 @@ impl Session {
     }
 
     pub fn load_project_file(&mut self, path: &Path) -> Result<ProjectOpen> {
-        let text = std::fs::read_to_string(path).map_err(|err| Error::read(path, err))?;
+        let text = project::read_text_capped(path, MAX_PROJECT_BYTES, "project")?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         self.load_project_json(&text, Some(base))
     }
@@ -541,11 +544,30 @@ impl Session {
             .unwrap_or_else(|| PathBuf::from("."));
         let mut warnings = Vec::new();
 
+        if project::is_network_path(&project.log_path) {
+            return Err(Error::msg(format!(
+                "this project names a network path for its log ({}). Projects do not \
+                 follow network paths; open the log with Open, then save the project again.",
+                project.log_path.trim()
+            )));
+        }
+        for (what, stored) in [
+            ("signal map", project.signal_map_path.as_deref()),
+            ("compare log", project.compare_path.as_deref()),
+        ] {
+            if let Some(stored) = stored.filter(|stored| project::is_network_path(stored)) {
+                warnings.push(format!(
+                    "The {what} is on a network path ({}), which projects do not follow. Open it with Open.",
+                    stored.trim()
+                ));
+            }
+        }
+
         // Open the map and log into locals first. A project that fails to load
         // leaves the deck that was open untouched.
         let (map, map_path) = match resolve_map(&base, project.signal_map_path.as_deref()) {
             MapLoad::File(path) => {
-                let text = std::fs::read_to_string(&path).map_err(|err| Error::read(&path, err))?;
+                let text = project::read_text_capped(&path, MAX_MAP_BYTES, "signal map")?;
                 let mut map = parse_map_text(&text)?;
                 name_dbc_from_path(&mut map, &path);
                 (Some(map), Some(path))
@@ -555,9 +577,11 @@ impl Session {
                 Some(PathBuf::from(format!("fixtures/{SAMPLE_MAP_NAME}"))),
             ),
             MapLoad::Missing(stored) => {
-                warnings.push(format!(
-                    "Signal map not found ({stored}). Frames will load without decode."
-                ));
+                if !project::is_network_path(&stored) {
+                    warnings.push(format!(
+                        "Signal map not found ({stored}). Frames will load without decode."
+                    ));
+                }
                 (None, None)
             }
             MapLoad::None => (None, None),
@@ -624,7 +648,7 @@ impl Session {
                     Ok(log) => self.compare = Some(log),
                     Err(err) => warnings.push(format!("Compare log did not open: {err}")),
                 }
-            } else {
+            } else if !project::is_network_path(stored) {
                 warnings.push(format!("Compare log not found ({stored})."));
             }
         }

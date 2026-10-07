@@ -141,9 +141,33 @@ pub fn write_as(path: &Path, extension: &str, text: &str) -> Result<()> {
     std::fs::write(path, text).map_err(|err| Error::write(path, err))
 }
 
+/// `\\server\share\…` or `//server/…`. On Windows, even checking such a path
+/// makes the PC authenticate to that server, so a path read from a project
+/// file is never followed there. The user can still open one with Open.
+pub fn is_network_path(stored: &str) -> bool {
+    let stored = stored.trim();
+    stored.starts_with("\\\\") || stored.starts_with("//")
+}
+
+/// Read a text file the user pointed at, refusing one over `cap` bytes.
+pub fn read_text_capped(path: &Path, cap: u64, what: &str) -> Result<String> {
+    let len = std::fs::metadata(path)
+        .map_err(|err| Error::read(path, err))?
+        .len();
+    if len > cap {
+        return Err(Error::msg(format!(
+            "{} is {} MB; a {what} is at most {} MB",
+            path.display(),
+            len / (1024 * 1024),
+            cap / (1024 * 1024)
+        )));
+    }
+    std::fs::read_to_string(path).map_err(|err| Error::read(path, err))
+}
+
 pub fn resolve_existing(base: &Path, stored: &str) -> Option<PathBuf> {
     let stored_path = Path::new(stored);
-    if stored.is_empty() {
+    if stored.is_empty() || is_network_path(stored) {
         return None;
     }
     let mut candidates = Vec::new();

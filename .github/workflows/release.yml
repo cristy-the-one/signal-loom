@@ -1,13 +1,10 @@
 # Unsigned Signal Loom installers.
 #
-# This file is GitHub Actions syntax. Depot and Buildkite run that same
-# syntax on an Origin-hosted repo once the app is connected. Origin itself
-# does not execute workflows, and it has no GitHub Release API, so the draft
-# release step only succeeds on GitHub Actions (a GitHub mirror, where CI
-# stays on GitHub). Workflow artifacts are uploaded either way.
-#
-# Job names here are release jobs. The CI names frontend, rust, and
-# tauri-smoke stay in ci.yml and are not reused.
+# Each matrix job builds one platform's installer and uploads it as a
+# workflow artifact. A push of a `v*` tag then runs `draft-release`, which
+# checks that the tag matches the version in tauri.conf.json and attaches
+# every installer to one draft release named after the tag. A manual run
+# (workflow_dispatch) only builds the artifacts.
 
 name: release
 
@@ -77,11 +74,6 @@ jobs:
 
       - run: npm ci
 
-      - name: Read the product version
-        id: ver
-        shell: bash
-        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
-
       - name: Build the unsigned installer
         env:
           NO_STRIP: ${{ matrix.name == 'linux-deb-appimage' && 'true' || '' }}
@@ -94,15 +86,37 @@ jobs:
           path: ${{ matrix.artifacts }}
           if-no-files-found: error
 
-      - name: Attach installers to the draft release
+
+  draft-release:
+    name: draft-release
+    needs: installers
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match version ${version} in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+
+      - name: Attach every installer to one draft release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           prerelease: false
-          tag_name: v${{ steps.ver.outputs.version }}
-          name: Signal Loom v${{ steps.ver.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          name: Signal Loom ${{ github.ref_name }}
           body: |
-            Unsigned Signal Loom ${{ steps.ver.outputs.version }} installers. No Authenticode or Apple Developer ID signature.
-            Windows NSIS, for Beast 01: Signal Loom_${{ steps.ver.outputs.version }}_x64-setup.exe
-          files: ${{ matrix.artifacts }}
+            Unsigned Signal Loom ${{ github.ref_name }} installers: Windows (NSIS), Linux (deb, AppImage) and macOS (dmg, Apple silicon and Intel).
+            They carry no Authenticode or Apple Developer ID signature, so Windows SmartScreen and macOS Gatekeeper will warn before the first run.
+          files: installers/**/*
           fail_on_unmatched_files: true
