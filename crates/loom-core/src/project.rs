@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const PROJECT_FORMAT: &str = "signal-loom";
@@ -32,6 +33,9 @@ pub struct ProjectFile {
     /// Message timeout in cycle times. Absent in older projects: 2.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_factor: Option<f64>,
+    /// Cluster slot (`speed`, `lamp1`, …) to the signal shown in it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cluster: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +94,13 @@ impl ProjectFile {
                 "project version {} is not supported",
                 project.version
             )));
+        }
+        // A cluster has a dozen slots; keep only short, non-empty assignments.
+        project.cluster.retain(|slot, signal| {
+            slot.len() <= 16 && !signal.trim().is_empty() && signal.len() <= 128
+        });
+        if project.cluster.len() > 32 {
+            return Err(Error::msg("project assigns more than 32 cluster slots"));
         }
         project
             .bookmarks

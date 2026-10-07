@@ -5,7 +5,7 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import * as api from "./api";
 import { familyColor, severityOf } from "./family";
-import { drawBus, drawGauges, readingsFrom } from "./gauges";
+import { drawBus, drawGauges, readingsFrom, slotAt, slotSpec, type ClusterBindings, type SlotId } from "./gauges";
 import { drawPlot, formatHover, heldValue, timeOnPlot, type Trace } from "./plot";
 import { drawTimeline, timeAt, type TimelineMark } from "./timeline";
 import {
@@ -135,6 +135,8 @@ const state: {
   compareOn: boolean;
   comparePath: string | null;
   compareOffsetUs: number;
+  /** Signals the user put in the cluster's gauges and lamps. */
+  cluster: ClusterBindings;
   tab: RailTab;
 } = {
   summary: null,
@@ -167,6 +169,7 @@ const state: {
   compareOn: false,
   comparePath: null,
   compareOffsetUs: 0,
+  cluster: {},
   tab: "marks",
 };
 
@@ -603,7 +606,7 @@ function draw(): void {
     cursorA: state.cursorA,
     cursorB: state.cursorB,
   });
-  drawGauges(els.gauges, state.summary ? readingsFrom(state.held) : null);
+  drawGauges(els.gauges, state.summary ? readingsFrom(state.held, state.summary.signals, state.cluster) : null);
   drawBus(els.bus, state.bus);
   const domain = summary
     ? { t0: summary.tStartUs, t1: summary.tEndUs }
@@ -825,6 +828,7 @@ function applyProject(opened: ProjectOpen, path: string | null): void {
   state.cursorB = opened.project.cursorBUs ?? null;
   state.comparePath = opened.project.comparePath ?? null;
   state.compareOffsetUs = opened.project.compareOffsetUs ?? 0;
+  state.cluster = (opened.project.cluster ?? {}) as ClusterBindings;
   state.compareOn = Boolean(state.comparePath) && !opened.warnings.some((warning) => warning.startsWith("Compare"));
   els.compareOffset.value = String(state.compareOffsetUs / 1000);
   void refreshCursors();
@@ -854,6 +858,7 @@ function currentProject(): ProjectFile {
     cursorBUs: state.cursorB,
     comparePath: state.comparePath,
     compareOffsetUs: state.compareOffsetUs,
+    cluster: state.cluster as Record<string, string>,
     timeoutFactor: state.summary?.timeoutFactor,
   };
 }
@@ -1640,7 +1645,70 @@ async function captureBus(): Promise<void> {
   });
 }
 
+/** The slot under a mouse event on the cluster canvas. */
+function slotFromEvent(event: MouseEvent): SlotId | null {
+  const rect = els.gauges.getBoundingClientRect();
+  return slotAt(event.clientX - rect.left, event.clientY - rect.top, rect.width, rect.height);
+}
+
+function closeSlotChooser(): void {
+  (document.getElementById("slot-chooser") as HTMLElement).hidden = true;
+}
+
+/** Let the user pick the signal for one gauge or lamp: any signal with data, or the default. */
+function openSlotChooser(slot: SlotId, clientX: number, clientY: number): void {
+  if (!state.summary) return;
+  const chooser = document.getElementById("slot-chooser") as HTMLElement;
+  const select = document.getElementById("slot-signal") as HTMLSelectElement;
+  (document.getElementById("slot-title") as HTMLElement).textContent = slotSpec(slot).title;
+  const fallback = document.createElement("option");
+  fallback.value = "";
+  fallback.textContent = `Default (${slotSpec(slot).defaults[0]})`;
+  const options = [fallback];
+  const signals = state.summary.signals
+    .filter(hasData)
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  for (const signal of signals) {
+    const option = document.createElement("option");
+    option.value = signal.name;
+    option.textContent = signal.messageName ? `${signal.name} · ${signal.messageName}` : signal.name;
+    options.push(option);
+  }
+  select.replaceChildren(...options);
+  select.value = state.cluster[slot] ?? "";
+  select.onchange = () => {
+    if (select.value) state.cluster = { ...state.cluster, [slot]: select.value };
+    else {
+      const next = { ...state.cluster };
+      delete next[slot];
+      state.cluster = next;
+    }
+    state.dirty = true;
+    closeSlotChooser();
+    renderChrome();
+    draw();
+  };
+  chooser.style.left = `${Math.min(clientX, window.innerWidth - 240)}px`;
+  chooser.style.top = `${clientY + 12}px`;
+  chooser.hidden = false;
+  select.focus();
+}
+
 function bind(): void {
+  els.gauges.addEventListener("click", (event) => {
+    const slot = slotFromEvent(event);
+    if (slot) openSlotChooser(slot, event.clientX, event.clientY);
+  });
+  els.gauges.addEventListener("mousemove", (event) => {
+    els.gauges.classList.toggle("on-slot", state.summary != null && slotFromEvent(event) != null);
+  });
+  document.addEventListener("mousedown", (event) => {
+    const chooser = document.getElementById("slot-chooser") as HTMLElement;
+    if (!chooser.hidden && !chooser.contains(event.target as Node) && event.target !== els.gauges) closeSlotChooser();
+  });
+  document.getElementById("slot-signal")?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeSlotChooser();
+  });
   els.runtime.textContent = api.inTauri() ? "Desktop" : "Browser preview";
   document.getElementById("btn-sample")?.addEventListener("click", () => void loadSample());
   document.getElementById("btn-open")?.addEventListener("click", () => void openLog());

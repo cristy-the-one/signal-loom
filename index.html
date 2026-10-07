@@ -148,7 +148,7 @@
         <main class="viewport" id="viewport">
           <div class="viewport-body" id="viewport-body">
             <div class="cluster-strip">
-              <canvas id="gauges" aria-label="Cluster gauges"></canvas>
+              <canvas id="gauges" aria-label="Cluster gauges. Click a gauge or lamp to assign a signal."></canvas>
             </div>
             <div class="bus-strip">
               <canvas id="bus" aria-label="Bus load and message rate"></canvas>
@@ -221,6 +221,10 @@
         </ul>
       </form>
     </dialog>
+    <div id="slot-chooser" class="slot-chooser" hidden>
+      <span class="title" id="slot-title">Gauge</span>
+      <select id="slot-signal" aria-label="Signal shown in this gauge"></select>
+    </div>
     <input id="file-log" type="file" hidden accept=".slog,.slbin,.csv,.txt,.log,.asc,.blf" />
     <input id="file-map" type="file" hidden accept=".dbc,.json,application/json" />
     <input id="file-project" type="file" hidden accept=".loom,.json,application/json" />

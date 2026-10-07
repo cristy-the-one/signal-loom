@@ -733,6 +733,37 @@ fn projects_are_written_only_as_loom_files() {
 }
 
 #[test]
+fn projects_keep_cluster_assignments() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let text = std::fs::read_to_string(root.join("demo.loom")).unwrap();
+    let mut project = ProjectFile::parse(&text).unwrap();
+    assert!(project.cluster.is_empty(), "older projects have none");
+    project.cluster.insert("lamp1".into(), "led_cmd_19".into());
+    project
+        .cluster
+        .insert("speed".into(), "SteeringAngle".into());
+    project.cluster.insert("lamp2".into(), "   ".into());
+    let saved = project.to_json().unwrap();
+    let reopened = ProjectFile::parse(&saved).unwrap();
+    assert_eq!(
+        reopened.cluster.get("lamp1").map(String::as_str),
+        Some("led_cmd_19")
+    );
+    assert_eq!(
+        reopened.cluster.get("speed").map(String::as_str),
+        Some("SteeringAngle")
+    );
+    assert!(
+        !reopened.cluster.contains_key("lamp2"),
+        "a blank assignment is dropped"
+    );
+    let opened = Session::new()
+        .load_project_json(&saved, Some(&root))
+        .unwrap();
+    assert_eq!(opened.project.cluster.len(), 2);
+}
+
+#[test]
 fn a_map_that_fits_no_message_is_not_carried_into_the_next_log() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
     let open_cluster = || {
