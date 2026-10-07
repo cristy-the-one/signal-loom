@@ -1,5 +1,4 @@
 import { fitCanvas } from "./canvas";
-import { formatValue } from "./format";
 import type { BusLoad, ValueRead } from "./types";
 
 export interface ClusterReadings {
@@ -78,8 +77,8 @@ export function drawGauges(canvas: HTMLCanvasElement, readings: ClusterReadings 
   };
   const cy = Math.min(34, h * 0.46);
   const radius = Math.min(22, h * 0.32);
-  arcGauge(ctx, 58, cy, radius, data.speed, 0, 320, "#f2e394", "km/h", data.speed == null);
-  arcGauge(ctx, 158, cy, radius, data.rpm, 0, 9000, "#3ec6ff", "rpm", data.rpm == null, 7500);
+  arcGauge(ctx, 58, cy, radius, data.speed, 0, 320, "#f2e394", "km/h", 1, data.speed == null);
+  arcGauge(ctx, 158, cy, radius, data.rpm, 0, 9000, "#3ec6ff", "rpm", 0, data.rpm == null, 7500);
   gearDigit(ctx, 108, cy, data.gear);
 
   const barX = 214;
@@ -115,6 +114,7 @@ function arcGauge(
   max: number,
   color: string,
   unit: string,
+  decimals: number,
   empty: boolean,
   redFrom?: number,
 ): void {
@@ -147,10 +147,10 @@ function arcGauge(
   ctx.lineTo(cx + Math.cos(ang) * (radius - 1), cy + Math.sin(ang) * (radius - 1));
   ctx.stroke();
   ctx.fillStyle = empty ? "#6d7c88" : "#e7eef3";
-  ctx.font = "600 13px 'IBM Plex Sans', sans-serif";
+  ctx.font = "500 13px 'IBM Plex Mono', ui-monospace, monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(empty || value == null ? "—" : formatValue(value), cx, cy + 8);
+  ctx.fillText(empty || value == null ? "—" : value.toFixed(decimals), cx, cy + 8);
   ctx.fillStyle = "#8b9aa6";
   ctx.font = "9px 'IBM Plex Mono', ui-monospace, monospace";
   ctx.fillText(unit, cx, cy + radius + 8);
@@ -201,7 +201,7 @@ function barGauge(
   ctx.font = "10px 'IBM Plex Mono', ui-monospace, monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
-  ctx.fillText(value == null ? "—" : formatValue(value), x + width / 2, y + 3);
+  ctx.fillText(value == null ? "—" : value.toFixed(0), x + width / 2, y + 3);
   ctx.fillStyle = "#8b9aa6";
   ctx.font = "9px 'IBM Plex Mono', ui-monospace, monospace";
   ctx.fillText(label, x + width / 2, y + height + 2);
@@ -255,12 +255,13 @@ export function drawBus(canvas: HTMLCanvasElement, load: BusLoad | null): void {
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";
   ctx.fillStyle = "#d5dee6";
-  const rate = load ? `${load.rate.toFixed(0)} f/s` : "— f/s";
-  const pct = load ? `${(load.load * 100).toFixed(1)}% of 500 kbit/s` : "bus idle";
-  const frames = load ? `${load.frames} fr / 1 s` : "";
-  const label = `${rate}   ${pct}   ${frames}`.trim();
-  ctx.fillText(label, pad, h / 2);
-  const textW = ctx.measureText(label).width;
+  // Each field is padded to a fixed width, and the bar starts after the
+  // widest possible label, so neither moves as the numbers change.
+  const rate = load ? load.rate.toFixed(0).padStart(4) : "   —";
+  const pct = load ? (load.load * 100).toFixed(1).padStart(5) : "    —";
+  const frames = load ? String(load.frames).padStart(4) : "   —";
+  ctx.fillText(`${rate} f/s   ${pct}% of 500 kbit/s   ${frames} fr / 1 s`, pad, h / 2);
+  const textW = ctx.measureText("9999 f/s   100.0% of 500 kbit/s   9999 fr / 1 s").width;
   const barX = pad + textW + 12;
   const barW = Math.max(24, w - barX - pad);
   const barY = Math.max(3, (h - 6) / 2);

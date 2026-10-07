@@ -455,6 +455,7 @@ impl Session {
                         message_id: signal.message_id,
                         min: signal.min,
                         max: signal.max,
+                        step: signal.step,
                         from_map: signal.from_map,
                     })
                     .collect();
@@ -466,6 +467,7 @@ impl Session {
                         message_id: None,
                         min: None,
                         max: None,
+                        step: None,
                         from_map: false,
                     });
                 }

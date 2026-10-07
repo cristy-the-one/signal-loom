@@ -30,6 +30,7 @@ pub struct SignalDto {
     pub message_id: Option<u32>,
     pub min: Option<f64>,
     pub max: Option<f64>,
+    pub step: Option<f64>,
     pub from_map: bool,
 }
 

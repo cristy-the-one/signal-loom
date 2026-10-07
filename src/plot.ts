@@ -1,5 +1,5 @@
 import { fitCanvas } from "./canvas";
-import { clamp, formatUs, formatValue, tickStep } from "./format";
+import { clamp, formatReading, formatUs, tickStep, type Readout } from "./format";
 import type { Point } from "./types";
 
 export const TRACE_COLORS = [
@@ -156,9 +156,9 @@ export function timeOnPlot(
   return view.t0 + clamp(u, 0, 1) * (view.t1 - view.t0);
 }
 
-export function formatHover(name: string, value: number | null, unit: string): string {
-  if (value == null) return name;
-  return unit ? `${name}  ${formatValue(value)} ${unit}` : `${name}  ${formatValue(value)}`;
+export function formatHover(name: string, value: number | null, unit: string, readout: Readout): string {
+  const reading = value == null ? "—".padStart(readout.width) : formatReading(value, readout);
+  return unit ? `${name}  ${reading} ${unit}` : `${name}  ${reading}`;
 }
 
 function drawCursor(

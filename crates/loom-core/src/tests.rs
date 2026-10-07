@@ -528,6 +528,33 @@ fn hypercar_lap_decodes_like_a_drive() {
 }
 
 #[test]
+fn signals_carry_their_decode_step() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let mut session = Session::new();
+    session
+        .open_path(&root.join("hypercar_lap.slog"))
+        .expect("synthetic lap");
+    let summary = session.summary().unwrap();
+    let step = |name: &str| {
+        summary
+            .signals
+            .iter()
+            .find(|signal| signal.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .step
+    };
+    assert_eq!(step("VehicleSpeed"), Some(0.01));
+    assert_eq!(step("EngineRPM"), Some(0.25));
+    assert_eq!(step("BrakePressure"), Some(0.5));
+    assert_eq!(step("Gear"), Some(1.0));
+
+    let csv = b"t_us,signal,value,unit\n0,Speed,1.5,km/h\n";
+    let mut decoded = Session::new();
+    decoded.open_bytes("decoded.csv", csv.to_vec()).unwrap();
+    assert_eq!(decoded.summary().unwrap().signals[0].step, None);
+}
+
+#[test]
 fn deck_bound_signals_are_live_mid_drive() {
     // Names `readingsFrom` in src/gauges.ts looks up. A rename in the
     // generator or DBC leaves the cluster drawing blanks.
