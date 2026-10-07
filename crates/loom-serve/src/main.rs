@@ -41,6 +41,7 @@ struct Hub {
     phase: Arc<Mutex<Phase>>,
 }
 
+#[derive(Clone)]
 enum Phase {
     Idle,
     Running,
@@ -127,12 +128,12 @@ fn dispatch(hub: &Hub, request: &mut Request) -> Response<std::io::Cursor<Vec<u8
             }
             (Method::Get, "/api/progress") | (Method::Post, "/api/progress") => {
                 drop(session);
-                json(&progress(hub)?)
+                json(&progress(hub, true)?)
             }
             (Method::Post, "/api/cancel") => {
                 hub.control.request_cancel();
                 drop(session);
-                json(&progress(hub)?)
+                json(&progress(hub, false)?)
             }
             (Method::Post, "/api/open-bytes") => {
                 let name = filename.unwrap_or_else(|| "upload.log".into());
@@ -304,7 +305,9 @@ fn begin(
     json(&serde_json::json!({ "started": true }))
 }
 
-fn progress(hub: &Hub) -> Result<IndexStatus, String> {
+/// `take` hands a finished result to the caller and resets to idle. Cancel
+/// only peeks, so a result that lands as Cancel is clicked still reaches the poll.
+fn progress(hub: &Hub, take: bool) -> Result<IndexStatus, String> {
     let mut phase = hub.phase.lock().map_err(|err| err.to_string())?;
     let (bytes_done, bytes_total, frames, skipped) = hub.control.snapshot();
     let mut status = IndexStatus {
@@ -318,7 +321,12 @@ fn progress(hub: &Hub) -> Result<IndexStatus, String> {
         summary: None,
         error: None,
     };
-    match std::mem::replace(&mut *phase, Phase::Idle) {
+    let current = if take {
+        std::mem::replace(&mut *phase, Phase::Idle)
+    } else {
+        phase.clone()
+    };
+    match current {
         Phase::Idle => status.idle = true,
         Phase::Running => {
             *phase = Phase::Running;
