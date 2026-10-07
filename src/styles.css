@@ -210,6 +210,8 @@ button:disabled { opacity: 0.45; cursor: default; }
   border-radius: 3px;
 }
 .sig:hover { background: #1a2229; }
+/* In the map, but no frame in this log carries it. */
+.sig.is-empty { opacity: 0.45; }
 .sig input { margin: 0; accent-color: var(--amber); }
 .swatch { width: 8px; height: 8px; border-radius: 1px; }
 .sig-copy { min-width: 0; }

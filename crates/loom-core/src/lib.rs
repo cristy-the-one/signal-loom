@@ -20,8 +20,8 @@ mod socketcan;
 mod tests;
 
 pub use dto::{
-    deserialize_us, BusLoad, EventDto, FrameDto, IndexStatus, PointDto, ProjectOpen, Query,
-    SeriesDto, SignalDto, StepDir, Summary, ValueDto, WindowStats,
+    deserialize_us, BusLoad, EventDto, FrameDto, IndexStatus, MapMatch, PointDto, ProjectOpen,
+    Query, SeriesDto, SignalDto, StepDir, Summary, ValueDto, WindowStats,
 };
 pub use error::{Error, Result};
 pub use index::IndexControl;

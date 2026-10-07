@@ -733,6 +733,65 @@ fn projects_are_written_only_as_loom_files() {
 }
 
 #[test]
+fn a_map_that_fits_no_message_is_not_carried_into_the_next_log() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let open_cluster = || {
+        let mut session = Session::new();
+        session.open_path(&root.join("cluster_drive.slog")).unwrap();
+        session
+            .open_map_path(&root.join("cluster.map.json"))
+            .unwrap();
+        session
+    };
+    // A diagnostic log on ids the cluster map never mentions.
+    let other_bus = "SLOGv1\nF 0 7F0 0102\nF 1000 784 0304\n";
+
+    let mut uploaded = open_cluster();
+    let summary = uploaded
+        .open_bytes("flash.slog", other_bus.as_bytes().to_vec())
+        .unwrap();
+    assert!(summary.map_label.is_none(), "{:?}", summary.map_label);
+    assert!(summary.signals.is_empty());
+    assert!(
+        summary.warnings.iter().any(|w| w.contains("set aside")),
+        "{:?}",
+        summary.warnings
+    );
+
+    let dir = std::env::temp_dir().join(format!("loom-fit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let flash = dir.join("flash.slog");
+    std::fs::write(&flash, other_bus).unwrap();
+    let mut opened = open_cluster();
+    let summary = opened.open_path(&flash).unwrap();
+    assert!(summary.map_label.is_none());
+    assert!(summary.warnings.iter().any(|w| w.contains("set aside")));
+
+    // A log on the same bus keeps the map, and says how much of it fits.
+    let same_bus = dir.join("same.slog");
+    std::fs::write(&same_bus, "SLOGv1\nF 0 1A0 4006102700000000\n").unwrap();
+    let mut kept = open_cluster();
+    let summary = kept.open_path(&same_bus).unwrap();
+    assert!(summary.map_label.is_some());
+    let fit = summary.map_match.expect("a frame log with a map");
+    assert_eq!((fit.matched, fit.total), (1, 3));
+
+    // A map the user loads for this log stays, with a warning if nothing fits.
+    let summary = opened
+        .open_map_path(&root.join("cluster.map.json"))
+        .unwrap();
+    assert!(summary.map_label.is_some());
+    let fit = summary.map_match.unwrap();
+    assert_eq!((fit.matched, fit.total), (0, 3));
+    assert!(
+        summary.warnings[0].contains("None of the 3 messages"),
+        "{:?}",
+        summary.warnings
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn projects_do_not_follow_network_paths() {
     use crate::project::is_network_path;
     for network in [

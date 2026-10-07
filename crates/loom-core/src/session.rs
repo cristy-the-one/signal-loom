@@ -1,7 +1,7 @@
 use crate::analyze::compile;
 use crate::dto::{
-    EventDto, FrameDto, PointDto, ProjectOpen, Query, SeriesDto, SignalDto, StepDir, Summary,
-    ValueDto, WindowStats,
+    EventDto, FrameDto, MapMatch, PointDto, ProjectOpen, Query, SeriesDto, SignalDto, StepDir,
+    Summary, ValueDto, WindowStats,
 };
 use crate::error::{Error, Result};
 use crate::index::{IndexControl, IndexedLog, QueryWindow, Series};
@@ -93,12 +93,17 @@ impl Session {
             incoming_path = Some(sibling);
         }
         let map_for_index = incoming_map.as_ref().or(self.map.as_ref());
-        let indexed = IndexedLog::open_path_controlled(path, map_for_index, control)?;
-        let kept_notes = if incoming_map.is_none() {
+        let mut indexed = IndexedLog::open_path_controlled(path, map_for_index, control)?;
+        let mut kept_notes = if incoming_map.is_none() {
             self.map_notes.clone()
         } else {
             Vec::new()
         };
+        let set_aside = incoming_map.is_none() && !self.carried_map_fits(&indexed);
+        if set_aside {
+            indexed = IndexedLog::open_path_controlled(path, None, control)?;
+            kept_notes = vec![self.set_aside_note()];
+        }
         self.reset_deck();
         self.log_label = path
             .file_name()
@@ -111,10 +116,35 @@ impl Session {
             self.map_path = incoming_path;
             self.map_notes = incoming_notes;
         } else {
+            if set_aside {
+                self.map = None;
+                self.map_path = None;
+            }
             self.map_notes = kept_notes;
         }
         self.log = Some(indexed);
         self.summary()
+    }
+
+    /// A map that came with the previous log fits a new one only if at least
+    /// one of its messages appears there. A DBC for another bus would list
+    /// all its signals with no data, and hide that it does not apply.
+    fn carried_map_fits(&self, log: &IndexedLog) -> bool {
+        match (&self.map, map_match(self.map.as_ref(), log)) {
+            (Some(_), Some(fit)) => fit.total == 0 || fit.matched > 0,
+            _ => true,
+        }
+    }
+
+    fn set_aside_note(&self) -> String {
+        let label = self
+            .map
+            .as_ref()
+            .map(|map| map.name.clone())
+            .unwrap_or_else(|| "signal map".to_string());
+        format!(
+            "{label} matches no message in this log, so it was set aside. Load this log's DBC with Map."
+        )
     }
 
     pub fn open_bytes(&mut self, name: &str, bytes: Vec<u8>) -> Result<Summary> {
@@ -122,10 +152,23 @@ impl Session {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("upload");
-        self.reset_deck();
+        let mut indexed = IndexedLog::open_bytes(bytes, self.map.as_ref())?;
+        let set_aside = !self.carried_map_fits(&indexed);
+        if set_aside {
+            let note = self.set_aside_note();
+            if let Some(bytes) = indexed.shared_bytes() {
+                indexed = IndexedLog::open_shared(bytes, None)?;
+            }
+            self.map = None;
+            self.map_path = None;
+            self.reset_deck();
+            self.map_notes = vec![note];
+        } else {
+            self.reset_deck();
+        }
         self.log_label = label.to_string();
         self.log_path = None;
-        self.log = Some(IndexedLog::open_bytes(bytes, self.map.as_ref())?);
+        self.log = Some(indexed);
         self.summary()
     }
 
@@ -469,6 +512,7 @@ impl Session {
         let uses_map = log.format() != LogFormat::DecodedCsv;
         Ok(Summary {
             timeout_factor: self.timeout_factor(),
+            map_match: map_match(self.map.as_ref(), log),
             log_label: self.log_label.clone(),
             log_path: self
                 .log_path
@@ -523,7 +567,16 @@ impl Session {
             events: self.merged_events(log)?,
             skipped_records: log.skipped(),
             warnings: {
-                let mut warnings = self.map_notes.clone();
+                let mut warnings = Vec::new();
+                if let Some(fit) = map_match(self.map.as_ref(), log)
+                    .filter(|fit| fit.matched == 0 && fit.total > 0)
+                {
+                    warnings.push(format!(
+                        "None of the {} messages in the signal map appear in this log, so nothing decodes. Is it this log's DBC?",
+                        fit.total
+                    ));
+                }
+                warnings.extend(self.map_notes.iter().cloned());
                 warnings.extend(log.warnings().iter().cloned());
                 warnings
             },
@@ -926,6 +979,20 @@ fn export_math_csv(session: &Session, names: &[String], t0_us: u64, t1_us: u64) 
         out.push('\n');
     }
     Ok(out)
+}
+
+/// How many of the map's message ids carry at least one frame in the log.
+fn map_match(map: Option<&SignalMap>, log: &IndexedLog) -> Option<MapMatch> {
+    let map = map?;
+    if log.frame_count() == 0 {
+        return None;
+    }
+    let ids: BTreeSet<u32> = map.messages.iter().map(|message| message.id).collect();
+    let matched = ids.iter().filter(|id| log.carries_id(**id)).count();
+    Some(MapMatch {
+        matched: matched as u32,
+        total: ids.len() as u32,
+    })
 }
 
 fn parse_map_text(text: &str) -> Result<SignalMap> {
