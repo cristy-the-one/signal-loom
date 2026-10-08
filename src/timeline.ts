@@ -1,6 +1,7 @@
-import { fitCanvas } from "./canvas";
+import { eachTick, fitCanvas } from "./canvas";
 import { severityColor, type Severity } from "./family";
-import { formatUs, tickStep } from "./format";
+import { formatUs } from "./format";
+import { MONO, PLAYHEAD, RULE, TEXT_MUTED, YELLOW } from "./theme";
 import type { Point } from "./types";
 
 export interface TimelineMark {
@@ -36,7 +37,7 @@ export function drawTimeline(
   const xOf = (t: number) => pad + ((t - domain.t0) / span) * (w - pad * 2);
 
   ctx.fillStyle = "#0b1014";
-  ctx.strokeStyle = "#243039";
+  ctx.strokeStyle = RULE;
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.rect(pad + 0.5, trackTop + 0.5, w - pad * 2 - 1, trackH - 1);
@@ -78,7 +79,7 @@ export function drawTimeline(
   for (const mark of marks) {
     const x = xOf(mark.t);
     if (mark.kind === "mark") {
-      ctx.fillStyle = "#f2e394";
+      ctx.fillStyle = YELLOW;
       ctx.beginPath();
       ctx.moveTo(x, trackTop + 1);
       ctx.lineTo(x - 3.5, trackTop + 7);
@@ -93,24 +94,22 @@ export function drawTimeline(
   }
 
   const px = xOf(playhead);
-  ctx.strokeStyle = "#ff4d2e";
+  ctx.strokeStyle = PLAYHEAD;
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(px + 0.5, trackTop - 2);
   ctx.lineTo(px + 0.5, laneTop + laneH);
   ctx.stroke();
 
-  ctx.font = "10px 'IBM Plex Mono', ui-monospace, monospace";
+  ctx.font = `10px ${MONO}`;
   ctx.textBaseline = "top";
-  const step = tickStep(span);
-  const first = Math.ceil(domain.t0 / step) * step;
-  for (let t = first; t <= domain.t1; t += step) {
+  eachTick(domain.t0, domain.t1, (t) => {
     const x = xOf(t);
     ctx.fillStyle = "#31404a";
     ctx.fillRect(x, tickH - 4, 1, 3);
-    ctx.fillStyle = "#8b9aa6";
+    ctx.fillStyle = TEXT_MUTED;
     ctx.fillText(formatUs(t), x + 3, 1);
-  }
+  });
 }
 
 export function timeAt(canvas: HTMLCanvasElement, clientX: number, domain: { t0: number; t1: number }): number {
