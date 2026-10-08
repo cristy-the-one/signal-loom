@@ -141,6 +141,12 @@ export interface ProjectFile {
   cluster?: Record<string, string>;
 }
 
+/**
+ * What the UI owns of a saved project. The engine adds the deck it holds: log, map and compare paths,
+ * compare offset, math channels, triggers and the timeout.
+ */
+export type ProjectView = Pick<ProjectFile, "view" | "bookmarks" | "notes" | "cursorAUs" | "cursorBUs" | "cluster">;
+
 export interface ProjectOpen {
   project: ProjectFile;
   summary: Summary;

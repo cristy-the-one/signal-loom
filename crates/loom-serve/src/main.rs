@@ -4,7 +4,7 @@
 //! so `npm run dev:preview` can exercise the UI in a browser. It binds to
 //! 127.0.0.1 only and is not a network service.
 
-use loom_core::{Engine, Export, MathChannel, Query, StepDir, ThresholdTrigger};
+use loom_core::{Engine, Export, MathChannel, ProjectView, Query, StepDir, ThresholdTrigger};
 use serde::Deserialize;
 use std::env;
 use std::io::Read;
@@ -159,6 +159,11 @@ fn dispatch(engine: &Arc<Engine>, request: &mut Request) -> Response<std::io::Cu
                 json(&lift(engine.with_session(|session| {
                     session.load_project_json(&req.json, base.as_deref())
                 }))?)
+            }
+            (Method::Post, "/api/project-json") => {
+                let view: ProjectView = parse_json(&body)?;
+                let text = lift(engine.with_session(|session| session.project_json(&view)))?;
+                json(&serde_json::json!({ "json": text }))
             }
             (Method::Post, "/api/bus") => {
                 let req: ExportBody = parse_json(&body)?;

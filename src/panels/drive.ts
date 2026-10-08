@@ -58,7 +58,7 @@ async function applyOffset(): Promise<void> {
   const ms = Number(els.compareOffset.value);
   if (!Number.isFinite(ms)) return;
   const offsetUs = Math.round(ms * 1000);
-  if (!state.compareOn) {
+  if (!state.summary) {
     state.compareOffsetUs = offsetUs;
     state.dirty = true;
     renderCompare();

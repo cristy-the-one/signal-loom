@@ -720,13 +720,22 @@ fn projects_are_written_only_as_loom_files() {
     let project = crate::ProjectFile::parse(&text).unwrap();
     let dir = std::env::temp_dir().join(format!("loom-write-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let session = Session::new();
+    let mut session = Session::new();
+    session.open_path(&root.join("cluster_drive.slog")).unwrap();
+    let view = crate::ProjectView {
+        view: project.view.clone(),
+        bookmarks: project.bookmarks.clone(),
+        notes: project.notes.clone(),
+        cursor_a_us: project.cursor_a_us,
+        cursor_b_us: project.cursor_b_us,
+        cluster: project.cluster.clone(),
+    };
     assert!(session
-        .write_project(&dir.join("startup.bat"), &project)
+        .write_project(&dir.join("startup.bat"), &view)
         .is_err());
     assert!(!dir.join("startup.bat").exists());
     session
-        .write_project(&dir.join("drive.LOOM"), &project)
+        .write_project(&dir.join("drive.LOOM"), &view)
         .unwrap();
     assert!(dir.join("drive.LOOM").is_file());
     std::fs::remove_dir_all(&dir).unwrap();
@@ -900,7 +909,11 @@ fn exports_save_to_disk_only_as_csv_and_slog() {
     let names = vec!["VehicleSpeed".to_string()];
 
     let csv = dir.join("speed.csv");
-    let bytes = session.save_csv(&csv, &names, 0, 5_000_000).unwrap();
+    let bytes = session
+        .save_csv(&csv, &names, 0, 5_000_000)
+        .unwrap()
+        .text
+        .len() as u64;
     let written = std::fs::read_to_string(&csv).unwrap();
     assert_eq!(bytes, written.len() as u64);
     assert_eq!(written, session.export_csv(&names, 0, 5_000_000).unwrap());
