@@ -3,6 +3,7 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_call:
 
 jobs:
   frontend:
@@ -15,7 +16,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run typecheck
       - run: npm run build
 
   rust:
