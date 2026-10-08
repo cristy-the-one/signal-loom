@@ -1,17 +1,9 @@
-import { fitCanvas } from "./canvas";
-import { clamp, formatReading, formatUs, tickStep, type Readout } from "./format";
+import { eachTick, fitCanvas } from "./canvas";
+import { clamp, formatReading, formatUs, type Readout } from "./format";
+import { AMBER, CORAL, CYAN, GREEN, MONO, PINK, PLAYHEAD, SURFACE, TEAL, TEXT_MUTED, VIOLET, YELLOW } from "./theme";
 import type { Point } from "./types";
 
-export const TRACE_COLORS = [
-  "#3ec6ff",
-  "#e6a23c",
-  "#7ddea5",
-  "#ff7a59",
-  "#c9a0ff",
-  "#f2e394",
-  "#6ee0d0",
-  "#ff8cc6",
-];
+export const TRACE_COLORS = [CYAN, AMBER, GREEN, CORAL, VIOLET, YELLOW, TEAL, PINK];
 
 export interface Trace {
   name: string;
@@ -41,7 +33,7 @@ export function drawPlot(
   if (!fitted) return;
   const { ctx, w, h } = fitted;
   const bg = ctx.createLinearGradient(0, 0, 0, h);
-  bg.addColorStop(0, "#12181e");
+  bg.addColorStop(0, SURFACE);
   bg.addColorStop(1, "#07090c");
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, w, h);
@@ -66,23 +58,21 @@ export function drawPlot(
     ctx.stroke();
   }
 
-  const step = tickStep(span);
-  const first = Math.ceil(view.t0 / step) * step;
   ctx.strokeStyle = "rgba(180, 200, 210, 0.045)";
-  for (let t = first; t <= view.t1; t += step) {
+  eachTick(view.t0, view.t1, (t) => {
     const x = xOf(t);
     ctx.beginPath();
     ctx.moveTo(x + 0.5, PAD.top);
     ctx.lineTo(x + 0.5, PAD.top + plotH);
     ctx.stroke();
-  }
+  });
 
   for (const trace of traces) {
     drawTrace(ctx, trace, view, plotW, plotH);
   }
 
-  drawCursor(ctx, overlay.cursorA, view, plotW, plotH, "#f2e394");
-  drawCursor(ctx, overlay.cursorB, view, plotW, plotH, "#7ddea5");
+  drawCursor(ctx, overlay.cursorA, view, plotW, plotH, YELLOW);
+  drawCursor(ctx, overlay.cursorB, view, plotW, plotH, GREEN);
 
   if (overlay.hoverT != null && overlay.hoverT >= view.t0 && overlay.hoverT <= view.t1) {
     const x = xOf(overlay.hoverT);
@@ -117,7 +107,7 @@ export function drawPlot(
     ctx.moveTo(x, PAD.top);
     ctx.lineTo(x, PAD.top + plotH);
     ctx.stroke();
-    ctx.strokeStyle = "#ff4d2e";
+    ctx.strokeStyle = PLAYHEAD;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(x + 0.5, PAD.top);
@@ -126,14 +116,14 @@ export function drawPlot(
   }
   ctx.restore();
 
-  ctx.fillStyle = "#8b9aa6";
-  ctx.font = "11px 'IBM Plex Mono', ui-monospace, monospace";
+  ctx.fillStyle = TEXT_MUTED;
+  ctx.font = `11px ${MONO}`;
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
-  for (let t = first; t <= view.t1; t += step) {
+  eachTick(view.t0, view.t1, (t) => {
     const x = xOf(t);
     ctx.fillText(formatUs(t), x + 4, PAD.top + plotH + 4);
-  }
+  });
 }
 
 export function heldValue(points: Point[], t: number): number | null {

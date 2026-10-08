@@ -1,5 +1,6 @@
 use crate::decode::{DecodeSpec, Endian};
 use crate::error::{Error, Result};
+use crate::scan::id::{parse_id, IdBase};
 use serde::Deserialize;
 use std::collections::HashSet;
 
@@ -10,13 +11,41 @@ pub struct SignalMap {
     pub signals: Vec<MappedSignal>,
     pub messages: Vec<MapMessage>,
     pub warnings: Vec<String>,
-    /// A message is late after this many of its cycle times without a frame.
-    pub timeout_factor: f64,
+}
+
+/// A message is late after this many of its cycle times without a frame. The
+/// session owns it and hands it to every index it builds; this is the one
+/// place that says what a valid value is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimeoutFactor(f64);
+
+impl TimeoutFactor {
+    pub const MIN: f64 = 1.0;
+    pub const MAX: f64 = 100.0;
+
+    pub fn new(factor: f64) -> Result<Self> {
+        if factor.is_finite() && (Self::MIN..=Self::MAX).contains(&factor) {
+            return Ok(Self(factor));
+        }
+        Err(Error::invalid(format!(
+            "timeout must be between {} and {} cycle times",
+            Self::MIN,
+            Self::MAX
+        )))
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
 }
 
 /// 2.5 cycles: a 100 ms message times out after 250 ms, as receiving ECUs
 /// commonly configure it. One lost frame still stays inside it.
-pub const DEFAULT_TIMEOUT_FACTOR: f64 = 2.5;
+impl Default for TimeoutFactor {
+    fn default() -> Self {
+        Self(2.5)
+    }
+}
 
 /// One CAN message described by a map or a DBC.
 #[derive(Debug, Clone)]
@@ -45,16 +74,16 @@ pub struct MappedSignal {
 impl SignalMap {
     pub fn parse(text: &str) -> Result<Self> {
         let raw: RawMap = serde_json::from_str(text)
-            .map_err(|err| Error::msg(format!("signal map is not valid JSON: {err}")))?;
+            .map_err(|err| Error::invalid(format!("signal map is not valid JSON: {err}")))?;
         if raw.version != 1 {
-            return Err(Error::msg(format!(
+            return Err(Error::invalid(format!(
                 "signal map version {} is not supported (expected 1)",
                 raw.version
             )));
         }
         let name = raw.name.trim();
         if name.is_empty() {
-            return Err(Error::msg("signal map is missing a name"));
+            return Err(Error::invalid("signal map is missing a name"));
         }
         let mut signals = Vec::new();
         let mut seen = HashSet::new();
@@ -62,17 +91,17 @@ impl SignalMap {
             let message_name = message.name.trim().to_string();
             let message_id = message.id;
             if message_name.is_empty() {
-                return Err(Error::msg("a message in the signal map has no name"));
+                return Err(Error::invalid("a message in the signal map has no name"));
             }
             for signal in &message.signals {
                 let signal_name = signal.name.trim().to_string();
                 if signal_name.is_empty() {
-                    return Err(Error::msg(format!(
+                    return Err(Error::invalid(format!(
                         "message {message_name} has a signal with no name"
                     )));
                 }
                 if !seen.insert(signal_name.clone()) {
-                    return Err(Error::msg(format!(
+                    return Err(Error::invalid(format!(
                         "signal map has two signals named {signal_name}"
                     )));
                 }
@@ -88,8 +117,9 @@ impl SignalMap {
                     signed: signal.signed,
                     endian,
                 };
-                spec.validate()
-                    .map_err(|message| Error::msg(format!("signal {signal_name}: {message}")))?;
+                spec.validate().map_err(|message| {
+                    Error::invalid(format!("signal {signal_name}: {message}"))
+                })?;
                 signals.push(MappedSignal {
                     name: signal_name,
                     unit: signal.unit.clone(),
@@ -108,7 +138,7 @@ impl SignalMap {
             }
         }
         if signals.is_empty() {
-            return Err(Error::msg("signal map has no signals"));
+            return Err(Error::invalid("signal map has no signals"));
         }
         let messages = raw
             .messages
@@ -125,7 +155,6 @@ impl SignalMap {
             signals,
             messages,
             warnings: Vec::new(),
-            timeout_factor: DEFAULT_TIMEOUT_FACTOR,
         })
     }
 
@@ -289,14 +318,8 @@ where
     deserializer.deserialize_any(Visitor)
 }
 
+/// A CAN id in a map or CAN CSV: hex with a `0x` prefix or any `A-F` digit,
+/// decimal otherwise.
 pub fn parse_can_id(text: &str) -> std::result::Result<u32, String> {
-    let text = text.trim();
-    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        return u32::from_str_radix(hex, 16).map_err(|_| format!("bad CAN id {text}"));
-    }
-    if text.chars().any(|c| matches!(c, 'a'..='f' | 'A'..='F')) {
-        return u32::from_str_radix(text, 16).map_err(|_| format!("bad CAN id {text}"));
-    }
-    text.parse::<u32>()
-        .map_err(|_| format!("bad CAN id {text}"))
+    parse_id(text, IdBase::Auto).ok_or_else(|| format!("bad CAN id {}", text.trim()))
 }

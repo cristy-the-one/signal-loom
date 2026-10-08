@@ -5,13 +5,14 @@
 //! 127.0.0.1 only and is not a network service.
 
 use loom_core::{
-    IndexControl, IndexStatus, MathChannel, Query, Session, StepDir, ThresholdTrigger,
+    Engine, Error, ErrorKind, Export, MathChannel, ProjectView, Query, StepDir, ThresholdTrigger,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::env;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const MAX_BODY: usize = 32 * 1024 * 1024;
@@ -24,29 +25,11 @@ fn main() {
         std::process::exit(1);
     });
     eprintln!("signal-loom engine listening on http://{addr}");
-    let hub = Hub {
-        session: Arc::new(Mutex::new(Session::new())),
-        control: Arc::new(IndexControl::default()),
-        phase: Arc::new(Mutex::new(Phase::Idle)),
-    };
+    let engine = Arc::new(Engine::new());
     for mut request in server.incoming_requests() {
-        let response = dispatch(&hub, &mut request);
+        let response = dispatch(&engine, &mut request);
         let _ = request.respond(response);
     }
-}
-
-struct Hub {
-    session: Arc<Mutex<Session>>,
-    control: Arc<IndexControl>,
-    phase: Arc<Mutex<Phase>>,
-}
-
-#[derive(Clone)]
-enum Phase {
-    Idle,
-    Running,
-    Ready,
-    Failed(String),
 }
 
 fn parse_port() -> u16 {
@@ -66,189 +49,202 @@ fn parse_port() -> u16 {
     43128
 }
 
-fn dispatch(hub: &Hub, request: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn dispatch(engine: &Arc<Engine>, request: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
     // The UI reaches this process through the Vite proxy, so every legitimate
     // request is same-origin. Refuse other sites and DNS-rebound hostnames.
     if !header(request, "host").is_some_and(|host| is_loopback_authority(&host))
         || header(request, "origin").is_some_and(|origin| !is_loopback_origin(&origin))
     {
-        return error(403, "only the local Signal Loom UI may call this engine");
+        return error(
+            403,
+            &Error::invalid("only the local Signal Loom UI may call this engine"),
+        );
     }
     let path = request.url().split('?').next().unwrap_or("/").to_string();
     let method = request.method().clone();
     let filename = header(request, "x-filename");
     let body = match read_body(request) {
         Ok(body) => body,
-        Err(err) => return error(400, &err),
+        Err(err) => return fail(&err),
     };
     if body.len() > MAX_BODY {
-        return error(413, "upload is larger than 32MB");
+        return error(413, &Error::invalid("upload is larger than 32MB"));
     }
 
-    let result = (|| -> Result<Vec<u8>, String> {
-        let mut session = hub.session.lock().map_err(|err| err.to_string())?;
-        match (method, path.as_str()) {
-            (Method::Get, "/api/health") => Ok(br#"{"ok":true}"#.to_vec()),
-            (Method::Get, "/api/summary") => json(&lift(session.summary())?),
-            (Method::Post, "/api/open-sample") => json(&lift(session.open_sample())?),
-            (Method::Post, "/api/open-path") => {
-                let req: PathBody = parse_json(&body)?;
-                json(&lift(session.open_path(PathBuf::from(req.path).as_path()))?)
-            }
-            (Method::Post, "/api/begin-open") => {
-                let req: PathBody = parse_json(&body)?;
-                drop(session);
-                begin(hub, move |session, control| {
-                    session
-                        .open_path_controlled(PathBuf::from(req.path).as_path(), Some(control))
-                        .map(|_| ())
-                })
-            }
-            (Method::Post, "/api/begin-map") => {
-                let req: PathBody = parse_json(&body)?;
-                drop(session);
-                begin(hub, move |session, control| {
-                    session
-                        .open_map_path_controlled(PathBuf::from(req.path).as_path(), Some(control))
-                        .map(|_| ())
-                })
-            }
-            (Method::Post, "/api/begin-add-map") => {
-                let req: AddMapBody = parse_json(&body)?;
-                drop(session);
-                begin(hub, move |session, control| {
-                    session
-                        .add_map_path_controlled(
-                            PathBuf::from(req.path).as_path(),
-                            req.channel,
-                            Some(control),
-                        )
-                        .map(|_| ())
-                })
-            }
-            (Method::Get, "/api/progress") | (Method::Post, "/api/progress") => {
-                drop(session);
-                json(&progress(hub, true)?)
-            }
-            (Method::Post, "/api/cancel") => {
-                hub.control.request_cancel();
-                drop(session);
-                json(&progress(hub, false)?)
-            }
-            (Method::Post, "/api/open-bytes") => {
-                let name = filename.unwrap_or_else(|| "upload.log".into());
-                json(&lift(session.open_bytes(&name, body.clone()))?)
-            }
-            (Method::Post, "/api/open-map-path") => {
-                let req: PathBody = parse_json(&body)?;
-                json(&lift(
-                    session.open_map_path(PathBuf::from(req.path).as_path()),
-                )?)
-            }
-            (Method::Post, "/api/open-map") => {
-                let json_text = json_text(&body)?;
-                json(&lift(session.open_map_json(&json_text))?)
-            }
-            (Method::Post, "/api/add-map") => {
-                let req: AddJsonBody = parse_json(&body)?;
-                json(&lift(session.add_map_json(&req.json, req.channel))?)
-            }
-            (Method::Post, "/api/query") => {
-                let query: Query = parse_json(&body)?;
-                json(&lift(session.query(&query))?)
-            }
-            (Method::Post, "/api/values") => {
-                let req: TimeBody = parse_json(&body)?;
-                json(&lift(session.values_at(req.t_us))?)
-            }
-            (Method::Post, "/api/step") => {
-                let req: StepBody = parse_json(&body)?;
-                json(&lift(session.step(req.t_us, req.direction))?)
-            }
-            (Method::Post, "/api/frame") => {
-                let req: TimeBody = parse_json(&body)?;
-                json(&lift(session.frame_at(req.t_us))?)
-            }
-            (Method::Post, "/api/open-project-path") => {
-                let req: PathBody = parse_json(&body)?;
-                json(&lift(
-                    session.load_project_file(PathBuf::from(req.path).as_path()),
-                )?)
-            }
-            (Method::Post, "/api/open-project") => {
-                let req: ProjectBody = parse_json(&body)?;
-                let base = req.base_dir.map(PathBuf::from);
-                json(&lift(
-                    session.load_project_json(&req.json, base.as_deref()),
-                )?)
-            }
-            (Method::Post, "/api/bus") => {
-                let req: ExportBody = parse_json(&body)?;
-                json(&lift(session.bus_load(req.t0_us, req.t1_us))?)
-            }
-            (Method::Post, "/api/capture") => {
-                let req: CaptureBody = parse_json(&body)?;
-                json(&lift(
-                    session.capture_socketcan(&req.iface, req.duration_ms),
-                )?)
-            }
-            (Method::Post, "/api/stats") => {
-                let req: StatsBody = parse_json(&body)?;
-                json(&lift(session.stats(&req.name, req.t0_us, req.t1_us))?)
-            }
-            (Method::Post, "/api/export-csv") => {
-                let req: ExportBody = parse_json(&body)?;
-                let text = lift(session.export_csv(&req.names, req.t0_us, req.t1_us))?;
-                json(&serde_json::json!({ "text": text }))
-            }
-            (Method::Post, "/api/export-slog") => {
-                let req: ExportBody = parse_json(&body)?;
-                let text = lift(session.export_slog(req.t0_us, req.t1_us))?;
-                json(&serde_json::json!({ "text": text }))
-            }
-            (Method::Post, "/api/math") => {
-                let req: MathBody = parse_json(&body)?;
-                json(&lift(session.set_math(req.channels))?)
-            }
-            (Method::Post, "/api/triggers") => {
-                let req: TriggerBody = parse_json(&body)?;
-                json(&lift(session.set_triggers(req.triggers))?)
-            }
-            (Method::Post, "/api/timeout-factor") => {
-                let req: TimeoutBody = parse_json(&body)?;
-                json(&lift(session.set_timeout_factor(req.factor))?)
-            }
-            (Method::Post, "/api/compare-path") => {
-                let req: PathBody = parse_json(&body)?;
-                json(&lift(
-                    session.open_compare_path(PathBuf::from(req.path).as_path()),
-                )?)
-            }
-            (Method::Post, "/api/compare-bytes") => {
-                json(&lift(session.open_compare_bytes(body.clone()))?)
-            }
-            (Method::Post, "/api/compare-offset") => {
-                let req: OffsetBody = parse_json(&body)?;
-                session.set_compare_offset(req.offset_us);
-                json(&lift(session.summary())?)
-            }
-            (Method::Post, "/api/compare-clear") => {
-                session.clear_compare();
-                json(&lift(session.summary())?)
-            }
-            _ => Err(format!("no route for {path}")),
-        }
-    })();
+    answer(route(engine, method, &path, filename, body))
+}
 
+fn answer(result: Result<Vec<u8>, Error>) -> Response<std::io::Cursor<Vec<u8>>> {
     match result {
         Ok(bytes) => respond(200, bytes),
-        Err(message) => {
-            if message.starts_with("no route") {
-                error(404, &message)
-            } else {
-                error(400, &message)
-            }
+        Err(err) => fail(&err),
+    }
+}
+
+/// The one place an error kind becomes an HTTP status.
+///
+/// A missing log, signal or file is 404. Input the caller can fix is 400.
+/// Cancelled is 409: the request was valid, but a cancel overtook it.
+/// Failed I/O and engine faults are 500.
+fn status_for(kind: ErrorKind) -> u16 {
+    match kind {
+        ErrorKind::NotFound => 404,
+        ErrorKind::Invalid | ErrorKind::Parse | ErrorKind::Binary => 400,
+        ErrorKind::Cancelled => 409,
+        ErrorKind::Io | ErrorKind::Internal => 500,
+    }
+}
+
+/// Answer one request. `body` is moved into the session when it is an upload.
+fn route(
+    engine: &Arc<Engine>,
+    method: Method,
+    path: &str,
+    filename: Option<String>,
+    body: Vec<u8>,
+) -> Result<Vec<u8>, Error> {
+    // Job endpoints must not wait for the session lock a running job holds.
+    match (&method, path) {
+        (Method::Get, "/api/health") => return Ok(br#"{"ok":true}"#.to_vec()),
+        (Method::Post, "/api/begin-open") => {
+            let req: PathBody = parse_json(&body)?;
+            return begin(engine, move |session, control| {
+                session
+                    .open_path_controlled(PathBuf::from(req.path).as_path(), Some(control))
+                    .map(|_| ())
+            });
         }
+        (Method::Post, "/api/begin-map") => {
+            let req: PathBody = parse_json(&body)?;
+            return begin(engine, move |session, control| {
+                session
+                    .open_map_path_controlled(PathBuf::from(req.path).as_path(), Some(control))
+                    .map(|_| ())
+            });
+        }
+        (Method::Post, "/api/begin-add-map") => {
+            let req: AddMapBody = parse_json(&body)?;
+            return begin(engine, move |session, control| {
+                session
+                    .add_map_path_controlled(
+                        PathBuf::from(req.path).as_path(),
+                        req.channel,
+                        Some(control),
+                    )
+                    .map(|_| ())
+            });
+        }
+        (Method::Post, "/api/begin-compare") => {
+            let req: PathBody = parse_json(&body)?;
+            return begin(engine, move |session, control| {
+                session
+                    .open_compare_path_controlled(PathBuf::from(req.path).as_path(), Some(control))
+                    .map(|_| ())
+            });
+        }
+        (Method::Post, "/api/begin-project") => {
+            let req: PathBody = parse_json(&body)?;
+            return started(engine.begin_project_file(PathBuf::from(req.path)));
+        }
+        (Method::Post, "/api/begin-project-json") => {
+            let req: ProjectBody = parse_json(&body)?;
+            return started(engine.begin_project_json(req.json, req.base_dir.map(PathBuf::from)));
+        }
+        (Method::Post, "/api/begin-capture") => {
+            let req: CaptureBody = parse_json(&body)?;
+            return started(engine.begin_capture(req.iface, req.duration_ms));
+        }
+        (Method::Get | Method::Post, "/api/progress") => {
+            return json(&engine.progress(true)?);
+        }
+        (Method::Post, "/api/cancel") => return json(&engine.cancel()?),
+        _ => {}
+    }
+    match (method, path) {
+        (Method::Post, "/api/open-sample") => {
+            json(&engine.with_session(|session| session.open_sample())?)
+        }
+        (Method::Post, "/api/open-bytes") => {
+            let name = filename.unwrap_or_else(|| "upload.log".into());
+            json(&engine.with_session(|session| session.open_bytes(&name, body))?)
+        }
+        (Method::Post, "/api/open-map") => {
+            let json_text = json_text(&body)?;
+            json(&engine.with_session(|session| session.open_map_json(&json_text))?)
+        }
+        (Method::Post, "/api/add-map") => {
+            let req: AddJsonBody = parse_json(&body)?;
+            json(&engine.with_session(|session| session.add_map_json(&req.json, req.channel))?)
+        }
+        (Method::Post, "/api/query") => {
+            let query: Query = parse_json(&body)?;
+            json(&engine.with_session(|session| session.query(&query))?)
+        }
+        (Method::Post, "/api/values") => {
+            let req: TimeBody = parse_json(&body)?;
+            json(&engine.with_session(|session| session.values_at(req.t_us))?)
+        }
+        (Method::Post, "/api/step") => {
+            let req: StepBody = parse_json(&body)?;
+            json(&engine.with_session(|session| session.step(req.t_us, req.direction))?)
+        }
+        (Method::Post, "/api/frame") => {
+            let req: TimeBody = parse_json(&body)?;
+            json(&engine.with_session(|session| session.frame_at(req.t_us))?)
+        }
+        (Method::Post, "/api/project-json") => {
+            let view: ProjectView = parse_json(&body)?;
+            let text = engine.with_session(|session| session.project_json(&view))?;
+            json(&ProjectJsonReply { json: &text })
+        }
+        (Method::Post, "/api/bus") => {
+            let req: ExportBody = parse_json(&body)?;
+            json(&engine.with_session(|session| session.bus_load(req.t0_us, req.t1_us))?)
+        }
+        (Method::Post, "/api/stats") => {
+            let req: StatsBody = parse_json(&body)?;
+            json(&engine.with_session(|session| session.stats(&req.name, req.t0_us, req.t1_us))?)
+        }
+        (Method::Post, "/api/export-csv") => {
+            let req: ExportBody = parse_json(&body)?;
+            let export = engine.with_session(|session| {
+                session.export_csv_report(&req.names, req.t0_us, req.t1_us)
+            })?;
+            export_json(&export)
+        }
+        (Method::Post, "/api/export-slog") => {
+            let req: ExportBody = parse_json(&body)?;
+            let export =
+                engine.with_session(|session| session.export_slog_report(req.t0_us, req.t1_us))?;
+            export_json(&export)
+        }
+        (Method::Post, "/api/math") => {
+            let req: MathBody = parse_json(&body)?;
+            json(&engine.with_session(|session| session.set_math(req.channels))?)
+        }
+        (Method::Post, "/api/triggers") => {
+            let req: TriggerBody = parse_json(&body)?;
+            json(&engine.with_session(|session| session.set_triggers(req.triggers))?)
+        }
+        (Method::Post, "/api/timeout-factor") => {
+            let req: TimeoutBody = parse_json(&body)?;
+            json(&engine.with_session(|session| session.set_timeout_factor(req.factor))?)
+        }
+        (Method::Post, "/api/compare-bytes") => {
+            json(&engine.with_session(|session| session.open_compare_bytes(body))?)
+        }
+        (Method::Post, "/api/compare-offset") => {
+            let req: OffsetBody = parse_json(&body)?;
+            json(&engine.with_session(|session| {
+                session.set_compare_offset(req.offset_us);
+                session.summary()
+            })?)
+        }
+        (Method::Post, "/api/compare-clear") => json(&engine.with_session(|session| {
+            session.clear_compare();
+            session.summary()
+        })?),
+        _ => Err(Error::not_found(format!("no route for {path}"))),
     }
 }
 
@@ -272,95 +268,17 @@ struct AddJsonBody {
 }
 
 fn begin(
-    hub: &Hub,
-    work: impl FnOnce(&mut Session, &IndexControl) -> loom_core::Result<()> + Send + 'static,
-) -> Result<Vec<u8>, String> {
-    {
-        let mut phase = hub.phase.lock().map_err(|err| err.to_string())?;
-        if matches!(*phase, Phase::Running) {
-            return Err("an index is already running".into());
-        }
-        hub.control.reset(0);
-        *phase = Phase::Running;
-    }
-    let session = Arc::clone(&hub.session);
-    let control = Arc::clone(&hub.control);
-    let phase = Arc::clone(&hub.phase);
-    std::thread::spawn(move || {
-        let result = {
-            let mut session = match session.lock() {
-                Ok(guard) => guard,
-                Err(err) => {
-                    if let Ok(mut phase) = phase.lock() {
-                        *phase = Phase::Failed(err.to_string());
-                    }
-                    return;
-                }
-            };
-            work(&mut session, &control)
-        };
-        if let Ok(mut phase) = phase.lock() {
-            *phase = match result {
-                Ok(()) => Phase::Ready,
-                Err(err) => Phase::Failed(err.to_string()),
-            };
-        }
-    });
-    json(&serde_json::json!({ "started": true }))
+    engine: &Arc<Engine>,
+    work: impl FnOnce(&mut loom_core::Session, &loom_core::IndexControl) -> loom_core::Result<()>
+        + Send
+        + 'static,
+) -> Result<Vec<u8>, Error> {
+    started(engine.begin(work))
 }
 
-/// `take` hands a finished result to the caller and resets to idle. Cancel
-/// only peeks, so a result that lands as Cancel is clicked still reaches the poll.
-fn progress(hub: &Hub, take: bool) -> Result<IndexStatus, String> {
-    let mut phase = hub.phase.lock().map_err(|err| err.to_string())?;
-    let (bytes_done, bytes_total, frames, skipped) = hub.control.snapshot();
-    let mut status = IndexStatus {
-        running: false,
-        done: false,
-        idle: false,
-        bytes_done,
-        bytes_total,
-        frames,
-        skipped,
-        summary: None,
-        error: None,
-    };
-    let current = if take {
-        std::mem::replace(&mut *phase, Phase::Idle)
-    } else {
-        phase.clone()
-    };
-    match current {
-        Phase::Idle => status.idle = true,
-        Phase::Running => {
-            *phase = Phase::Running;
-            status.running = true;
-        }
-        Phase::Ready => match hub.session.lock() {
-            Ok(session) => match session.summary() {
-                Ok(summary) => {
-                    status.done = true;
-                    status.bytes_done = summary.bytes;
-                    status.frames = summary.frame_count;
-                    status.skipped = summary.skipped_records;
-                    status.summary = Some(summary);
-                }
-                Err(err) => {
-                    status.done = true;
-                    status.error = Some(err.to_string());
-                }
-            },
-            Err(err) => {
-                *phase = Phase::Ready;
-                return Err(err.to_string());
-            }
-        },
-        Phase::Failed(message) => {
-            status.done = true;
-            status.error = Some(message);
-        }
-    }
-    Ok(status)
+fn started(result: loom_core::Result<()>) -> Result<Vec<u8>, Error> {
+    result?;
+    Ok(br#"{"started":true}"#.to_vec())
 }
 
 #[derive(Deserialize)]
@@ -434,36 +352,60 @@ struct TimeoutBody {
     factor: f64,
 }
 
-fn json_text(body: &[u8]) -> Result<String, String> {
+/// A map upload is the DBC or map text itself, or `{"json": "<text>"}` around it.
+fn json_text(body: &[u8]) -> Result<Cow<'_, str>, Error> {
     if body.first() == Some(&b'{') {
-        if let Ok(wrapped) = serde_json::from_slice::<serde_json::Value>(body) {
-            if let Some(text) = wrapped.get("json").and_then(|v| v.as_str()) {
-                return Ok(text.to_string());
-            }
+        if let Ok(wrapped) = serde_json::from_slice::<WrappedText>(body) {
+            return Ok(wrapped.json);
         }
     }
-    String::from_utf8(body.to_vec()).map_err(|_| "map is not utf-8".into())
+    std::str::from_utf8(body)
+        .map(Cow::Borrowed)
+        .map_err(|_| Error::invalid("map is not utf-8"))
 }
 
-fn parse_json<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, String> {
-    serde_json::from_slice(body).map_err(|err| err.to_string())
+#[derive(Deserialize)]
+struct WrappedText<'a> {
+    #[serde(borrow)]
+    json: Cow<'a, str>,
 }
 
-fn lift<T>(result: loom_core::Result<T>) -> Result<T, String> {
-    result.map_err(|err| err.to_string())
+fn parse_json<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Error> {
+    serde_json::from_slice(body).map_err(|err| Error::invalid(err.to_string()))
 }
 
-fn json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(value).map_err(|err| err.to_string())
+fn json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, Error> {
+    serde_json::to_vec(value).map_err(|err| Error::internal(err.to_string()))
 }
 
-fn read_body(request: &mut Request) -> Result<Vec<u8>, String> {
+/// An export's text, its data row count, and whether the row cap cut it short.
+#[derive(Serialize)]
+struct ExportReply<'a> {
+    text: &'a str,
+    rows: usize,
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct ProjectJsonReply<'a> {
+    json: &'a str,
+}
+
+fn export_json(export: &Export) -> Result<Vec<u8>, Error> {
+    json(&ExportReply {
+        text: &export.text,
+        rows: export.rows,
+        truncated: export.truncated,
+    })
+}
+
+fn read_body(request: &mut Request) -> Result<Vec<u8>, Error> {
     let mut buf = Vec::new();
     request
         .as_reader()
         .take(MAX_BODY as u64 + 1)
         .read_to_end(&mut buf)
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| Error::io("could not read the request body", err))?;
     Ok(buf)
 }
 
@@ -495,10 +437,13 @@ fn header(request: &Request, name: &str) -> Option<String> {
     })
 }
 
-fn error(status: u16, message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = serde_json::json!({ "error": message })
-        .to_string()
-        .into_bytes();
+fn fail(err: &Error) -> Response<std::io::Cursor<Vec<u8>>> {
+    error(status_for(err.kind()), err)
+}
+
+/// An error reply: `{"kind": "...", "message": "..."}`, the body the desktop app returns too.
+fn error(status: u16, err: &Error) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = serde_json::to_vec(err).expect("an error body is two strings");
     respond(status, body)
 }
 
@@ -510,4 +455,247 @@ fn respond(status: u16, body: Vec<u8>) -> Response<std::io::Cursor<Vec<u8>>> {
 
 fn header_line(name: &str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("header")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_export_cut_at_the_row_cap_reports_its_rows_and_the_cut() {
+        let export = Export {
+            text: "t_us,A\n0,1.000000\n".into(),
+            rows: 500_000,
+            truncated: true,
+        };
+        let body = export_json(&export).unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({ "text": "t_us,A\n0,1.000000\n", "rows": 500000, "truncated": true })
+        );
+    }
+
+    const LOG: &str = "SLOGv1
+F 0 1A0 800C881378640000
+F 10000 1A0 800C881378640000
+";
+
+    fn call(
+        engine: &Arc<Engine>,
+        path: &str,
+        filename: Option<&str>,
+        body: Vec<u8>,
+    ) -> serde_json::Value {
+        let bytes = route(engine, Method::Post, path, filename.map(String::from), body).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn an_uploaded_log_opens_and_a_second_upload_becomes_the_compare_log() {
+        let engine = Arc::new(Engine::new());
+        let reply = call(
+            &engine,
+            "/api/open-bytes",
+            Some("drive.slog"),
+            LOG.as_bytes().to_vec(),
+        );
+        assert_eq!(reply["logLabel"], "drive.slog");
+        assert_eq!(reply["frameCount"], 2);
+
+        let reply = call(&engine, "/api/compare-bytes", None, LOG.as_bytes().to_vec());
+        assert_eq!(reply["frameCount"], 2);
+        assert_eq!(reply["logLabel"], "drive.slog");
+    }
+
+    #[test]
+    fn a_map_upload_is_raw_text_or_wrapped_in_json() {
+        assert_eq!(json_text(br#"{"json":"a \"b\""}"#).unwrap(), "a \"b\"");
+        assert_eq!(
+            json_text(br#"{"name":"bare map","json":7}"#).unwrap(),
+            r#"{"name":"bare map","json":7}"#
+        );
+        assert_eq!(json_text(b"VERSION \"\"").unwrap(), "VERSION \"\"");
+        assert!(json_text(&[0xFF, 0xFE]).is_err());
+    }
+
+    #[test]
+    fn a_project_opens_through_the_job_routes_and_reports_its_summary() {
+        let engine = Arc::new(Engine::new());
+        let project = serde_json::json!({
+            "format": "signal-loom",
+            "version": 1,
+            "logPath": std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/cluster_drive.slog"),
+            "view": { "playheadUs": 0, "spanUs": 1_000_000, "plotted": [] },
+        });
+        let body = serde_json::json!({ "json": project.to_string() }).to_string();
+        let reply = call(&engine, "/api/begin-project-json", None, body.into_bytes());
+        assert_eq!(reply, serde_json::json!({ "started": true }));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let status = loop {
+            let status = call(&engine, "/api/progress", None, Vec::new());
+            if status["done"] == true {
+                break status;
+            }
+            assert!(std::time::Instant::now() < deadline, "job never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(status["error"], serde_json::Value::Null);
+        assert_eq!(status["summary"]["logLabel"], "cluster_drive.slog");
+        assert_eq!(status["project"]["warnings"], serde_json::json!([]));
+    }
+
+    fn answered(result: Result<Vec<u8>, Error>) -> (u16, serde_json::Value) {
+        let response = answer(result);
+        let status = response.status_code().0;
+        let mut body = String::new();
+        response.into_reader().read_to_string(&mut body).unwrap();
+        (status, serde_json::from_str(&body).unwrap())
+    }
+
+    fn post(engine: &Arc<Engine>, path: &str, body: &str) -> (u16, serde_json::Value) {
+        answered(route(
+            engine,
+            Method::Post,
+            path,
+            None,
+            body.as_bytes().to_vec(),
+        ))
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures")
+            .join(name)
+    }
+
+    fn wait_for_job(engine: &Arc<Engine>) -> serde_json::Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let status = call(engine, "/api/progress", None, Vec::new());
+            if status["done"] == true {
+                return status;
+            }
+            assert!(std::time::Instant::now() < deadline, "job never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn an_unknown_route_is_a_404_with_a_not_found_body() {
+        let engine = Arc::new(Engine::new());
+        let result = route(&engine, Method::Get, "/api/nope", None, Vec::new());
+        assert_eq!(
+            answered(result),
+            (
+                404,
+                serde_json::json!({ "kind": "not_found", "message": "no route for /api/nope" })
+            )
+        );
+    }
+
+    #[test]
+    fn a_malformed_request_body_is_a_400_with_an_invalid_body() {
+        let engine = Arc::new(Engine::new());
+        let (status, body) = post(&engine, "/api/query", "not json");
+        assert_eq!(status, 400);
+        assert_eq!(body["kind"], "invalid");
+        assert!(!body["message"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn asking_for_data_with_no_log_open_is_a_404() {
+        let engine = Arc::new(Engine::new());
+        let query = r#"{"t0Us":0,"t1Us":10,"signals":[],"maxPoints":10}"#;
+        assert_eq!(
+            post(&engine, "/api/query", query),
+            (
+                404,
+                serde_json::json!({ "kind": "not_found", "message": "no log is open" })
+            )
+        );
+    }
+
+    #[test]
+    fn every_error_kind_has_one_http_status() {
+        let statuses: Vec<(ErrorKind, u16)> = [
+            ErrorKind::NotFound,
+            ErrorKind::Invalid,
+            ErrorKind::Parse,
+            ErrorKind::Binary,
+            ErrorKind::Cancelled,
+            ErrorKind::Io,
+            ErrorKind::Internal,
+        ]
+        .into_iter()
+        .map(|kind| (kind, status_for(kind)))
+        .collect();
+        assert_eq!(
+            statuses,
+            [
+                (ErrorKind::NotFound, 404),
+                (ErrorKind::Invalid, 400),
+                (ErrorKind::Parse, 400),
+                (ErrorKind::Binary, 400),
+                (ErrorKind::Cancelled, 409),
+                (ErrorKind::Io, 500),
+                (ErrorKind::Internal, 500),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_job_reports_the_cancelled_kind_in_its_progress() {
+        let engine = Arc::new(Engine::new());
+        let body = serde_json::json!({ "path": fixture("hypercar_lap.slog") }).to_string();
+        // Hold the session lock so the job cannot start scanning before the cancel lands.
+        engine
+            .with_session(|_| {
+                let reply = call(&engine, "/api/begin-open", None, body.into_bytes());
+                assert_eq!(reply, serde_json::json!({ "started": true }));
+                let (status, reply) = post(&engine, "/api/cancel", "");
+                assert_eq!(status, 200);
+                assert_eq!(reply["running"], true);
+                Ok(())
+            })
+            .unwrap();
+        let status = wait_for_job(&engine);
+        assert_eq!(status["error"], "indexing cancelled");
+        assert_eq!(status["errorKind"], "cancelled");
+    }
+
+    #[test]
+    fn a_project_open_reports_whether_its_compare_log_opened() {
+        let project = |compare: Option<&str>| {
+            let project = serde_json::json!({
+                "format": "signal-loom",
+                "version": 1,
+                "logPath": fixture("cluster_drive.slog"),
+                "comparePath": compare.map(fixture),
+                "view": { "playheadUs": 0, "spanUs": 1_000_000, "plotted": [] },
+            });
+            serde_json::json!({ "json": project.to_string() }).to_string()
+        };
+        let engine = Arc::new(Engine::new());
+        let opened = |compare: Option<&str>| {
+            let reply = call(
+                &engine,
+                "/api/begin-project-json",
+                None,
+                project(compare).into_bytes(),
+            );
+            assert_eq!(reply, serde_json::json!({ "started": true }));
+            wait_for_job(&engine)["project"].clone()
+        };
+
+        assert_eq!(opened(None)["compareOpened"], false);
+        let with_compare = opened(Some("cluster_drive.slog"));
+        assert_eq!(with_compare["compareOpened"], true);
+        assert_eq!(with_compare["warnings"], serde_json::json!([]));
+        let missing = opened(Some("no_such_compare.slog"));
+        assert_eq!(missing["compareOpened"], false);
+        assert_eq!(missing["warnings"].as_array().unwrap().len(), 1);
+    }
 }
