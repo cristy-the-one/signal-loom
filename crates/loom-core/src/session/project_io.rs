@@ -9,7 +9,8 @@ use super::maps::{read_map_file, MapSet};
 use super::{sample, uses_map, Session};
 use crate::dto::ProjectOpen;
 use crate::error::{Error, Result};
-use crate::index::IndexedLog;
+use crate::index::{IndexControl, IndexedLog};
+use crate::map::{SignalMap, TimeoutFactor};
 use crate::project::{self, Bookmark, Located, Note, ProjectFile, ViewState, PROJECT_FORMAT};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -56,12 +57,34 @@ enum LogLoad {
 
 impl Session {
     pub fn load_project_file(&mut self, path: &Path) -> Result<ProjectOpen> {
+        self.load_project_file_controlled(path, None)
+    }
+
+    /// Open the project at `path`. `control` publishes progress while the log
+    /// and the compare log are indexed, and can cancel the open.
+    pub fn load_project_file_controlled(
+        &mut self,
+        path: &Path,
+        control: Option<&IndexControl>,
+    ) -> Result<ProjectOpen> {
         let text = project::read_text_capped(path, MAX_PROJECT_BYTES, "project")?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
-        self.load_project_json(&text, Some(base))
+        self.load_project_json_controlled(&text, Some(base), control)
     }
 
     pub fn load_project_json(&mut self, text: &str, base: Option<&Path>) -> Result<ProjectOpen> {
+        self.load_project_json_controlled(text, base, None)
+    }
+
+    /// Open the project in `text`. Nothing in the session changes until the log
+    /// and the compare log are both indexed: a failed or cancelled open leaves
+    /// the open deck as it was.
+    pub fn load_project_json_controlled(
+        &mut self,
+        text: &str,
+        base: Option<&Path>,
+        control: Option<&IndexControl>,
+    ) -> Result<ProjectOpen> {
         let (mut project, mut warnings) = ProjectFile::read(text)?;
 
         if project::is_network_path(&project.log_path) {
@@ -112,7 +135,7 @@ impl Session {
                     .unwrap_or(sample::LOG_NAME)
                     .to_string();
                 (
-                    IndexedLog::open_path_timed(&path, map.as_ref(), timeout, None)?,
+                    IndexedLog::open_path_timed(&path, map.as_ref(), timeout, control)?,
                     label,
                     path,
                 )
@@ -141,7 +164,19 @@ impl Session {
             }
         };
 
+        let stored = project
+            .compare_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let (compare_log, compare_note) = match &stored {
+            Some(stored) => open_compare_log(base, stored, map.as_ref(), timeout, control)?,
+            None => (None, None),
+        };
+
         warnings.extend(project.drop_invalid(Some(&log)));
+        warnings.extend(compare_note);
 
         self.timeout = timeout;
         self.maps = MapSet::new(map, map_path);
@@ -150,26 +185,9 @@ impl Session {
         self.log.set(Some(log));
         self.deck
             .load(project.math.clone(), project.triggers.clone());
-        let stored = project
-            .compare_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        self.compare = Compare::named(stored.map(str::to_string), project.compare_offset_us);
-        if let Some(stored) = stored {
-            match project::locate(base, stored) {
-                Located::Found(path) => {
-                    match IndexedLog::open_path_timed(&path, self.maps.map(), timeout, None) {
-                        Ok(log) => self.compare.replace_log(log),
-                        Err(err) => warnings.push(format!("Compare log did not open: {err}")),
-                    }
-                }
-                Located::Missing if !project::is_network_path(stored) => {
-                    warnings.push(format!("Compare log not found ({stored})."));
-                }
-                Located::Missing => {}
-                Located::NoBase => warnings.push(no_base_note("compare log", stored)),
-            }
+        self.compare = Compare::named(stored, project.compare_offset_us);
+        if let Some(log) = compare_log {
+            self.compare.replace_log(log);
         }
 
         Ok(ProjectOpen {
@@ -227,6 +245,29 @@ impl Session {
             timeout_factor: Some(self.timeout.get()),
             cluster: view.cluster.clone(),
         })
+    }
+}
+
+/// The compare log a project names, or the note that says why it is not open.
+/// A cancelled scan abandons the whole open instead of becoming a note.
+fn open_compare_log(
+    base: Option<&Path>,
+    stored: &str,
+    map: Option<&SignalMap>,
+    timeout: TimeoutFactor,
+    control: Option<&IndexControl>,
+) -> Result<(Option<IndexedLog>, Option<String>)> {
+    match project::locate(base, stored) {
+        Located::Found(path) => match IndexedLog::open_path_timed(&path, map, timeout, control) {
+            Ok(log) => Ok((Some(log), None)),
+            Err(err) if control.is_some_and(IndexControl::is_cancelled) => Err(err),
+            Err(err) => Ok((None, Some(format!("Compare log did not open: {err}")))),
+        },
+        Located::Missing if !project::is_network_path(stored) => {
+            Ok((None, Some(format!("Compare log not found ({stored})."))))
+        }
+        Located::Missing => Ok((None, None)),
+        Located::NoBase => Ok((None, Some(no_base_note("compare log", stored)))),
     }
 }
 

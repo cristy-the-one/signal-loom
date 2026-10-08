@@ -5,6 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::scan::hex_payload;
+use crate::IndexControl;
 use std::time::Duration;
 
 /// Frames kept from one capture. Past this the window is cut short and says so.
@@ -29,7 +30,13 @@ pub fn frame_line(t_us: u64, frame: &[u8]) -> Result<String> {
 }
 
 /// Read `iface` for `duration_ms` and return a SLOGv1 log. Read only.
-pub fn capture_slog(iface: &str, duration_ms: u64) -> Result<String> {
+/// `control` shows the elapsed milliseconds and the frames so far, and stops
+/// the capture early when a cancel is requested.
+pub fn capture_slog(
+    iface: &str,
+    duration_ms: u64,
+    control: Option<&IndexControl>,
+) -> Result<String> {
     if !(1..=30_000).contains(&duration_ms) {
         return Err(Error::msg("capture length must be between 1 ms and 30 s"));
     }
@@ -38,7 +45,10 @@ pub fn capture_slog(iface: &str, duration_ms: u64) -> Result<String> {
             "interface name must be a short Linux device name, such as can0 or vcan0",
         ));
     }
-    let (frames, capped) = read_only(iface, Duration::from_millis(duration_ms))?;
+    if let Some(control) = control {
+        control.set_total(duration_ms);
+    }
+    let (frames, capped) = read_only(iface, Duration::from_millis(duration_ms), control)?;
     if frames.is_empty() {
         return Err(Error::msg(format!(
             "no CAN frames on {iface} in {duration_ms} ms. The socket was read-only."
@@ -71,19 +81,23 @@ fn valid_iface(iface: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn read_only(iface: &str, duration: Duration) -> Result<Window> {
+fn read_only(iface: &str, duration: Duration, control: Option<&IndexControl>) -> Result<Window> {
     // Safety: the socket is created, bound, and read. It is closed before return.
     // No bytes are written to the CAN controller.
-    unsafe { read_only_fd(iface, duration) }
+    unsafe { read_only_fd(iface, duration, control) }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn read_only(_iface: &str, _duration: Duration) -> Result<Window> {
+fn read_only(_iface: &str, _duration: Duration, _control: Option<&IndexControl>) -> Result<Window> {
     Err(Error::msg("SocketCAN capture is only available on Linux"))
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn read_only_fd(iface: &str, duration: Duration) -> Result<Window> {
+unsafe fn read_only_fd(
+    iface: &str,
+    duration: Duration,
+    control: Option<&IndexControl>,
+) -> Result<Window> {
     let fd = unsafe { libc::socket(libc::AF_CAN, libc::SOCK_RAW, libc::CAN_RAW) };
     if fd < 0 {
         return Err(Error::msg(format!(
@@ -132,6 +146,11 @@ unsafe fn read_only_fd(iface: &str, duration: Duration) -> Result<Window> {
     let mut frames = Vec::new();
     let mut capped = false;
     while start.elapsed() < duration {
+        if let Some(control) = control {
+            control
+                .observe(start.elapsed().as_millis() as u64, frames.len() as u64, 0)
+                .map_err(|_| Error::msg("capture cancelled"))?;
+        }
         if frames.len() >= MAX_FRAMES {
             capped = true;
             break;
@@ -227,7 +246,7 @@ mod tests {
 
     #[test]
     fn rejects_a_strange_interface_name() {
-        let err = capture_slog("can0;reboot", 10).unwrap_err();
+        let err = capture_slog("can0;reboot", 10, None).unwrap_err();
         assert!(err.to_string().contains("interface"), "{err}");
     }
 }

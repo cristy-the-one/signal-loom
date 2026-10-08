@@ -4,7 +4,7 @@
 use super::Session;
 use crate::dto::{Query, Summary};
 use crate::error::{Error, Result};
-use crate::index::{IndexedLog, QueryWindow, Series};
+use crate::index::{IndexControl, IndexedLog, QueryWindow, Series};
 use std::path::Path;
 
 /// The compare log, the path a project would name it by, and the offset that
@@ -88,13 +88,23 @@ impl Compare {
 
 impl Session {
     pub fn open_compare_path(&mut self, path: &Path) -> Result<Summary> {
+        self.open_compare_path_controlled(path, None)
+    }
+
+    /// Index `path` as the compare log without touching the current one until
+    /// the scan finishes. `control` publishes progress and can cancel the scan.
+    pub fn open_compare_path_controlled(
+        &mut self,
+        path: &Path,
+        control: Option<&IndexControl>,
+    ) -> Result<Summary> {
         if !path.is_file() {
             return Err(Error::msg(format!(
                 "compare log not found: {}",
                 path.display()
             )));
         }
-        let log = IndexedLog::open_path_timed(path, self.maps.map(), self.timeout, None)?;
+        let log = IndexedLog::open_path_timed(path, self.maps.map(), self.timeout, control)?;
         self.compare.set_log(log, Some(path.display().to_string()));
         self.summary()
     }

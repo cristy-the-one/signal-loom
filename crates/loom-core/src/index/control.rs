@@ -38,11 +38,16 @@ impl IndexControl {
         )
     }
 
-    fn observe(&self, bytes_done: u64, frames: u64, skipped: u64) -> Result<()> {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Publish progress, and fail if a cancel was requested.
+    pub fn observe(&self, bytes_done: u64, frames: u64, skipped: u64) -> Result<()> {
         self.bytes_done.store(bytes_done, Ordering::Relaxed);
         self.frames.store(frames, Ordering::Relaxed);
         self.skipped.store(skipped, Ordering::Relaxed);
-        if self.cancel.load(Ordering::Relaxed) {
+        if self.is_cancelled() {
             Err(Error::msg("indexing cancelled"))
         } else {
             Ok(())

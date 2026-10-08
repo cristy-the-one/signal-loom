@@ -2,7 +2,6 @@ import type {
   BusLoad,
   FrameHit,
   MathChannel,
-  ProjectOpen,
   ProjectView,
   Query,
   Series,
@@ -84,6 +83,47 @@ export function beginAddMap(path: string, channel: number): Promise<void> {
   });
 }
 
+export function beginProject(path: string): Promise<void> {
+  if (inTauri()) return invoke<void>("begin_open_project", { path });
+  return http<void>("/api/begin-project", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+}
+
+/**
+ * Browser preview: the upload has no folder, so the engine reports a relative log,
+ * map or compare path as unresolved instead of looking in its own directory.
+ */
+export function beginProjectJson(json: string): Promise<void> {
+  return http<void>("/api/begin-project-json", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ json }),
+  });
+}
+
+export function beginCompare(path: string): Promise<void> {
+  if (inTauri()) return invoke<void>("begin_open_compare", { path });
+  return http<void>("/api/begin-compare", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+}
+
+/** Listens on a SocketCAN interface as a background job; cancel ends the capture early. */
+export function beginCapture(iface: string, durationMs: number): Promise<void> {
+  const body = { iface, durationMs };
+  if (inTauri()) return invoke<void>("begin_capture_can", body);
+  return http<void>("/api/begin-capture", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export function indexProgress(): Promise<IndexStatus> {
   if (inTauri()) return invoke<IndexStatus>("index_progress");
   return http<IndexStatus>("/api/progress");
@@ -155,27 +195,6 @@ export function step(tUs: number, direction: "next" | "prev"): Promise<FrameHit 
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ tUs: t, direction }),
-  });
-}
-
-export function openProjectPath(path: string): Promise<ProjectOpen> {
-  if (inTauri()) return invoke<ProjectOpen>("open_project", { path });
-  return http<ProjectOpen>("/api/open-project-path", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ path }),
-  });
-}
-
-/**
- * Browser preview: the upload has no folder, so the engine reports a relative log,
- * map or compare path as unresolved instead of looking in its own directory.
- */
-export function openProjectJson(json: string): Promise<ProjectOpen> {
-  return http<ProjectOpen>("/api/open-project", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ json }),
   });
 }
 
@@ -258,15 +277,6 @@ export function setTriggers(triggers: ThresholdTrigger[]): Promise<Summary> {
   });
 }
 
-export function openComparePath(path: string): Promise<Summary> {
-  if (inTauri()) return invoke<Summary>("open_compare", { path });
-  return http<Summary>("/api/compare-path", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ path }),
-  });
-}
-
 export function openCompareBytes(bytes: ArrayBuffer): Promise<Summary> {
   return http<Summary>("/api/compare-bytes", {
     method: "POST",
@@ -287,16 +297,6 @@ export function setCompareOffset(offsetUs: number): Promise<Summary> {
 export function clearCompare(): Promise<Summary> {
   if (inTauri()) return invoke<Summary>("clear_compare");
   return http<Summary>("/api/compare-clear", { method: "POST" });
-}
-
-export function captureCan(iface: string, durationMs: number): Promise<Summary> {
-  const body = { iface, durationMs };
-  if (inTauri()) return invoke<Summary>("capture_can", body);
-  return http<Summary>("/api/capture", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
 }
 
 async function exportCall(path: string, command: string, args: Record<string, unknown>): Promise<ExportResult> {

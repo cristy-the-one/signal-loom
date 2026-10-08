@@ -2,7 +2,7 @@ import * as api from "./api";
 import { els } from "./dom";
 import { errText, formatCount } from "./format";
 import { state } from "./state";
-import type { Summary } from "./types";
+import type { ProjectFile, ProjectOpen, Summary } from "./types";
 
 /** Who raised a banner message; only the owner's later success clears it. */
 export type ErrorOwner = "query" | "project" | "action";
@@ -55,8 +55,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-/** Runs a background index behind the veil, with progress and a cancel button, until its summary is ready. */
-export async function withIndex(label: string, start: () => Promise<void>): Promise<Summary> {
+/** What a finished background job hands over: the summary, and the project when the job opened one. */
+interface IndexResult {
+  summary: Summary;
+  project?: { project: ProjectFile; warnings: string[] };
+}
+
+/** Runs a background job behind the veil, with progress and a cancel button, until its result is ready. */
+async function runIndex(label: string, start: () => Promise<void>): Promise<IndexResult> {
   state.busy += 1;
   paintBusy(label);
   els.veilCancel.hidden = false;
@@ -72,7 +78,7 @@ export async function withIndex(label: string, start: () => Promise<void>): Prom
     for (;;) {
       const tick = await api.indexProgress();
       if (tick.error) throw new Error(tick.error);
-      if (tick.done && tick.summary) return tick.summary;
+      if (tick.done && tick.summary) return { summary: tick.summary, project: tick.project };
       if (tick.idle && !tick.done) throw new Error("indexing did not start");
       const pct = tick.bytesTotal
         ? Math.min(99, Math.round((100 * tick.bytesDone) / tick.bytesTotal))
@@ -87,6 +93,31 @@ export async function withIndex(label: string, start: () => Promise<void>): Prom
     els.veilCancel.removeEventListener("click", onCancel);
     state.busy = Math.max(0, state.busy - 1);
     paintBusy();
+  }
+}
+
+/** Runs a background index behind the veil until its summary is ready. */
+export async function withIndex(label: string, start: () => Promise<void>): Promise<Summary> {
+  return (await runIndex(label, start)).summary;
+}
+
+/** Like `withIndex` for a job that opens a project: resolves to what the project open reports. */
+export async function withProjectIndex(label: string, start: () => Promise<void>): Promise<ProjectOpen> {
+  const { summary, project } = await runIndex(label, start);
+  if (!project) throw new Error("the project open returned no project");
+  return { project: project.project, warnings: project.warnings, summary };
+}
+
+/** Runs a background job behind the veil, then hands its summary to `adopt`. A failure or a cancel is reported, not thrown. */
+export async function indexThen(
+  label: string,
+  start: () => Promise<void>,
+  adopt: (summary: Summary) => void,
+): Promise<void> {
+  try {
+    adopt(await withIndex(label, start));
+  } catch (err) {
+    setError(errText(err), "action");
   }
 }
 
