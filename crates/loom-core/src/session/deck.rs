@@ -155,7 +155,7 @@ impl Deck {
     ) -> Result<Series> {
         let channel = self
             .math_channel(name)
-            .ok_or_else(|| Error::msg(format!("no math channel named {name}")))?;
+            .ok_or_else(|| Error::not_found(format!("no math channel named {name}")))?;
         let compiled = compile_math(&self.math, channel)?;
         let raw = log.samples(compiled.dependencies(), t0_us, t1_us)?;
         eval_channel(channel, &compiled, &raw)
@@ -218,7 +218,7 @@ fn eval_channel(channel: &MathChannel, compiled: &Compiled, base: &[Series]) -> 
             base.iter()
                 .find(|series| series.name == *dep)
                 .map(|series| series.points.as_slice())
-                .ok_or_else(|| Error::msg(format!("math channel {} needs {dep}", channel.name)))
+                .ok_or_else(|| Error::invalid(format!("math channel {} needs {dep}", channel.name)))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(Series {

@@ -48,7 +48,7 @@ impl IndexControl {
         self.frames.store(frames, Ordering::Relaxed);
         self.skipped.store(skipped, Ordering::Relaxed);
         if self.is_cancelled() {
-            Err(Error::msg("indexing cancelled"))
+            Err(Error::cancelled("indexing cancelled"))
         } else {
             Ok(())
         }

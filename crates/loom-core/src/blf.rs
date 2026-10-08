@@ -88,22 +88,24 @@ pub fn inflate_container(object: &[u8], out: &mut Vec<u8>) -> Result<()> {
 
 fn inflate_into(object: &[u8], out: &mut Vec<u8>) -> Result<()> {
     if object.len() < OBJECT_HEAD_LEN || &object[0..4] != OBJECT_MAGIC {
-        return Err(Error::msg("BLF container is missing LOBJ"));
+        return Err(Error::invalid("BLF container is missing LOBJ"));
     }
     let header_size = u16::from_le_bytes(copy2(object, HEADER_SIZE_AT)?) as usize;
     if header_size > object.len() {
-        return Err(Error::msg("BLF container header is larger than the object"));
+        return Err(Error::invalid(
+            "BLF container header is larger than the object",
+        ));
     }
     let body = &object[header_size..];
     if body.len() < CONTAINER_HEADER_LEN {
-        return Err(Error::msg("BLF log container is truncated"));
+        return Err(Error::invalid("BLF log container is truncated"));
     }
     let method = u16::from_le_bytes(copy2(body, 0)?);
     let payload = &body[CONTAINER_HEADER_LEN..];
     match method {
         0 => {
             if payload.len() > CONTAINER_CAP {
-                return Err(Error::msg("BLF container is larger than 8MB"));
+                return Err(Error::invalid("BLF container is larger than 8MB"));
             }
             out.extend_from_slice(payload);
             Ok(())
@@ -114,18 +116,18 @@ fn inflate_into(object: &[u8], out: &mut Vec<u8>) -> Result<()> {
             loop {
                 let n = decoder
                     .read(&mut chunk)
-                    .map_err(|err| Error::msg(format!("BLF zlib container: {err}")))?;
+                    .map_err(|err| Error::invalid(format!("BLF zlib container: {err}")))?;
                 if n == 0 {
                     break;
                 }
                 if out.len() + n > CONTAINER_CAP {
-                    return Err(Error::msg("BLF container is larger than 8MB"));
+                    return Err(Error::invalid("BLF container is larger than 8MB"));
                 }
                 out.extend_from_slice(&chunk[..n]);
             }
             Ok(())
         }
-        other => Err(Error::msg(format!(
+        other => Err(Error::invalid(format!(
             "BLF compression method {other} is not supported"
         ))),
     }
@@ -295,21 +297,21 @@ fn copy2(bytes: &[u8], at: usize) -> Result<[u8; 2]> {
     bytes
         .get(at..at + 2)
         .and_then(|slice| slice.try_into().ok())
-        .ok_or_else(|| Error::msg("truncated BLF field"))
+        .ok_or_else(|| Error::invalid("truncated BLF field"))
 }
 
 fn copy4(bytes: &[u8], at: usize) -> Result<[u8; 4]> {
     bytes
         .get(at..at + 4)
         .and_then(|slice| slice.try_into().ok())
-        .ok_or_else(|| Error::msg("truncated BLF field"))
+        .ok_or_else(|| Error::invalid("truncated BLF field"))
 }
 
 fn copy8(bytes: &[u8], at: usize) -> Result<[u8; 8]> {
     bytes
         .get(at..at + 8)
         .and_then(|slice| slice.try_into().ok())
-        .ok_or_else(|| Error::msg("truncated BLF field"))
+        .ok_or_else(|| Error::invalid("truncated BLF field"))
 }
 
 #[cfg(test)]

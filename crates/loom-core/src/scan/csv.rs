@@ -21,7 +21,7 @@ impl Header {
         self.pending = false;
         let found = csv_format(line).map_err(Fault::Abort)?;
         if found != self.expect {
-            return Err(Fault::Abort(Error::msg(format!(
+            return Err(Fault::Abort(Error::invalid(format!(
                 "CSV header is a {} header, but the log is being read as {}",
                 found.label(),
                 self.expect.label()

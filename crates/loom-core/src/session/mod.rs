@@ -68,7 +68,7 @@ impl LogSlot {
     fn get(&self) -> Result<&IndexedLog> {
         self.log
             .as_ref()
-            .ok_or_else(|| Error::msg("no log is open"))
+            .ok_or_else(|| Error::not_found("no log is open"))
     }
 
     /// The events cached for exactly this trigger set, with their warnings.
@@ -147,7 +147,10 @@ impl Session {
         control: Option<&IndexControl>,
     ) -> Result<Summary> {
         if !path.is_file() {
-            return Err(Error::msg(format!("log not found: {}", path.display())));
+            return Err(Error::not_found(format!(
+                "log not found: {}",
+                path.display()
+            )));
         }
         let incoming = match sibling_map(path) {
             Some(sibling) => Some((read_map_file(&sibling)?, sibling)),

@@ -88,7 +88,7 @@ export function applyProject(opened: ProjectOpen, path: string | null): void {
   state.comparePath = opened.project.comparePath ?? null;
   state.compareOffsetUs = opened.project.compareOffsetUs ?? 0;
   state.cluster = (opened.project.cluster ?? {}) as ClusterBindings;
-  state.compareOn = Boolean(state.comparePath) && !opened.warnings.some((warning) => warning.startsWith("Compare"));
+  state.compareOn = opened.compareOpened;
   els.compareOffset.value = String(state.compareOffsetUs / 1000);
   clearError();
   if (opened.warnings.length) setError(opened.warnings.join(" "), "project");

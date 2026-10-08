@@ -24,7 +24,7 @@ pub use dto::{
     deserialize_us, BusLoad, EventDto, FrameDto, IndexStatus, MapMatch, OpenedProject, PointDto,
     ProjectOpen, Query, SeriesDto, SignalDto, StepDir, Summary, ValueDto, WindowStats,
 };
-pub use error::{Error, Result};
+pub use error::{Error, ErrorBody, ErrorKind, Result};
 pub use index::{Export, IndexControl};
 pub use jobs::Engine;
 pub use map::SignalMap;

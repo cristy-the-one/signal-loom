@@ -99,7 +99,7 @@ impl Session {
         control: Option<&IndexControl>,
     ) -> Result<Summary> {
         if !path.is_file() {
-            return Err(Error::msg(format!(
+            return Err(Error::not_found(format!(
                 "compare log not found: {}",
                 path.display()
             )));

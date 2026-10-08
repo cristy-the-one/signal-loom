@@ -8,7 +8,7 @@
 //! only to open what it recorded.
 
 use crate::dto::OpenedProject;
-use crate::{Error, IndexControl, IndexStatus, ProjectOpen, Result, Session};
+use crate::{Error, ErrorBody, IndexControl, IndexStatus, ProjectOpen, Result, Session};
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ enum Phase {
     Running,
     /// Finished; the project is set when the job opened one.
     Ready(Option<Box<OpenedProject>>),
-    Failed(String),
+    Failed(ErrorBody),
 }
 
 /// The session behind one lock, plus the state of its background job.
@@ -76,6 +76,7 @@ impl Engine {
                 Some(Box::new(OpenedProject {
                     project: open.project,
                     warnings: open.warnings,
+                    compare_opened: open.compare_opened,
                 }))
             })
         })
@@ -100,7 +101,7 @@ impl Engine {
         {
             let mut phase = lock(&self.phase)?;
             if matches!(*phase, Phase::Running) {
-                return Err(Error::msg("an index is already running"));
+                return Err(Error::invalid("an index is already running"));
             }
             self.control.reset(0);
             *phase = Phase::Running;
@@ -111,8 +112,8 @@ impl Engine {
             if let Ok(mut phase) = engine.phase.lock() {
                 *phase = match outcome {
                     Ok(Ok(opened)) => Phase::Ready(opened),
-                    Ok(Err(err)) => Phase::Failed(err.to_string()),
-                    Err(payload) => Phase::Failed(panic_message(payload.as_ref())),
+                    Ok(Err(err)) => Phase::Failed(err.body()),
+                    Err(payload) => Phase::Failed(panic_error(payload.as_ref()).body()),
                 };
             }
         });
@@ -124,7 +125,7 @@ impl Engine {
     fn locked<T>(&self, work: impl FnOnce(&mut Session, &IndexControl) -> Result<T>) -> Result<T> {
         let mut session = lock(&self.session)?;
         catch_unwind(AssertUnwindSafe(|| work(&mut session, &self.control)))
-            .unwrap_or_else(|payload| Err(Error::msg(panic_message(payload.as_ref()))))
+            .unwrap_or_else(|payload| Err(panic_error(payload.as_ref())))
     }
 
     /// `take` hands a finished result to the caller and resets to idle. Cancel
@@ -143,6 +144,7 @@ impl Engine {
             summary: None,
             project: None,
             error: None,
+            error_kind: None,
         };
         let current = if take {
             std::mem::replace(&mut *phase, Phase::Idle)
@@ -165,20 +167,14 @@ impl Engine {
                         status.skipped = summary.skipped_records;
                         status.summary = Some(summary);
                     }
-                    Err(err) => {
-                        status.done = true;
-                        status.error = Some(err.to_string());
-                    }
+                    Err(err) => status.fail(err.body()),
                 },
                 Err(err) => {
                     *phase = Phase::Ready(opened);
                     return Err(err);
                 }
             },
-            Phase::Failed(message) => {
-                status.done = true;
-                status.error = Some(message);
-            }
+            Phase::Failed(body) => status.fail(body),
         }
         Ok(status)
     }
@@ -191,18 +187,18 @@ impl Engine {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
-    mutex.lock().map_err(|err| Error::msg(err.to_string()))
+    mutex.lock().map_err(|err| Error::internal(err.to_string()))
 }
 
-fn panic_message(payload: &(dyn Any + Send)) -> String {
+fn panic_error(payload: &(dyn Any + Send)) -> Error {
     let detail = payload
         .downcast_ref::<&str>()
         .map(|text| (*text).to_string())
         .or_else(|| payload.downcast_ref::<String>().cloned());
-    match detail {
+    Error::internal(match detail {
         Some(detail) => format!("indexing stopped unexpectedly: {detail}"),
         None => "indexing stopped unexpectedly".to_string(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -410,6 +406,57 @@ mod tests {
         let status = wait_until_settled(&engine);
         assert_eq!(status.error.as_deref(), Some("indexing cancelled"));
         assert_eq!(compare_values(&engine), first);
+    }
+
+    #[test]
+    fn a_cancelled_job_reports_the_cancelled_kind() {
+        let engine = Arc::new(Engine::new());
+        let text = project_json("hypercar_lap.slog", None);
+        begin_cancelled(&engine, |engine| engine.begin_project_json(text, None));
+        let status = wait_until_settled(&engine);
+        assert_eq!(status.error.as_deref(), Some("indexing cancelled"));
+        assert_eq!(status.error_kind, Some(crate::ErrorKind::Cancelled));
+    }
+
+    #[test]
+    fn a_panicking_job_reports_the_internal_kind_and_a_bad_capture_the_invalid_kind() {
+        let engine = Arc::new(Engine::new());
+        engine.begin(|_, _| panic!("boom")).unwrap();
+        let status = wait_until_settled(&engine);
+        assert_eq!(status.error_kind, Some(crate::ErrorKind::Internal));
+
+        engine.begin_capture("can0;reboot".to_string(), 10).unwrap();
+        let status = wait_until_settled(&engine);
+        assert_eq!(status.error_kind, Some(crate::ErrorKind::Invalid));
+    }
+
+    #[test]
+    fn a_finished_job_without_a_failure_has_no_error_kind() {
+        let engine = Arc::new(Engine::new());
+        engine
+            .begin(|session, _| session.open_sample().map(|_| ()))
+            .unwrap();
+        let status = wait_until_settled(&engine);
+        assert_eq!((status.error, status.error_kind), (None, None));
+        let json = serde_json::to_value(engine.progress(true).unwrap()).unwrap();
+        assert!(json.get("errorKind").is_none());
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_an_internal_error() {
+        let engine = Arc::new(Engine::new());
+        let poisoner = Arc::clone(&engine);
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.phase.lock().unwrap();
+            panic!("poison the phase lock");
+        })
+        .join();
+        let err = engine.progress(true).unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Internal);
+        assert_eq!(
+            serde_json::to_value(&err).unwrap()["kind"],
+            serde_json::json!("internal")
+        );
     }
 
     #[test]

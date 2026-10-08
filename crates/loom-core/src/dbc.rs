@@ -69,7 +69,7 @@ pub fn parse(text: &str) -> Result<SignalMap> {
     }
 
     if messages.is_empty() {
-        return Err(Error::msg("DBC has no BO_ messages"));
+        return Err(Error::invalid("DBC has no BO_ messages"));
     }
 
     let mut signals = Vec::new();
@@ -136,7 +136,7 @@ pub fn parse(text: &str) -> Result<SignalMap> {
             .first()
             .map(|warning| format!(" {warning}"))
             .unwrap_or_default();
-        return Err(Error::msg(format!(
+        return Err(Error::invalid(format!(
             "DBC has no usable signals. Malformed records were skipped.{extra}"
         )));
     }
@@ -171,14 +171,14 @@ fn parse_bo(rest: &str) -> Result<MessageBuild> {
     let id_tok = parts.next().unwrap_or("");
     let name_tok = parts.next().unwrap_or("");
     let dlc_tok = parts.next().unwrap_or("8");
-    let id = normalize_id(parse_int(id_tok).map_err(Error::msg)?);
+    let id = normalize_id(parse_int(id_tok).map_err(Error::invalid)?);
     let name = name_tok.trim_end_matches(':').to_string();
     if name.is_empty() {
-        return Err(Error::msg(format!(
+        return Err(Error::invalid(format!(
             "BO_ {id_tok} is missing a message name"
         )));
     }
-    let dlc = parse_int(dlc_tok.trim_end_matches(':')).map_err(Error::msg)? as u8;
+    let dlc = parse_int(dlc_tok.trim_end_matches(':')).map_err(Error::invalid)? as u8;
     Ok(MessageBuild {
         id,
         name,
@@ -193,7 +193,7 @@ fn parse_sg(rest: &str) -> Result<SignalBuild> {
     // Gear m0 : 8|8@1+ (1,0) [0|0] "" Vector__XXX
     let rest = rest.trim().trim_end_matches(';');
     let Some((head, tail)) = rest.split_once(':') else {
-        return Err(Error::msg(format!(
+        return Err(Error::invalid(format!(
             "SG_ record is missing a layout: {rest}"
         )));
     };
@@ -201,16 +201,18 @@ fn parse_sg(rest: &str) -> Result<SignalBuild> {
     let mut parts = head.split_whitespace();
     let name = parts.next().unwrap_or("").to_string();
     if name.is_empty() {
-        return Err(Error::msg(format!("SG_ record is missing a name: {rest}")));
+        return Err(Error::invalid(format!(
+            "SG_ record is missing a name: {rest}"
+        )));
     }
     let marker = parts.next().unwrap_or("");
     let (mux_switch, mux_value) = mux_marker(marker).ok_or_else(|| {
-        Error::msg(format!(
+        Error::invalid(format!(
             "signal {name} has a multiplex marker Signal Loom cannot import"
         ))
     })?;
     let mut signal = parse_sg_tail(&name, tail.trim()).ok_or_else(|| {
-        Error::msg(format!(
+        Error::invalid(format!(
             "signal {name} has a layout Signal Loom cannot import"
         ))
     })?;

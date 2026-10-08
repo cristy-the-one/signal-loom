@@ -31,7 +31,7 @@ impl<'a> Source<'a> {
     pub(super) fn at(reader: &'a mut dyn ReadSeek, pos: u64) -> Result<Self> {
         reader
             .seek(SeekFrom::Start(pos))
-            .map_err(|err| Error::msg(format!("could not seek log: {err}")))?;
+            .map_err(|err| Error::io("could not seek log", err))?;
         Ok(Self {
             reader,
             pos,
@@ -53,7 +53,7 @@ impl<'a> Source<'a> {
         loop {
             if self.at >= self.len {
                 self.len = read_retrying(self.reader, &mut self.buf)
-                    .map_err(|err| Error::msg(format!("read failed: {err}")))?;
+                    .map_err(|err| Error::io("read failed", err))?;
                 self.at = 0;
                 if self.len == 0 {
                     break;
@@ -91,7 +91,7 @@ impl<'a> Source<'a> {
         while off < buf.len() {
             if self.at >= self.len {
                 let n = read_retrying(self.reader, &mut buf[off..])
-                    .map_err(|err| Error::msg(format!("binary read failed: {err}")))?;
+                    .map_err(|err| Error::io("binary read failed", err))?;
                 if n == 0 {
                     return Err(Error::Binary {
                         offset: start,
@@ -165,16 +165,16 @@ const PEEK_LEN: usize = 4096;
 pub(super) fn peek_prefix(reader: &mut dyn ReadSeek) -> Result<String> {
     let pos = reader
         .stream_position()
-        .map_err(|err| Error::msg(format!("could not tell log position: {err}")))?;
+        .map_err(|err| Error::io("could not tell log position", err))?;
     reader
         .seek(SeekFrom::Start(0))
-        .map_err(|err| Error::msg(format!("could not rewind log: {err}")))?;
+        .map_err(|err| Error::io("could not rewind log", err))?;
     let mut buf = [0u8; PEEK_LEN];
     let n = reader
         .read(&mut buf)
-        .map_err(|err| Error::msg(format!("could not read log: {err}")))?;
+        .map_err(|err| Error::io("could not read log", err))?;
     reader
         .seek(SeekFrom::Start(pos))
-        .map_err(|err| Error::msg(format!("could not restore log position: {err}")))?;
+        .map_err(|err| Error::io("could not restore log position", err))?;
     Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
 }

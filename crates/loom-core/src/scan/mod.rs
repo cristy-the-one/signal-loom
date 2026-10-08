@@ -168,11 +168,11 @@ pub fn sniff(head: &[u8]) -> Result<LogFormat> {
         if line.contains(',') {
             return csv_format(line);
         }
-        return Err(Error::msg(
+        return Err(Error::invalid(
             "unrecognized log. Expected SLOGv1, SLB1, CSV, Vector ASC, BLF, or candump.",
         ));
     }
-    Err(Error::msg("log is empty"))
+    Err(Error::invalid("log is empty"))
 }
 
 fn looks_like_candump(line: &str) -> bool {
@@ -205,7 +205,7 @@ fn csv_format(header: &str) -> Result<LogFormat> {
             }
         }
     }
-    Err(Error::msg(
+    Err(Error::invalid(
         "CSV header must be t_us,id,data or t_us,signal,value (microseconds)",
     ))
 }
