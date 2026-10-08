@@ -1,5 +1,6 @@
 use crate::decode::{DecodeSpec, Endian};
 use crate::error::{Error, Result};
+use crate::scan::id::{parse_id, IdBase};
 use serde::Deserialize;
 use std::collections::HashSet;
 
@@ -316,14 +317,8 @@ where
     deserializer.deserialize_any(Visitor)
 }
 
+/// A CAN id in a map or CAN CSV: hex with a `0x` prefix or any `A-F` digit,
+/// decimal otherwise.
 pub fn parse_can_id(text: &str) -> std::result::Result<u32, String> {
-    let text = text.trim();
-    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        return u32::from_str_radix(hex, 16).map_err(|_| format!("bad CAN id {text}"));
-    }
-    if text.chars().any(|c| matches!(c, 'a'..='f' | 'A'..='F')) {
-        return u32::from_str_radix(text, 16).map_err(|_| format!("bad CAN id {text}"));
-    }
-    text.parse::<u32>()
-        .map_err(|_| format!("bad CAN id {text}"))
+    parse_id(text, IdBase::Auto).ok_or_else(|| format!("bad CAN id {}", text.trim()))
 }
