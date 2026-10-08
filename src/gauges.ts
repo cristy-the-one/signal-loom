@@ -1,5 +1,24 @@
-import { fitCanvas } from "./canvas";
+import { fitCanvas, roundRect } from "./canvas";
 import { readoutFor } from "./format";
+import {
+  AMBER,
+  CORAL,
+  CYAN,
+  EDGE,
+  GREEN,
+  MONO,
+  ORANGE,
+  RED,
+  RULE,
+  SANS,
+  SURFACE,
+  TEXT,
+  TEXT_FAINT,
+  TEXT_MUTED,
+  VIOLET,
+  WELL,
+  YELLOW,
+} from "./theme";
 import type { BusLoad, SignalInfo, ValueRead } from "./types";
 
 /** The cluster's places for a signal: two dials, a digit, three bars and six lamps. */
@@ -37,18 +56,18 @@ interface SlotSpec {
 }
 
 export const SLOTS: SlotSpec[] = [
-  { id: "speed", kind: "arc", title: "Left dial", defaults: ["VehicleSpeed"], label: "km/h", min: 0, max: 320, decimals: 1, color: "#f2e394" },
-  { id: "rpm", kind: "arc", title: "Right dial", defaults: ["EngineRPM", "DisplayedRPM"], label: "rpm", min: 0, max: 9000, decimals: 0, color: "#3ec6ff", redFrom: 7500 },
-  { id: "gear", kind: "digit", title: "Digit", defaults: ["Gear", "GearActual"], label: "", min: 0, max: 9, decimals: 0, color: "#f2e394" },
-  { id: "bar1", kind: "bar", title: "Bar 1", defaults: ["CoolantTemp"], label: "CLT", min: 40, max: 130, decimals: 0, color: "#ff7a59" },
-  { id: "bar2", kind: "bar", title: "Bar 2", defaults: ["OilTemp"], label: "OIL", min: 40, max: 150, decimals: 0, color: "#e6a23c" },
-  { id: "bar3", kind: "bar", title: "Bar 3", defaults: ["Soc", "FuelLevel"], label: "SOC", min: 0, max: 100, decimals: 0, color: "#c9a0ff" },
-  { id: "lamp1", kind: "lamp", title: "Lamp 1", defaults: ["MilLamp", "TelltaleMil"], label: "MIL", min: 0, max: 1, decimals: 0, color: "#ffb020" },
-  { id: "lamp2", kind: "lamp", title: "Lamp 2", defaults: ["AbsActive", "TelltaleAbs"], label: "ABS", min: 0, max: 1, decimals: 0, color: "#ff5a45" },
-  { id: "lamp3", kind: "lamp", title: "Lamp 3", defaults: ["EscActive"], label: "ESC", min: 0, max: 1, decimals: 0, color: "#e6a23c" },
-  { id: "lamp4", kind: "lamp", title: "Lamp 4", defaults: ["TurnLeft", "TelltaleLeft"], label: "L", min: 0, max: 1, decimals: 0, color: "#7ddea5" },
-  { id: "lamp5", kind: "lamp", title: "Lamp 5", defaults: ["TurnRight", "TelltaleRight"], label: "R", min: 0, max: 1, decimals: 0, color: "#7ddea5" },
-  { id: "lamp6", kind: "lamp", title: "Lamp 6", defaults: ["DoorFL"], label: "DOOR", min: 0, max: 1, decimals: 0, color: "#7ddea5" },
+  { id: "speed", kind: "arc", title: "Left dial", defaults: ["VehicleSpeed"], label: "km/h", min: 0, max: 320, decimals: 1, color: YELLOW },
+  { id: "rpm", kind: "arc", title: "Right dial", defaults: ["EngineRPM", "DisplayedRPM"], label: "rpm", min: 0, max: 9000, decimals: 0, color: CYAN, redFrom: 7500 },
+  { id: "gear", kind: "digit", title: "Digit", defaults: ["Gear", "GearActual"], label: "", min: 0, max: 9, decimals: 0, color: YELLOW },
+  { id: "bar1", kind: "bar", title: "Bar 1", defaults: ["CoolantTemp"], label: "CLT", min: 40, max: 130, decimals: 0, color: CORAL },
+  { id: "bar2", kind: "bar", title: "Bar 2", defaults: ["OilTemp"], label: "OIL", min: 40, max: 150, decimals: 0, color: AMBER },
+  { id: "bar3", kind: "bar", title: "Bar 3", defaults: ["Soc", "FuelLevel"], label: "SOC", min: 0, max: 100, decimals: 0, color: VIOLET },
+  { id: "lamp1", kind: "lamp", title: "Lamp 1", defaults: ["MilLamp", "TelltaleMil"], label: "MIL", min: 0, max: 1, decimals: 0, color: ORANGE },
+  { id: "lamp2", kind: "lamp", title: "Lamp 2", defaults: ["AbsActive", "TelltaleAbs"], label: "ABS", min: 0, max: 1, decimals: 0, color: RED },
+  { id: "lamp3", kind: "lamp", title: "Lamp 3", defaults: ["EscActive"], label: "ESC", min: 0, max: 1, decimals: 0, color: AMBER },
+  { id: "lamp4", kind: "lamp", title: "Lamp 4", defaults: ["TurnLeft", "TelltaleLeft"], label: "L", min: 0, max: 1, decimals: 0, color: GREEN },
+  { id: "lamp5", kind: "lamp", title: "Lamp 5", defaults: ["TurnRight", "TelltaleRight"], label: "R", min: 0, max: 1, decimals: 0, color: GREEN },
+  { id: "lamp6", kind: "lamp", title: "Lamp 6", defaults: ["DoorFL"], label: "DOOR", min: 0, max: 1, decimals: 0, color: GREEN },
 ];
 
 export function slotSpec(id: SlotId): SlotSpec {
@@ -124,34 +143,65 @@ function shortName(name: string, max: number): string {
   return (tail.length <= max ? tail : name.slice(0, max)).toUpperCase();
 }
 
-/** Where each slot sits on a cluster canvas `h` px tall. */
-function slotBoxes(h: number): Record<SlotId, { x: number; y: number; w: number; h: number }> {
+/** Horizontal anchor per slot: a dial's or the digit's centre, a bar's or lamp's left edge. */
+const ANCHOR = { speed: 58, rpm: 158, gear: 108, bar1: 214, bar2: 254, bar3: 294 } as const;
+const LAMP_X = 360;
+const LAMP_PITCH = 52;
+const LAMP_W = 46;
+const LAMP_H = 22;
+const BAR_W = 28;
+const DIGIT = 22;
+
+interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Where every slot sits on a cluster canvas `h` px tall. Drawing and hit-testing both read it. */
+interface Geometry {
+  /** Centre line of the dials and the digit. */
+  cy: number;
+  radius: number;
+  barY: number;
+  barH: number;
+  boxes: Record<SlotId, Box>;
+}
+
+function geometry(h: number): Geometry {
   const cy = Math.min(34, h * 0.46);
   const radius = Math.min(22, h * 0.32);
-  const arc = (cx: number) => ({ x: cx - radius - 6, y: cy - radius - 6, w: (radius + 6) * 2, h: radius * 2 + 22 });
   const barY = 14;
   const barH = Math.max(20, h - 28);
-  const bar = (x: number) => ({ x, y: barY, w: 28, h: barH + 12 });
-  const lamp = (index: number) => ({ x: 360 + index * 52, y: h / 2 - 11, w: 46, h: 22 });
+  const dial = (cx: number): Box => ({ x: cx - radius - 6, y: cy - radius - 6, w: (radius + 6) * 2, h: radius * 2 + 22 });
+  const bar = (x: number): Box => ({ x, y: barY, w: BAR_W, h: barH + 12 });
+  const lamp = (index: number): Box => ({ x: LAMP_X + index * LAMP_PITCH, y: h / 2 - 11, w: LAMP_W, h: LAMP_H });
   return {
-    speed: arc(58),
-    rpm: arc(158),
-    gear: { x: 108 - 11, y: cy - 12, w: 22, h: 22 },
-    bar1: bar(214),
-    bar2: bar(254),
-    bar3: bar(294),
-    lamp1: lamp(0),
-    lamp2: lamp(1),
-    lamp3: lamp(2),
-    lamp4: lamp(3),
-    lamp5: lamp(4),
-    lamp6: lamp(5),
+    cy,
+    radius,
+    barY,
+    barH,
+    boxes: {
+      speed: dial(ANCHOR.speed),
+      rpm: dial(ANCHOR.rpm),
+      gear: { x: ANCHOR.gear - DIGIT / 2, y: cy - 12, w: DIGIT, h: DIGIT },
+      bar1: bar(ANCHOR.bar1),
+      bar2: bar(ANCHOR.bar2),
+      bar3: bar(ANCHOR.bar3),
+      lamp1: lamp(0),
+      lamp2: lamp(1),
+      lamp3: lamp(2),
+      lamp4: lamp(3),
+      lamp5: lamp(4),
+      lamp6: lamp(5),
+    },
   };
 }
 
 /** The slot under a point in CSS pixels on the cluster canvas, if any. */
 export function slotAt(x: number, y: number, w: number, h: number): SlotId | null {
-  const boxes = slotBoxes(h);
+  const { boxes } = geometry(h);
   for (const slot of SLOTS) {
     const box = boxes[slot.id];
     if (box.x + box.w > w) continue;
@@ -180,37 +230,35 @@ export function drawGauges(canvas: HTMLCanvasElement, readings: ClusterReadings 
     const reading = readings?.[id];
     return reading ?? { ...empty, label: slotSpec(id).label, min: slotSpec(id).min, max: slotSpec(id).max };
   };
-  const cy = Math.min(34, h * 0.46);
-  const radius = Math.min(22, h * 0.32);
-  for (const [id, cx] of [["speed", 58], ["rpm", 158]] as const) {
+  const g = geometry(h);
+  for (const id of ["speed", "rpm"] as const) {
     const spec = slotSpec(id);
     const r = read(id);
     const red = r.assigned ? undefined : spec.redFrom;
-    arcGauge(ctx, cx, cy, radius, r.value, r.min, r.max, spec.color, r.label, r.decimals, r.value == null, red);
+    arcGauge(ctx, ANCHOR[id], g.cy, g.radius, r.value, r.min, r.max, spec.color, r.label, r.decimals, r.value == null, red);
   }
-  gearDigit(ctx, 108, cy, read("gear").value, read("gear").assigned);
+  const gear = read("gear");
+  gearDigit(ctx, g.boxes.gear, ANCHOR.gear, g.cy, gear.value, gear.assigned);
 
-  const barY = 14;
-  const barH = Math.max(20, h - 28);
-  for (const [id, x] of [["bar1", 214], ["bar2", 254], ["bar3", 294]] as const) {
+  for (const id of ["bar1", "bar2", "bar3"] as const) {
     const r = read(id);
-    barGauge(ctx, x, barY, 28, barH, r.value, r.min, r.max, slotSpec(id).color, r.label, r.decimals);
+    barGauge(ctx, g.boxes[id].x, g.barY, BAR_W, g.barH, r.value, r.min, r.max, slotSpec(id).color, r.label, r.decimals);
   }
 
   const lamps: SlotId[] = ["lamp1", "lamp2", "lamp3", "lamp4", "lamp5", "lamp6"];
-  lamps.forEach((id, index) => {
-    const x = 360 + index * 52;
-    if (x > w - 46) return;
+  for (const id of lamps) {
+    const box = g.boxes[id];
+    if (box.x + box.w > w) continue;
     const r = read(id);
-    lampChip(ctx, x, h / 2 - 11, r.label, r.value != null && r.value > 0.5, slotSpec(id).color);
-  });
+    lampChip(ctx, box, r.label, r.value != null && r.value > 0.5, slotSpec(id).color);
+  }
 
   // With a real DBC nothing matches the sample's names: say how to fill the cluster.
   const anything = readings != null && Object.values(readings).some((reading) => reading.signal != null);
-  const hintX = 360 + lamps.length * 52 + 12;
+  const hintX = LAMP_X + lamps.length * LAMP_PITCH + 12;
   if (readings && !anything && hintX < w - 40) {
-    ctx.fillStyle = "#8b9aa6";
-    ctx.font = "11px 'IBM Plex Sans', sans-serif";
+    ctx.fillStyle = TEXT_MUTED;
+    ctx.font = `11px ${SANS}`;
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
     ctx.fillText("Click a gauge or lamp to assign a signal", hintX, h / 2);
@@ -253,32 +301,39 @@ function arcGauge(
   ctx.arc(cx, cy, radius, start, start + sweep * u);
   ctx.stroke();
   const ang = start + sweep * u;
-  ctx.strokeStyle = empty ? "rgba(231,238,243,0.35)" : "#e7eef3";
+  ctx.strokeStyle = empty ? "rgba(231,238,243,0.35)" : TEXT;
   ctx.lineWidth = 1.2;
   ctx.beginPath();
   ctx.moveTo(cx + Math.cos(ang) * 6, cy + Math.sin(ang) * 6);
   ctx.lineTo(cx + Math.cos(ang) * (radius - 1), cy + Math.sin(ang) * (radius - 1));
   ctx.stroke();
-  ctx.fillStyle = empty ? "#6d7c88" : "#e7eef3";
-  ctx.font = "500 13px 'IBM Plex Mono', ui-monospace, monospace";
+  ctx.fillStyle = empty ? TEXT_FAINT : TEXT;
+  ctx.font = `500 13px ${MONO}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(empty || value == null ? "—" : value.toFixed(decimals), cx, cy + 8);
-  ctx.fillStyle = "#8b9aa6";
-  ctx.font = "9px 'IBM Plex Mono', ui-monospace, monospace";
+  ctx.fillStyle = TEXT_MUTED;
+  ctx.font = `9px ${MONO}`;
   ctx.fillText(unit, cx, cy + radius + 8);
 }
 
-function gearDigit(ctx: CanvasRenderingContext2D, x: number, y: number, gear: number | null, assigned = false): void {
-  ctx.fillStyle = "#0b0f13";
-  ctx.strokeStyle = "#2a343d";
+function gearDigit(
+  ctx: CanvasRenderingContext2D,
+  box: Box,
+  x: number,
+  y: number,
+  gear: number | null,
+  assigned = false,
+): void {
+  ctx.fillStyle = WELL;
+  ctx.strokeStyle = EDGE;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  roundRect(ctx, x - 11, y - 12, 22, 22, 2);
+  roundRect(ctx, box.x, box.y, box.w, box.h, 2);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = "#f2e394";
-  ctx.font = "600 13px 'IBM Plex Mono', ui-monospace, monospace";
+  ctx.fillStyle = YELLOW;
+  ctx.font = `600 13px ${MONO}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const label =
@@ -299,8 +354,8 @@ function barGauge(
   label: string,
   decimals = 0,
 ): void {
-  ctx.fillStyle = "#0b0f13";
-  ctx.strokeStyle = "#243039";
+  ctx.fillStyle = WELL;
+  ctx.strokeStyle = RULE;
   ctx.lineWidth = 1;
   ctx.beginPath();
   roundRect(ctx, x, y, width, height, 2);
@@ -312,51 +367,28 @@ function barGauge(
     ctx.fillStyle = color;
     ctx.fillRect(x + 3, y + height - 2 - fillH, width - 6, fillH);
   }
-  ctx.fillStyle = "#e7eef3";
-  ctx.font = "10px 'IBM Plex Mono', ui-monospace, monospace";
+  ctx.fillStyle = TEXT;
+  ctx.font = `10px ${MONO}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   ctx.fillText(value == null ? "—" : value.toFixed(decimals), x + width / 2, y + 3);
-  ctx.fillStyle = "#8b9aa6";
-  ctx.font = "9px 'IBM Plex Mono', ui-monospace, monospace";
+  ctx.fillStyle = TEXT_MUTED;
+  ctx.font = `9px ${MONO}`;
   ctx.fillText(label, x + width / 2, y + height + 2);
 }
 
-function lampChip(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  label: string,
-  lit: boolean,
-  color: string,
-): void {
+function lampChip(ctx: CanvasRenderingContext2D, box: Box, label: string, lit: boolean, color: string): void {
   ctx.beginPath();
-  roundRect(ctx, x, y, 46, 22, 2);
-  ctx.fillStyle = lit ? color : "#12181e";
+  roundRect(ctx, box.x, box.y, box.w, box.h, 2);
+  ctx.fillStyle = lit ? color : SURFACE;
   ctx.fill();
-  ctx.strokeStyle = lit ? color : "#2a343d";
+  ctx.strokeStyle = lit ? color : EDGE;
   ctx.stroke();
-  ctx.fillStyle = lit ? "#121418" : "#6d7c88";
-  ctx.font = "600 10px 'IBM Plex Sans', sans-serif";
+  ctx.fillStyle = lit ? "#121418" : TEXT_FAINT;
+  ctx.font = `600 10px ${SANS}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(label, x + 23, y + 11);
-}
-
-function roundRect(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number,
-): void {
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+  ctx.fillText(label, box.x + box.w / 2, box.y + box.h / 2);
 }
 
 export function drawBus(canvas: HTMLCanvasElement, load: BusLoad | null): void {
@@ -366,7 +398,7 @@ export function drawBus(canvas: HTMLCanvasElement, load: BusLoad | null): void {
   ctx.fillStyle = "#0b0e12";
   ctx.fillRect(0, 0, w, h);
   const pad = 8;
-  ctx.font = "10px 'IBM Plex Mono', ui-monospace, monospace";
+  ctx.font = `10px ${MONO}`;
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";
   ctx.fillStyle = "#d5dee6";
@@ -383,6 +415,6 @@ export function drawBus(canvas: HTMLCanvasElement, load: BusLoad | null): void {
   ctx.fillStyle = "#1a2229";
   ctx.fillRect(barX, barY, barW, 6);
   const fraction = load ? Math.min(1, Math.max(0, load.load)) : 0;
-  ctx.fillStyle = fraction > 0.7 ? "#ff5a45" : fraction > 0.4 ? "#e6a23c" : "#3ec6ff";
+  ctx.fillStyle = fraction > 0.7 ? RED : fraction > 0.4 ? AMBER : CYAN;
   ctx.fillRect(barX, barY, barW * fraction, 6);
 }
