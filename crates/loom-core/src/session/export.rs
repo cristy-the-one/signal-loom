@@ -26,7 +26,7 @@ impl Session {
             (false, true) => {
                 export_math_csv(&self.deck, self.log()?, &math, t0_us, t1_us, EXPORT_ROW_CAP)
             }
-            (false, false) => Err(Error::msg(
+            (false, false) => Err(Error::invalid(
                 "export the math channel on its own, or export physical signals on their own",
             )),
         }

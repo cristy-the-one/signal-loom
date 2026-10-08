@@ -194,10 +194,10 @@ fn clock_before(reader: &mut dyn ReadSeek, offset: u64, origin: u64) -> Result<u
         let mut head = vec![0u8; take as usize];
         reader
             .seek(SeekFrom::Start(lo))
-            .map_err(|err| Error::msg(format!("could not seek log: {err}")))?;
+            .map_err(|err| Error::io("could not seek log", err))?;
         reader
             .read_exact(&mut head)
-            .map_err(|err| Error::msg(format!("could not read log: {err}")))?;
+            .map_err(|err| Error::io("could not read log", err))?;
         head.extend_from_slice(&window);
         window = head;
         if let Some(t_us) = last_stamp(&window, lo == 0, origin) {

@@ -58,7 +58,7 @@ function sleep(ms: number): Promise<void> {
 /** What a finished background job hands over: the summary, and the project when the job opened one. */
 interface IndexResult {
   summary: Summary;
-  project?: { project: ProjectFile; warnings: string[] };
+  project?: { project: ProjectFile; warnings: string[]; compareOpened: boolean };
 }
 
 /** Runs a background job behind the veil, with progress and a cancel button, until its result is ready. */
@@ -77,9 +77,9 @@ async function runIndex(label: string, start: () => Promise<void>): Promise<Inde
     await start();
     for (;;) {
       const tick = await api.indexProgress();
-      if (tick.error) throw new Error(tick.error);
+      if (tick.error) throw new api.ApiError(tick.errorKind ?? "internal", tick.error);
       if (tick.done && tick.summary) return { summary: tick.summary, project: tick.project };
-      if (tick.idle && !tick.done) throw new Error("indexing did not start");
+      if (tick.idle && !tick.done) throw new api.ApiError("internal", "indexing did not start");
       const pct = tick.bytesTotal
         ? Math.min(99, Math.round((100 * tick.bytesDone) / tick.bytesTotal))
         : 0;
@@ -104,8 +104,8 @@ export async function withIndex(label: string, start: () => Promise<void>): Prom
 /** Like `withIndex` for a job that opens a project: resolves to what the project open reports. */
 export async function withProjectIndex(label: string, start: () => Promise<void>): Promise<ProjectOpen> {
   const { summary, project } = await runIndex(label, start);
-  if (!project) throw new Error("the project open returned no project");
-  return { project: project.project, warnings: project.warnings, summary };
+  if (!project) throw new api.ApiError("internal", "the project open returned no project");
+  return { project: project.project, warnings: project.warnings, compareOpened: project.compareOpened, summary };
 }
 
 /** Runs a background job behind the veil, then hands its summary to `adopt`. A failure or a cancel is reported, not thrown. */

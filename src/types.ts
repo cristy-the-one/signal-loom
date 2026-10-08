@@ -21,6 +21,9 @@ export interface Summary {
   mapMatch: { matched: number; total: number } | null;
 }
 
+/** What went wrong, as the engine reports it on both transports. */
+export type ErrorKind = "not_found" | "invalid" | "parse" | "binary" | "cancelled" | "io" | "internal";
+
 export interface IndexStatus {
   running: boolean;
   done: boolean;
@@ -31,8 +34,10 @@ export interface IndexStatus {
   skipped: number;
   summary?: Summary;
   /** Set when the finished job opened a project: the project as loaded and what could not be opened. */
-  project?: { project: ProjectFile; warnings: string[] };
+  project?: { project: ProjectFile; warnings: string[]; compareOpened: boolean };
   error?: string;
+  /** Set with `error`: `cancelled` when the user stopped the job. */
+  errorKind?: ErrorKind;
 }
 
 export interface SignalInfo {
@@ -153,6 +158,8 @@ export interface ProjectOpen {
   project: ProjectFile;
   summary: Summary;
   warnings: string[];
+  /** Whether the project's compare log is open; the warnings say why not. */
+  compareOpened: boolean;
 }
 
 export interface Query {

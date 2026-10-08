@@ -50,7 +50,7 @@ impl IndexedLog {
             total <= MAX_WINDOW_SAMPLES
         })?;
         if total > MAX_WINDOW_SAMPLES {
-            return Err(Error::msg(format!(
+            return Err(Error::invalid(format!(
                 "that window holds more than {MAX_WINDOW_SAMPLES} samples. Narrow it and try again"
             )));
         }
@@ -85,7 +85,9 @@ impl IndexedLog {
             true
         })?;
         if count == 0 {
-            return Err(Error::msg(format!("no samples of {name} in that window")));
+            return Err(Error::invalid(format!(
+                "no samples of {name} in that window"
+            )));
         }
         Ok(crate::dto::WindowStats {
             count,

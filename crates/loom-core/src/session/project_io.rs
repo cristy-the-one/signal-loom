@@ -88,7 +88,7 @@ impl Session {
         let (mut project, mut warnings) = ProjectFile::read(text)?;
 
         if project::is_network_path(&project.log_path) {
-            return Err(Error::msg(format!(
+            return Err(Error::invalid(format!(
                 "this project names a network path for its log ({}). Projects do not \
                  follow network paths; open the log with Open, then save the project again.",
                 project.log_path.trim()
@@ -153,12 +153,12 @@ impl Session {
                 )
             }
             LogLoad::Missing(stored) => {
-                return Err(Error::msg(format!(
+                return Err(Error::not_found(format!(
                     "project log not found: {stored}. Open the log, then save the project again."
                 )));
             }
             LogLoad::NoBase(stored) => {
-                return Err(Error::msg(format!(
+                return Err(Error::invalid(format!(
                     "project log {stored} is a relative path and this project has no folder to resolve it against. Open the log, then save the project again."
                 )));
             }
@@ -186,6 +186,7 @@ impl Session {
         self.deck
             .load(project.math.clone(), project.triggers.clone());
         self.compare = Compare::named(stored, project.compare_offset_us);
+        let compare_opened = compare_log.is_some();
         if let Some(log) = compare_log {
             self.compare.replace_log(log);
         }
@@ -194,6 +195,7 @@ impl Session {
             project,
             summary: self.summary()?,
             warnings,
+            compare_opened,
         })
     }
 
@@ -211,7 +213,7 @@ impl Session {
         let problems = project.validate(self.log.as_ref());
         if !problems.is_empty() {
             let list: Vec<String> = problems.iter().map(ToString::to_string).collect();
-            return Err(Error::msg(format!(
+            return Err(Error::invalid(format!(
                 "this project would not load cleanly, so it was not saved. {}",
                 list.join("; ")
             )));
@@ -477,6 +479,43 @@ mod tests {
         assert!(session.project_json(&empty_view()).is_err());
         assert!(!dir.join("none.loom").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_project_open_fails_with_the_kind_of_its_problem() {
+        let kind = |text: &str| {
+            Session::new()
+                .load_project_json(text, Some(&fixtures()))
+                .unwrap_err()
+                .kind()
+        };
+        assert_eq!(kind("{ not json"), crate::ErrorKind::Invalid);
+        let missing = cluster_project(serde_json::json!({ "logPath": "no_such_drive.slog" }));
+        assert_eq!(kind(&missing), crate::ErrorKind::NotFound);
+        let network = cluster_project(serde_json::json!({ "logPath": "//server/share/a.slog" }));
+        assert_eq!(kind(&network), crate::ErrorKind::Invalid);
+        let err = Session::new()
+            .load_project_file(&fixtures().join("no_such.loom"))
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn an_opened_project_says_whether_its_compare_log_opened() {
+        let open = |extra: serde_json::Value| {
+            Session::new()
+                .load_project_json(&cluster_project(extra), Some(&fixtures()))
+                .unwrap()
+        };
+        assert!(!open(serde_json::json!({})).compare_opened);
+        let opened = open(serde_json::json!({ "comparePath": "cluster_drive.slog" }));
+        assert!(opened.compare_opened);
+        assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+        let missing = open(serde_json::json!({ "comparePath": "no_such_compare.slog" }));
+        assert!(!missing.compare_opened);
+        assert_eq!(missing.warnings.len(), 1);
+        let network = open(serde_json::json!({ "comparePath": "//server/share/b.slog" }));
+        assert!(!network.compare_opened);
     }
 
     #[test]

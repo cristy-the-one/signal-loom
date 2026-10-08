@@ -113,7 +113,7 @@ impl IndexedLog {
             scan_framed(&source, format, map, timeout, control)?
         };
         if built.frame_count == 0 {
-            return Err(Error::msg(
+            return Err(Error::invalid(
                 "log has no frames. Signal Loom needs at least one sample row.",
             ));
         }

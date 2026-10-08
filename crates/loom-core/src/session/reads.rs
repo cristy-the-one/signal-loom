@@ -108,7 +108,9 @@ fn series_dto(series: Series) -> SeriesDto {
 
 fn stats_of_points(name: &str, series: &Series) -> Result<WindowStats> {
     if series.points.is_empty() {
-        return Err(Error::msg(format!("no samples of {name} in that window")));
+        return Err(Error::invalid(format!(
+            "no samples of {name} in that window"
+        )));
     }
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;

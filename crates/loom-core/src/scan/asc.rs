@@ -334,10 +334,9 @@ fn clock_before(
 ) -> Result<Option<u64>> {
     reader
         .seek(SeekFrom::Start(offset))
-        .map_err(|err| Error::msg(format!("could not seek log: {err}")))?;
+        .map_err(|err| Error::io("could not seek log", err))?;
     let mut head = [0u8; STAMP_PEEK];
-    let n = read_retrying(reader, &mut head)
-        .map_err(|err| Error::msg(format!("read failed: {err}")))?;
+    let n = read_retrying(reader, &mut head).map_err(|err| Error::io("read failed", err))?;
     let text = String::from_utf8_lossy(&head[..n]);
     // A second field proves the first was not cut off by the end of the peek.
     let mut fields = text.split_whitespace();

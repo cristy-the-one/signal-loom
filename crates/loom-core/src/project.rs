@@ -60,10 +60,12 @@ impl MathChannel {
     pub(crate) fn validate(&self, channels: &[MathChannel]) -> Result<()> {
         let name = self.name.trim();
         if name.is_empty() || name.len() > 64 {
-            return Err(Error::msg("math channel name must be 1 to 64 characters"));
+            return Err(Error::invalid(
+                "math channel name must be 1 to 64 characters",
+            ));
         }
         if name.ends_with(" · B") {
-            return Err(Error::msg(
+            return Err(Error::invalid(
                 "math channel names cannot end with the compare suffix",
             ));
         }
@@ -81,7 +83,7 @@ pub(crate) fn compile_math(channels: &[MathChannel], channel: &MathChannel) -> R
         .iter()
         .find(|dep| channels.iter().any(|other| other.name == **dep))
     {
-        return Err(Error::msg(format!(
+        return Err(Error::invalid(format!(
             "math channel {} uses math channel {dep}. A math channel can only use signals from the log, so write the expression of {dep} into it",
             channel.name
         )));
@@ -138,7 +140,7 @@ impl ThresholdTrigger {
     /// cannot be looked up and only the level is checked.
     pub(crate) fn validate(&self, log: Option<&IndexedLog>, math: &[MathChannel]) -> Result<()> {
         if !self.value.is_finite() {
-            return Err(Error::msg("trigger level must be finite"));
+            return Err(Error::invalid("trigger level must be finite"));
         }
         if log.is_some_and(|log| !log.has_signal(&self.signal)) {
             let why = if math.iter().any(|channel| channel.name == self.signal) {
@@ -146,7 +148,10 @@ impl ThresholdTrigger {
             } else {
                 "no such signal in this log"
             };
-            return Err(Error::msg(format!("trigger signal {}: {why}", self.signal)));
+            return Err(Error::invalid(format!(
+                "trigger signal {}: {why}",
+                self.signal
+            )));
         }
         Ok(())
     }
@@ -244,12 +249,12 @@ impl ProjectFile {
     /// timeout are usable is `validate`'s question.
     pub fn parse(text: &str) -> Result<Self> {
         let mut project: Self = serde_json::from_str(text)
-            .map_err(|err| Error::msg(format!("project file is not valid JSON: {err}")))?;
+            .map_err(|err| Error::invalid(format!("project file is not valid JSON: {err}")))?;
         project
             .cluster
             .retain(|slot, signal| keeps_cluster_slot(slot, signal));
         if let Some(problem) = project.shape_problems().into_iter().next() {
-            return Err(Error::msg(problem.reason));
+            return Err(Error::invalid(problem.reason));
         }
         project
             .bookmarks
@@ -269,7 +274,7 @@ impl ProjectFile {
 
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string_pretty(self)
-            .map_err(|err| Error::msg(format!("could not encode project: {err}")))
+            .map_err(|err| Error::internal(format!("could not encode project: {err}")))
     }
 
     /// The timeout to index with: the project's, or the default when it has
@@ -424,7 +429,7 @@ pub fn write_project(path: &Path, project: &ProjectFile, log: Option<&IndexedLog
     let problems = project.validate(log);
     if !problems.is_empty() {
         let list: Vec<String> = problems.iter().map(Problem::to_string).collect();
-        return Err(Error::msg(format!(
+        return Err(Error::invalid(format!(
             "this project would not load cleanly, so it was not saved. {}",
             list.join("; ")
         )));
@@ -442,13 +447,13 @@ pub fn write_as(path: &Path, extension: &str, text: &str) -> Result<()> {
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
     {
-        return Err(Error::msg(format!(
+        return Err(Error::invalid(format!(
             "this file is saved only as a .{extension} file"
         )));
     }
     let name = path
         .file_name()
-        .ok_or_else(|| Error::msg("this file has no name"))?;
+        .ok_or_else(|| Error::invalid("this file has no name"))?;
     let temp = path.with_file_name(format!(
         ".{}.{}.tmp",
         name.to_string_lossy(),
@@ -480,7 +485,7 @@ pub fn read_text_capped(path: &Path, cap: u64, what: &str) -> Result<String> {
         .map_err(|err| Error::read(path, err))?
         .len();
     if len > cap {
-        return Err(Error::msg(format!(
+        return Err(Error::invalid(format!(
             "{} is {} MB; a {what} is at most {} MB",
             path.display(),
             len / (1024 * 1024),

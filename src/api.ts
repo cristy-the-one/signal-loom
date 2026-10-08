@@ -5,6 +5,7 @@ import type {
   ProjectView,
   Query,
   Series,
+  ErrorKind,
   IndexStatus,
   Summary,
   ThresholdTrigger,
@@ -16,29 +17,70 @@ export function inTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+/** A failure from the engine on either transport: what went wrong, and the text to show. */
+export class ApiError extends Error {
+  readonly kind: ErrorKind;
+
+  constructor(kind: ErrorKind, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.kind = kind;
+  }
+}
+
+const ERROR_KINDS: readonly string[] = ["not_found", "invalid", "parse", "binary", "cancelled", "io", "internal"];
+
+function isErrorBody(value: unknown): value is { kind: ErrorKind; message: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    typeof value.kind === "string" &&
+    ERROR_KINDS.includes(value.kind) &&
+    "message" in value &&
+    typeof value.message === "string"
+  );
+}
+
+/**
+ * The one place a transport failure becomes an `ApiError`. The engine sends `{kind, message}`
+ * (the Tauri rejection value, or the body of an HTTP error); anything else is Tauri's own text.
+ */
+function toApiError(raw: unknown): ApiError {
+  if (raw instanceof ApiError) return raw;
+  if (isErrorBody(raw)) return new ApiError(raw.kind, raw.message);
+  if (typeof raw === "string") return new ApiError("internal", raw);
+  if (raw instanceof Error) return new ApiError("internal", raw.message);
+  return new ApiError("internal", "Something went wrong");
+}
+
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: call } = await import("@tauri-apps/api/core");
-  return call<T>(command, args);
+  try {
+    return await call<T>(command, args);
+  } catch (err) {
+    throw toApiError(err);
+  }
 }
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init);
-  const text = await res.text();
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(path, init);
+    text = await res.text();
+  } catch (err) {
+    throw new ApiError("io", err instanceof Error ? err.message : "Could not reach the engine");
+  }
   let data: unknown = null;
   if (text) {
     try {
       data = JSON.parse(text) as unknown;
     } catch {
-      data = { error: text };
+      data = text;
     }
   }
-  if (!res.ok) {
-    const message =
-      data && typeof data === "object" && "error" in data && typeof data.error === "string"
-        ? data.error
-        : res.statusText;
-    throw new Error(message);
-  }
+  if (!res.ok) throw toApiError(isErrorBody(data) ? data : text || res.statusText);
   return data as T;
 }
 
@@ -320,7 +362,7 @@ export function saveSlog(path: string, t0Us: number, t1Us: number): Promise<Save
 
 /** Desktop: the engine writes the project to `path`, composing the deck from its own state and `view`. */
 export function writeProject(path: string, view: ProjectView): Promise<void> {
-  if (!inTauri()) return Promise.reject(new Error("Saving to a path needs the desktop app."));
+  if (!inTauri()) return Promise.reject(new ApiError("invalid", "Saving to a path needs the desktop app."));
   return invoke<void>("write_project", { path, view });
 }
 

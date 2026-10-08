@@ -27,7 +27,7 @@ impl TimeoutFactor {
         if factor.is_finite() && (Self::MIN..=Self::MAX).contains(&factor) {
             return Ok(Self(factor));
         }
-        Err(Error::msg(format!(
+        Err(Error::invalid(format!(
             "timeout must be between {} and {} cycle times",
             Self::MIN,
             Self::MAX
@@ -74,16 +74,16 @@ pub struct MappedSignal {
 impl SignalMap {
     pub fn parse(text: &str) -> Result<Self> {
         let raw: RawMap = serde_json::from_str(text)
-            .map_err(|err| Error::msg(format!("signal map is not valid JSON: {err}")))?;
+            .map_err(|err| Error::invalid(format!("signal map is not valid JSON: {err}")))?;
         if raw.version != 1 {
-            return Err(Error::msg(format!(
+            return Err(Error::invalid(format!(
                 "signal map version {} is not supported (expected 1)",
                 raw.version
             )));
         }
         let name = raw.name.trim();
         if name.is_empty() {
-            return Err(Error::msg("signal map is missing a name"));
+            return Err(Error::invalid("signal map is missing a name"));
         }
         let mut signals = Vec::new();
         let mut seen = HashSet::new();
@@ -91,17 +91,17 @@ impl SignalMap {
             let message_name = message.name.trim().to_string();
             let message_id = message.id;
             if message_name.is_empty() {
-                return Err(Error::msg("a message in the signal map has no name"));
+                return Err(Error::invalid("a message in the signal map has no name"));
             }
             for signal in &message.signals {
                 let signal_name = signal.name.trim().to_string();
                 if signal_name.is_empty() {
-                    return Err(Error::msg(format!(
+                    return Err(Error::invalid(format!(
                         "message {message_name} has a signal with no name"
                     )));
                 }
                 if !seen.insert(signal_name.clone()) {
-                    return Err(Error::msg(format!(
+                    return Err(Error::invalid(format!(
                         "signal map has two signals named {signal_name}"
                     )));
                 }
@@ -117,8 +117,9 @@ impl SignalMap {
                     signed: signal.signed,
                     endian,
                 };
-                spec.validate()
-                    .map_err(|message| Error::msg(format!("signal {signal_name}: {message}")))?;
+                spec.validate().map_err(|message| {
+                    Error::invalid(format!("signal {signal_name}: {message}"))
+                })?;
                 signals.push(MappedSignal {
                     name: signal_name,
                     unit: signal.unit.clone(),
@@ -137,7 +138,7 @@ impl SignalMap {
             }
         }
         if signals.is_empty() {
-            return Err(Error::msg("signal map has no signals"));
+            return Err(Error::invalid("signal map has no signals"));
         }
         let messages = raw
             .messages

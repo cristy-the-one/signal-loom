@@ -18,7 +18,7 @@ type Window = (Vec<(u64, [u8; 16])>, bool);
 /// A DLC 0 frame has no payload token, which the SLOG reader reads as DLC 0.
 pub fn frame_line(t_us: u64, frame: &[u8]) -> Result<String> {
     if frame.len() < 16 {
-        return Err(Error::msg("CAN frame is shorter than 16 bytes"));
+        return Err(Error::invalid("CAN frame is shorter than 16 bytes"));
     }
     let id = u32::from_le_bytes(frame[0..4].try_into().unwrap()) & 0x1FFF_FFFF;
     let dlc = frame[4].min(8);
@@ -38,10 +38,12 @@ pub fn capture_slog(
     control: Option<&IndexControl>,
 ) -> Result<String> {
     if !(1..=30_000).contains(&duration_ms) {
-        return Err(Error::msg("capture length must be between 1 ms and 30 s"));
+        return Err(Error::invalid(
+            "capture length must be between 1 ms and 30 s",
+        ));
     }
     if !valid_iface(iface) {
-        return Err(Error::msg(
+        return Err(Error::invalid(
             "interface name must be a short Linux device name, such as can0 or vcan0",
         ));
     }
@@ -50,7 +52,7 @@ pub fn capture_slog(
     }
     let (frames, capped) = read_only(iface, Duration::from_millis(duration_ms), control)?;
     if frames.is_empty() {
-        return Err(Error::msg(format!(
+        return Err(Error::invalid(format!(
             "no CAN frames on {iface} in {duration_ms} ms. The socket was read-only."
         )));
     }
@@ -89,7 +91,9 @@ fn read_only(iface: &str, duration: Duration, control: Option<&IndexControl>) ->
 
 #[cfg(not(target_os = "linux"))]
 fn read_only(_iface: &str, _duration: Duration, _control: Option<&IndexControl>) -> Result<Window> {
-    Err(Error::msg("SocketCAN capture is only available on Linux"))
+    Err(Error::invalid(
+        "SocketCAN capture is only available on Linux",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -100,10 +104,10 @@ unsafe fn read_only_fd(
 ) -> Result<Window> {
     let fd = unsafe { libc::socket(libc::AF_CAN, libc::SOCK_RAW, libc::CAN_RAW) };
     if fd < 0 {
-        return Err(Error::msg(format!(
-            "could not open a read-only CAN socket: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(Error::io(
+            "could not open a read-only CAN socket",
+            std::io::Error::last_os_error(),
+        ));
     }
     let _guard = Close(fd);
     let index = if_index(fd, iface)?;
@@ -118,10 +122,10 @@ unsafe fn read_only_fd(
         )
     };
     if bound != 0 {
-        return Err(Error::msg(format!(
-            "could not bind {iface} read-only: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(Error::io(
+            format!("could not bind {iface} read-only"),
+            std::io::Error::last_os_error(),
+        ));
     }
     let timeout = libc::timeval {
         tv_sec: 0,
@@ -137,10 +141,10 @@ unsafe fn read_only_fd(
         )
     };
     if timed != 0 {
-        return Err(Error::msg(format!(
-            "could not set a read timeout on {iface}: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(Error::io(
+            format!("could not set a read timeout on {iface}"),
+            std::io::Error::last_os_error(),
+        ));
     }
     let start = std::time::Instant::now();
     let mut frames = Vec::new();
@@ -149,7 +153,7 @@ unsafe fn read_only_fd(
         if let Some(control) = control {
             control
                 .observe(start.elapsed().as_millis() as u64, frames.len() as u64, 0)
-                .map_err(|_| Error::msg("capture cancelled"))?;
+                .map_err(|_| Error::cancelled("capture cancelled"))?;
         }
         if frames.len() >= MAX_FRAMES {
             capped = true;
@@ -167,7 +171,7 @@ unsafe fn read_only_fd(
             if err.raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
-            return Err(Error::msg(format!("CAN read failed: {err}")));
+            return Err(Error::io("CAN read failed", err));
         }
         if n >= 16 {
             let t_us = start.elapsed().as_micros() as u64;
@@ -186,10 +190,10 @@ fn if_index(fd: i32, iface: &str) -> Result<i32> {
     }
     let rc = unsafe { libc::ioctl(fd, libc::SIOCGIFINDEX, &mut req) };
     if rc < 0 {
-        return Err(Error::msg(format!(
-            "interface {iface} is not available: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(Error::io(
+            format!("interface {iface} is not available"),
+            std::io::Error::last_os_error(),
+        ));
     }
     Ok(unsafe { req.ifr_ifru.ifru_ifindex })
 }

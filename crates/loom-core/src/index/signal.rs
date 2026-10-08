@@ -74,7 +74,7 @@ impl IndexedLog {
     /// `resolve_signal`, or the error a read of an unknown signal reports.
     pub(super) fn require_signal(&self, name: &str) -> Result<usize> {
         self.resolve_signal(name)
-            .ok_or_else(|| Error::msg(format!("no signal named {name}")))
+            .ok_or_else(|| Error::not_found(format!("no signal named {name}")))
     }
 }
 

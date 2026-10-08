@@ -46,11 +46,11 @@ impl<'a> BlfReader<'a> {
 
     fn read_file_header(&mut self) -> Result<()> {
         if &self.src.read_array::<4>()? != blf::FILE_MAGIC {
-            return Err(Error::msg("BLF is missing the LOGG header"));
+            return Err(Error::invalid("BLF is missing the LOGG header"));
         }
         let size = u32::from_le_bytes(self.src.read_array()?) as usize;
         if !(FILE_HEADER_MIN..=FILE_HEADER_MAX).contains(&size) {
-            return Err(Error::msg("BLF header size is not usable"));
+            return Err(Error::invalid("BLF header size is not usable"));
         }
         self.object.resize(size - FILE_HEADER_MIN, 0);
         self.src.read_exact(&mut self.object)

@@ -38,7 +38,9 @@ pub fn compile(expr: &str) -> Result<Compiled> {
     let root = parser.parse_expr()?;
     parser.skip();
     if parser.pos != parser.bytes.len() {
-        return Err(Error::msg(format!("could not parse the rest of '{expr}'")));
+        return Err(Error::invalid(format!(
+            "could not parse the rest of '{expr}'"
+        )));
     }
     Ok(Compiled {
         root,
@@ -190,7 +192,7 @@ impl<'a> Parser<'a> {
             let node = self.parse_expr()?;
             self.skip();
             if self.peek() != Some(b')') {
-                return Err(Error::msg("math expression is missing ')'"));
+                return Err(Error::invalid("math expression is missing ')'"));
             }
             self.pos += 1;
             return Ok(node);
@@ -214,20 +216,20 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_expr()?;
                 self.skip();
                 if self.peek() != Some(b',') {
-                    return Err(Error::msg("lp(signal, alpha) needs a comma"));
+                    return Err(Error::invalid("lp(signal, alpha) needs a comma"));
                 }
                 self.pos += 1;
                 let alpha = match self.parse_unary()? {
                     Node::Num(value) => value,
-                    _ => return Err(Error::msg("lp alpha must be a number")),
+                    _ => return Err(Error::invalid("lp alpha must be a number")),
                 };
                 if !(0.0..=1.0).contains(&alpha) {
-                    return Err(Error::msg("lp alpha must be between 0 and 1"));
+                    return Err(Error::invalid("lp alpha must be between 0 and 1"));
                 }
                 self.expect_close()?;
                 return Ok(Node::Lp(Box::new(inner), alpha));
             }
-            return Err(Error::msg(format!(
+            return Err(Error::invalid(format!(
                 "unknown function {name}. Use abs or lp."
             )));
         }
@@ -252,9 +254,9 @@ impl<'a> Parser<'a> {
         let text = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap_or("");
         let value: f64 = text
             .parse()
-            .map_err(|_| Error::msg(format!("bad number '{text}'")))?;
+            .map_err(|_| Error::invalid(format!("bad number '{text}'")))?;
         if !value.is_finite() {
-            return Err(Error::msg("numbers must be finite"));
+            return Err(Error::invalid("numbers must be finite"));
         }
         Ok(Node::Num(value))
     }
@@ -262,10 +264,10 @@ impl<'a> Parser<'a> {
     fn parse_ident(&mut self) -> Result<String> {
         let start = self.pos;
         let Some(first) = self.peek() else {
-            return Err(Error::msg("math expression ended early"));
+            return Err(Error::invalid("math expression ended early"));
         };
         if !(first.is_ascii_alphabetic() || first == b'_') {
-            return Err(Error::msg("expected a signal name"));
+            return Err(Error::invalid("expected a signal name"));
         }
         self.pos += 1;
         while self
@@ -282,7 +284,7 @@ impl<'a> Parser<'a> {
     fn expect_close(&mut self) -> Result<()> {
         self.skip();
         if self.peek() != Some(b')') {
-            return Err(Error::msg("math expression is missing ')'"));
+            return Err(Error::invalid("math expression is missing ')'"));
         }
         self.pos += 1;
         Ok(())

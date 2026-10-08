@@ -53,7 +53,7 @@ impl IndexedLog {
         cap: usize,
     ) -> Result<Export> {
         if names.is_empty() {
-            return Err(Error::msg("export needs at least one signal"));
+            return Err(Error::invalid("export needs at least one signal"));
         }
         let (t0, t1) = ordered_range(t0_us, t1_us);
         let mut indexes = Vec::new();
@@ -91,7 +91,7 @@ impl IndexedLog {
             true
         })?;
         if rows == 0 {
-            return Err(Error::msg("that window has no samples to export"));
+            return Err(Error::invalid("that window has no samples to export"));
         }
         if truncated {
             out.push_str(&truncation_note(cap));
@@ -134,7 +134,7 @@ impl IndexedLog {
             true
         })?;
         if rows == 0 {
-            return Err(Error::msg("that window has no frames to export"));
+            return Err(Error::invalid("that window has no frames to export"));
         }
         if truncated {
             out.push_str(&truncation_note(cap));
