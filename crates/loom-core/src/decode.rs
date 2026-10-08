@@ -44,8 +44,13 @@ impl DecodeSpec {
         Ok(())
     }
 
+    /// The unsigned field bits, before sign, factor and offset.
+    pub fn raw(self, data: &[u8]) -> u64 {
+        extract_bits(data, self.start_bit, self.bit_length, self.endian)
+    }
+
     pub fn decode(self, data: &[u8]) -> f64 {
-        let raw = extract_bits(data, self.start_bit, self.bit_length, self.endian);
+        let raw = self.raw(data);
         let raw = if self.signed {
             sign_extend(raw, self.bit_length) as f64
         } else {
@@ -56,13 +61,7 @@ impl DecodeSpec {
 
     /// The raw multiplexer value. `VAL_` and mux ids name raw values, not scaled ones.
     pub fn switch_value(self, data: &[u8]) -> Option<u32> {
-        u32::try_from(extract_bits(
-            data,
-            self.start_bit,
-            self.bit_length,
-            self.endian,
-        ))
-        .ok()
+        u32::try_from(self.raw(data)).ok()
     }
 
     /// The raw integer behind a decoded value, for `VAL_` lookups.

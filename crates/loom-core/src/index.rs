@@ -1,4 +1,4 @@
-use crate::decode::DecodeSpec;
+use crate::decode::{DecodeSpec, Endian};
 use crate::error::{Error, Result};
 use crate::map::SignalMap;
 use crate::scan::{hex_payload, sniff, FrameData, LogFormat, ReadSeek, Rec, RecKind, Scanner};
@@ -96,6 +96,43 @@ impl Source {
     }
 }
 
+/// What a signal does for frame integrity, decided once from its name and layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Integrity {
+    None,
+    /// An 8-bit signal that is exactly one payload byte.
+    Checksum {
+        byte: usize,
+    },
+    /// A rolling counter of `bits` raw bits.
+    Counter {
+        bits: u16,
+    },
+}
+
+impl Integrity {
+    fn classify(name: &str, spec: &DecodeSpec) -> Self {
+        let name = name.to_ascii_lowercase();
+        if name.contains("checksum") && spec.bit_length == 8 {
+            let aligned = match spec.endian {
+                Endian::Little => spec.start_bit.is_multiple_of(8),
+                Endian::Big => spec.start_bit % 8 == 7,
+            };
+            if aligned {
+                return Self::Checksum {
+                    byte: usize::from(spec.start_bit / 8),
+                };
+            }
+        }
+        if name.contains("counter") {
+            return Self::Counter {
+                bits: spec.bit_length,
+            };
+        }
+        Self::None
+    }
+}
+
 #[derive(Clone)]
 struct SignalMeta {
     name: String,
@@ -109,6 +146,7 @@ struct SignalMeta {
     mux_switch: bool,
     mux_value: Option<u32>,
     table: Vec<(i64, String)>,
+    integrity: Integrity,
 }
 
 #[derive(Clone)]
@@ -999,6 +1037,7 @@ fn scan_framed(
                 mux_switch: mapped.mux_switch,
                 mux_value: mapped.mux_value,
                 table: mapped.table.clone(),
+                integrity: Integrity::classify(&mapped.name, &mapped.spec),
             });
         }
     }
@@ -1077,7 +1116,7 @@ fn scan_framed(
                             id: *id,
                             dlc: *dlc,
                             data,
-                            held: &held,
+                            decoded: &pending,
                         },
                     );
                     built.seen_ids.insert(*id);
@@ -1204,6 +1243,7 @@ fn ensure_signal(built: &mut Built, name: &str, unit: &str) -> usize {
         mux_switch: false,
         mux_value: None,
         table: Vec::new(),
+        integrity: Integrity::None,
     });
     for snap in &mut built.snapshots {
         snap.push(None);
@@ -1250,7 +1290,8 @@ struct IntegrityFrame<'a> {
     id: u32,
     dlc: u8,
     data: &'a [u8],
-    held: &'a [Option<f64>],
+    /// Signals decoded from this frame.
+    decoded: &'a [(usize, f64)],
 }
 
 fn note_integrity(
@@ -1276,55 +1317,49 @@ fn note_integrity(
         }
         last_seen.insert(frame.id, frame.t_us);
     }
-    let Some(indices) = built.msg_index.get(&frame.id).cloned() else {
+    let Some(indices) = built.msg_index.get(&frame.id) else {
         return;
     };
     // Checksums first, as an ECU checks them: a frame that fails its checksum
     // is rejected, so its counter neither raises an event nor moves the reference.
-    let mut corrupt = false;
-    for &idx in &indices {
-        let Some(spec) = built.signals[idx].spec else {
+    let width = (frame.dlc as usize).min(frame.data.len());
+    let mut labels: Vec<String> = Vec::new();
+    for &idx in indices {
+        let signal = &built.signals[idx];
+        let Integrity::Checksum { byte } = signal.integrity else {
             continue;
         };
-        let lname = built.signals[idx].name.to_ascii_lowercase();
-        if lname.contains("checksum") && spec.bit_length == 8 {
-            let byte = (spec.start_bit / 8) as usize;
-            let width = (frame.dlc as usize).min(frame.data.len());
-            if byte < width {
-                if let Some(algo) = checksums.get(&idx) {
-                    let covered = covered_bytes(frame.data, width, byte);
-                    if algo.compute(&covered) != frame.data[byte] {
-                        corrupt = true;
-                        let name = built.signals[idx].name.clone();
-                        note_event(built, frame.t_us, &format!("Checksum {name}"));
-                    }
-                }
+        if byte >= width {
+            continue;
+        }
+        if let Some(algo) = checksums.get(&idx) {
+            if algo.compute_iter(covered_bytes(frame.data, width, byte)) != frame.data[byte] {
+                labels.push(format!("Checksum {}", signal.name));
             }
         }
     }
-    if corrupt {
-        return;
-    }
-    for &idx in &indices {
-        let Some(spec) = built.signals[idx].spec else {
-            continue;
-        };
-        let lname = built.signals[idx].name.to_ascii_lowercase();
-        if lname.contains("counter") {
-            if let Some(value) = frame.held.get(idx).copied().flatten() {
-                let bits = u32::from(spec.bit_length.min(16));
-                let modulus = 1u64 << bits;
-                let raw = value.round().clamp(0.0, (modulus - 1) as f64) as u64;
-                if let Some(prev) = last_counter.get(&idx).copied() {
-                    let expect = (prev + 1) % modulus;
-                    if raw != expect {
-                        let name = built.signals[idx].name.clone();
-                        note_event(built, frame.t_us, &format!("Counter {name}"));
-                    }
+    if labels.is_empty() {
+        for &(idx, _) in frame.decoded {
+            let signal = &built.signals[idx];
+            let (Integrity::Counter { bits }, Some(spec)) = (signal.integrity, signal.spec) else {
+                continue;
+            };
+            let mask = if bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            };
+            let raw = spec.raw(frame.data);
+            if let Some(prev) = last_counter.get(&idx).copied() {
+                if raw != prev.wrapping_add(1) & mask {
+                    labels.push(format!("Counter {}", signal.name));
                 }
-                last_counter.insert(idx, raw);
             }
+            last_counter.insert(idx, raw);
         }
+    }
+    for label in labels {
+        note_event(built, frame.t_us, &label);
     }
 }
 
@@ -1344,17 +1379,22 @@ impl ChecksumAlgo {
     /// XOR first: it is what a mostly-good short log falls back to.
     const ALL: [ChecksumAlgo; 4] = [Self::Xor, Self::Sum, Self::CrcJ1850, Self::Crc8H2F];
 
+    #[cfg(test)]
     pub(crate) fn compute(self, bytes: &[u8]) -> u8 {
+        self.compute_iter(bytes.iter().copied())
+    }
+
+    fn compute_iter(self, bytes: impl Iterator<Item = u8>) -> u8 {
         match self {
-            Self::Xor => bytes.iter().fold(0, |acc, byte| acc ^ byte),
-            Self::Sum => bytes.iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte)),
+            Self::Xor => bytes.fold(0, |acc, byte| acc ^ byte),
+            Self::Sum => bytes.fold(0u8, |acc, byte| acc.wrapping_add(byte)),
             Self::CrcJ1850 => crc8(bytes, 0x1D),
             Self::Crc8H2F => crc8(bytes, 0x2F),
         }
     }
 }
 
-fn crc8(bytes: &[u8], poly: u8) -> u8 {
+fn crc8(bytes: impl Iterator<Item = u8>, poly: u8) -> u8 {
     let mut crc = 0xFFu8;
     for byte in bytes {
         crc ^= byte;
@@ -1374,11 +1414,16 @@ const CHECKSUM_PROBE: usize = 16;
 /// The pre-pass stops here even if a checksum message never shows up.
 const CHECKSUM_PROBE_RECORDS: u64 = 200_000;
 
-fn covered_bytes(data: &[u8], width: usize, checksum_byte: usize) -> Vec<u8> {
-    (0..width)
-        .filter(|&i| i != checksum_byte)
-        .map(|i| data[i])
-        .collect()
+fn covered_bytes(
+    data: &[u8],
+    width: usize,
+    checksum_byte: usize,
+) -> impl Iterator<Item = u8> + Clone + '_ {
+    data[..width]
+        .iter()
+        .enumerate()
+        .filter(move |&(i, _)| i != checksum_byte)
+        .map(|(_, &byte)| byte)
 }
 
 /// A DBC names checksum signals but not their scheme. Read the start of the
@@ -1395,10 +1440,7 @@ fn probe_checksums(
         .signals
         .iter()
         .enumerate()
-        .filter(|(_, signal)| {
-            signal.name.to_ascii_lowercase().contains("checksum")
-                && signal.spec.is_some_and(|spec| spec.bit_length == 8)
-        })
+        .filter(|(_, signal)| matches!(signal.integrity, Integrity::Checksum { .. }))
         .map(|(idx, _)| (idx, Vec::new()))
         .collect();
     if seen.is_empty() {
@@ -1425,10 +1467,9 @@ fn probe_checksums(
             else {
                 continue;
             };
-            let Some(spec) = built.signals[*idx].spec else {
+            let Integrity::Checksum { byte } = built.signals[*idx].integrity else {
                 continue;
             };
-            let byte = usize::from(spec.start_bit / 8);
             if byte >= width {
                 continue;
             }
@@ -1436,7 +1477,7 @@ fn probe_checksums(
             let mask = ChecksumAlgo::ALL
                 .iter()
                 .enumerate()
-                .filter(|(_, algo)| algo.compute(&covered) == data[byte])
+                .filter(|(_, algo)| algo.compute_iter(covered.clone()) == data[byte])
                 .fold(0u8, |mask, (bit, _)| mask | 1 << bit);
             masks.push(mask);
         }
@@ -1727,5 +1768,90 @@ mod tests {
         assert_eq!(points("Speed"), vec![(1000, 7.0), (2000, 9.0)]);
         assert_eq!(points("RPM"), vec![(1000, 800.0)]);
         assert_eq!(points("Oil"), Vec::<(u64, f64)>::new());
+    }
+
+    fn bytes_hex(data: &[u8]) -> String {
+        data.iter().map(|byte| format!("{byte:02X}")).collect()
+    }
+
+    fn events_of(dbc: &str, frames: &[Vec<u8>]) -> (Vec<String>, Vec<String>) {
+        let map = crate::dbc::parse(dbc).unwrap();
+        let mut text = String::new();
+        for (i, frame) in frames.iter().enumerate() {
+            text.push_str(&format!("F {} 100 {}\n", i * 10_000, bytes_hex(frame)));
+        }
+        let log = IndexedLog::open_bytes(text.into_bytes(), Some(&map)).unwrap();
+        let events = log
+            .events()
+            .iter()
+            .map(|(_, label)| label.clone())
+            .collect();
+        (events, log.warnings().to_vec())
+    }
+
+    #[test]
+    fn a_scaled_counter_is_checked_on_its_raw_bits() {
+        let dbc = "BO_ 256 Msg: 1 ECU\n SG_ Counter : 0|8@1+ (0.5,10) [0|255] \"\" X\n";
+        let steady: Vec<Vec<u8>> = (0..20u8).map(|i| vec![i]).collect();
+        assert_eq!(events_of(dbc, &steady).0, Vec::<String>::new());
+        let skipping: Vec<Vec<u8>> = [0u8, 1, 2, 4, 5, 6].iter().map(|&i| vec![i]).collect();
+        assert_eq!(events_of(dbc, &skipping).0, vec!["Counter Counter"]);
+    }
+
+    #[test]
+    fn a_wide_counter_wraps_at_its_own_width() {
+        let dbc = "BO_ 256 Msg: 3 ECU\n SG_ Counter : 0|20@1+ (1,0) [0|1048575] \"\" X\n";
+        let frame = |value: u32| value.to_le_bytes()[..3].to_vec();
+        let wrap: Vec<Vec<u8>> = [0xFFFFE, 0xFFFFF, 0, 1].map(frame).to_vec();
+        assert_eq!(events_of(dbc, &wrap).0, Vec::<String>::new());
+        let skip: Vec<Vec<u8>> = [0xFFFFE, 0xFFFFF, 1, 2].map(frame).to_vec();
+        assert_eq!(events_of(dbc, &skip).0, vec!["Counter Counter"]);
+    }
+
+    #[test]
+    fn a_64_bit_counter_wraps_without_overflow() {
+        let dbc = "BO_ 256 Msg: 8 ECU\n SG_ Counter : 0|64@1+ (1,0) [0|0] \"\" X\n";
+        let frame = |value: u64| value.to_le_bytes().to_vec();
+        let wrap: Vec<Vec<u8>> = [u64::MAX - 1, u64::MAX, 0, 1].map(frame).to_vec();
+        assert_eq!(events_of(dbc, &wrap).0, Vec::<String>::new());
+        let skip: Vec<Vec<u8>> = [u64::MAX, 1].map(frame).to_vec();
+        assert_eq!(events_of(dbc, &skip).0, vec!["Counter Counter"]);
+    }
+
+    fn xor_frames(corrupt: Option<usize>) -> Vec<Vec<u8>> {
+        (0..20u8)
+            .map(|i| {
+                let body = [i, 0x21, i.wrapping_mul(3)];
+                let sum = body.iter().fold(0, |acc, byte| acc ^ byte);
+                let sum = if corrupt == Some(usize::from(i)) {
+                    sum ^ 0x55
+                } else {
+                    sum
+                };
+                vec![sum, body[0], body[1], body[2]]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_motorola_checksum_in_its_own_byte_is_checked() {
+        let dbc = "BO_ 256 Msg: 4 ECU\n SG_ Checksum : 7|8@0+ (1,0) [0|255] \"\" X\n";
+        assert_eq!(events_of(dbc, &xor_frames(None)).0, Vec::<String>::new());
+        assert_eq!(
+            events_of(dbc, &xor_frames(Some(7))).0,
+            vec!["Checksum Checksum"]
+        );
+    }
+
+    #[test]
+    fn an_eight_bit_checksum_that_straddles_bytes_is_not_checked() {
+        for dbc in [
+            "BO_ 256 Msg: 4 ECU\n SG_ Checksum : 4|8@1+ (1,0) [0|255] \"\" X\n",
+            "BO_ 256 Msg: 4 ECU\n SG_ Checksum : 3|8@0+ (1,0) [0|255] \"\" X\n",
+        ] {
+            let (events, warnings) = events_of(dbc, &xor_frames(Some(7)));
+            assert_eq!(events, Vec::<String>::new(), "{dbc}");
+            assert_eq!(warnings, Vec::<String>::new(), "{dbc}");
+        }
     }
 }
