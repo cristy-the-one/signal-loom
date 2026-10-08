@@ -1,4 +1,8 @@
-use loom_core::{Engine, IndexStatus, MathChannel, ProjectFile, Query, StepDir, ThresholdTrigger};
+use loom_core::{
+    write_as, Engine, Export, IndexStatus, MathChannel, ProjectFile, Query, StepDir,
+    ThresholdTrigger,
+};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
@@ -9,14 +13,37 @@ fn lift<T>(result: loom_core::Result<T>) -> Result<T, String> {
     result.map_err(|err| err.to_string())
 }
 
-#[tauri::command(async)]
-fn open_sample(state: State<'_, AppState>) -> Result<loom_core::Summary, String> {
-    lift(state.with_session(|session| session.open_sample()))
+/// A text export and the facts the UI needs to warn about a cut-short one.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportReply {
+    text: String,
+    rows: usize,
+    truncated: bool,
+}
+
+impl From<Export> for ExportReply {
+    fn from(export: Export) -> Self {
+        Self {
+            text: export.text,
+            rows: export.rows,
+            truncated: export.truncated,
+        }
+    }
+}
+
+/// What a save wrote: its size, and the same row facts as an export.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveReply {
+    bytes: u64,
+    rows: usize,
+    truncated: bool,
 }
 
 #[tauri::command(async)]
-fn open_log(state: State<'_, AppState>, path: String) -> Result<loom_core::Summary, String> {
-    lift(state.with_session(|session| session.open_path(PathBuf::from(path).as_path())))
+fn open_sample(state: State<'_, AppState>) -> Result<loom_core::Summary, String> {
+    lift(state.with_session(|session| session.open_sample()))
 }
 
 #[tauri::command(async)]
@@ -54,11 +81,6 @@ fn index_progress(state: State<'_, AppState>) -> Result<IndexStatus, String> {
 #[tauri::command(async)]
 fn cancel_index(state: State<'_, AppState>) -> Result<IndexStatus, String> {
     lift(state.cancel())
-}
-
-#[tauri::command(async)]
-fn open_signal_map(state: State<'_, AppState>, path: String) -> Result<loom_core::Summary, String> {
-    lift(state.with_session(|session| session.open_map_path(PathBuf::from(path).as_path())))
 }
 
 #[tauri::command(async)]
@@ -112,15 +134,24 @@ fn export_csv(
     names: Vec<String>,
     t0_us: u64,
     t1_us: u64,
-) -> Result<String, String> {
-    lift(state.with_session(|session| session.export_csv(&names, t0_us, t1_us)))
+) -> Result<ExportReply, String> {
+    lift(state.with_session(|session| {
+        session
+            .export_csv_report(&names, t0_us, t1_us)
+            .map(ExportReply::from)
+    }))
 }
 
 #[tauri::command(async)]
-fn export_slog(state: State<'_, AppState>, t0_us: u64, t1_us: u64) -> Result<String, String> {
-    lift(state.with_session(|session| session.export_slog(t0_us, t1_us)))
+fn export_slog(state: State<'_, AppState>, t0_us: u64, t1_us: u64) -> Result<ExportReply, String> {
+    lift(state.with_session(|session| {
+        session
+            .export_slog_report(t0_us, t1_us)
+            .map(ExportReply::from)
+    }))
 }
 
+/// Writes the export to a `.csv` file; `write_as` refuses any other extension.
 #[tauri::command(async)]
 fn save_csv(
     state: State<'_, AppState>,
@@ -128,23 +159,35 @@ fn save_csv(
     names: Vec<String>,
     t0_us: u64,
     t1_us: u64,
-) -> Result<u64, String> {
+) -> Result<SaveReply, String> {
     lift(state.with_session(|session| {
-        session.save_csv(PathBuf::from(path).as_path(), &names, t0_us, t1_us)
+        let export = session.export_csv_report(&names, t0_us, t1_us)?;
+        write_as(PathBuf::from(path).as_path(), "csv", &export.text)?;
+        Ok(SaveReply {
+            bytes: export.text.len() as u64,
+            rows: export.rows,
+            truncated: export.truncated,
+        })
     }))
 }
 
+/// Writes the trimmed log to a `.slog` file; `write_as` refuses any other extension.
 #[tauri::command(async)]
 fn save_slog(
     state: State<'_, AppState>,
     path: String,
     t0_us: u64,
     t1_us: u64,
-) -> Result<u64, String> {
-    lift(
-        state
-            .with_session(|session| session.save_slog(PathBuf::from(path).as_path(), t0_us, t1_us)),
-    )
+) -> Result<SaveReply, String> {
+    lift(state.with_session(|session| {
+        let export = session.export_slog_report(t0_us, t1_us)?;
+        write_as(PathBuf::from(path).as_path(), "slog", &export.text)?;
+        Ok(SaveReply {
+            bytes: export.text.len() as u64,
+            rows: export.rows,
+            truncated: export.truncated,
+        })
+    }))
 }
 
 #[tauri::command(async)]
@@ -232,13 +275,11 @@ pub fn run() {
         .manage(AppState::new(Engine::new()))
         .invoke_handler(tauri::generate_handler![
             open_sample,
-            open_log,
             begin_open_log,
             begin_open_map,
             begin_add_map,
             index_progress,
             cancel_index,
-            open_signal_map,
             query_series,
             values_at,
             frame_at,

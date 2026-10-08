@@ -57,15 +57,6 @@ export function openSample(): Promise<Summary> {
   return http<Summary>("/api/open-sample", { method: "POST" });
 }
 
-export function openPath(path: string): Promise<Summary> {
-  if (inTauri()) return invoke<Summary>("open_log", { path });
-  return http<Summary>("/api/open-path", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ path }),
-  });
-}
-
 export function beginOpen(path: string): Promise<void> {
   if (inTauri()) return invoke<void>("begin_open_log", { path });
   return http<void>("/api/begin-open", {
@@ -108,15 +99,6 @@ export function openBytes(name: string, bytes: ArrayBuffer): Promise<Summary> {
     method: "POST",
     headers: { "x-filename": name },
     body: bytes,
-  });
-}
-
-export function openMapPath(path: string): Promise<Summary> {
-  if (inTauri()) return invoke<Summary>("open_signal_map", { path });
-  return http<Summary>("/api/open-map-path", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ path }),
   });
 }
 
@@ -223,12 +205,26 @@ export function signalStats(name: string, t0Us: number, t1Us: number): Promise<W
   });
 }
 
-export function exportCsv(names: string[], t0Us: number, t1Us: number): Promise<string> {
-  return textCall("/api/export-csv", "export_csv", { names, t0Us: us(t0Us), t1Us: us(t1Us) });
+/** A text export. `truncated` means the row cap cut it short after `rows` data rows. */
+export interface ExportResult {
+  text: string;
+  rows: number;
+  truncated: boolean;
 }
 
-export function exportSlog(t0Us: number, t1Us: number): Promise<string> {
-  return textCall("/api/export-slog", "export_slog", { t0Us: us(t0Us), t1Us: us(t1Us) });
+/** What a desktop save wrote: its size, and the same row facts as an export. */
+export interface SaveResult {
+  bytes: number;
+  rows: number;
+  truncated: boolean;
+}
+
+export function exportCsv(names: string[], t0Us: number, t1Us: number): Promise<ExportResult> {
+  return exportCall("/api/export-csv", "export_csv", { names, t0Us: us(t0Us), t1Us: us(t1Us) });
+}
+
+export function exportSlog(t0Us: number, t1Us: number): Promise<ExportResult> {
+  return exportCall("/api/export-slog", "export_slog", { t0Us: us(t0Us), t1Us: us(t1Us) });
 }
 
 export function setMath(channels: MathChannel[]): Promise<Summary> {
@@ -299,24 +295,23 @@ export function captureCan(iface: string, durationMs: number): Promise<Summary> 
   });
 }
 
-async function textCall(path: string, command: string, args: Record<string, unknown>): Promise<string> {
-  if (inTauri()) return invoke<string>(command, args);
-  const data = await http<{ text: string }>(path, {
+async function exportCall(path: string, command: string, args: Record<string, unknown>): Promise<ExportResult> {
+  if (inTauri()) return invoke<ExportResult>(command, args);
+  return http<ExportResult>(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(args),
   });
-  return data.text;
 }
 
-/** Desktop only: write a CSV export to `path` (.csv). Resolves to the bytes written. */
-export function saveCsv(path: string, names: string[], t0Us: number, t1Us: number): Promise<number> {
-  return invoke<number>("save_csv", { path, names, t0Us: us(t0Us), t1Us: us(t1Us) });
+/** Desktop only: write a CSV export to `path` (.csv). Resolves to the bytes written and the row facts. */
+export function saveCsv(path: string, names: string[], t0Us: number, t1Us: number): Promise<SaveResult> {
+  return invoke<SaveResult>("save_csv", { path, names, t0Us: us(t0Us), t1Us: us(t1Us) });
 }
 
-/** Desktop only: write the trimmed log to `path` (.slog). Resolves to the bytes written. */
-export function saveSlog(path: string, t0Us: number, t1Us: number): Promise<number> {
-  return invoke<number>("save_slog", { path, t0Us: us(t0Us), t1Us: us(t1Us) });
+/** Desktop only: write the trimmed log to `path` (.slog). Resolves to the bytes written and the row facts. */
+export function saveSlog(path: string, t0Us: number, t1Us: number): Promise<SaveResult> {
+  return invoke<SaveResult>("save_slog", { path, t0Us: us(t0Us), t1Us: us(t1Us) });
 }
 
 export function writeProject(path: string, project: ProjectFile): Promise<void> {

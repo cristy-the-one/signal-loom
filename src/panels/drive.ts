@@ -1,7 +1,7 @@
 import * as api from "../api";
 import { els } from "../dom";
 import { LOG_FILTERS, download, onFile, pickPath, pickSavePath, withExtension } from "../files";
-import { basename, formatBytes } from "../format";
+import { basename, formatBytes, formatCount } from "../format";
 import { windowFor } from "../model";
 import { adoptEdited, adoptSummary } from "../project";
 import { cancelCursorStats, refreshCursors } from "../query";
@@ -104,6 +104,10 @@ function exportWindow(): { t0: number; t1: number } | null {
   return { t0: view.t0, t1: view.t1 };
 }
 
+function truncatedNotice(rows: number): string {
+  return `Export stopped at ${formatCount(rows)} rows. Narrow the window for the rest.`;
+}
+
 async function exportRange(kind: "csv" | "slog"): Promise<void> {
   const range = exportWindow();
   if (!range || !state.summary) {
@@ -122,19 +126,24 @@ async function exportRange(kind: "csv" | "slog"): Promise<void> {
     if (!picked) return;
     const target = withExtension(picked, `.${kind}`);
     await withBusy(label, async () => {
-      const bytes =
+      const saved =
         kind === "csv"
           ? await api.saveCsv(target, names, range.t0, range.t1)
           : await api.saveSlog(target, range.t0, range.t1);
-      setNotice(`Saved ${basename(target)} (${formatBytes(bytes)})`);
+      const message = `Saved ${basename(target)} (${formatBytes(saved.bytes)})`;
+      setNotice(saved.truncated ? `${message}. ${truncatedNotice(saved.rows)}` : message);
     });
     return;
   }
   await withBusy(label, async () => {
     if (kind === "csv") {
-      download(suggested, await api.exportCsv(names, range.t0, range.t1), "text/csv");
+      const csv = await api.exportCsv(names, range.t0, range.t1);
+      download(suggested, csv.text, "text/csv");
+      if (csv.truncated) setNotice(truncatedNotice(csv.rows));
     } else {
-      download(suggested, await api.exportSlog(range.t0, range.t1), "text/plain");
+      const slog = await api.exportSlog(range.t0, range.t1);
+      download(suggested, slog.text, "text/plain");
+      if (slog.truncated) setNotice(truncatedNotice(slog.rows));
     }
   });
 }
