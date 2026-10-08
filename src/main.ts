@@ -173,7 +173,10 @@ const state: {
   tab: "marks",
 };
 
-let queryToken = 0;
+/** Bumped when the data a plot response belongs to changes: a new summary or a new plotted set. */
+let dataGen = 0;
+let cursorSeq = 0;
+let deckQueue: Promise<void> = Promise.resolve();
 let queryFlight = false;
 let queryAgain = false;
 let refreshTimer = 0;
@@ -184,6 +187,13 @@ function must<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
   if (!node) throw new Error(`missing #${id}`);
   return node as T;
+}
+
+/** Changes the plotted set; plot responses and cursor stats asked for the old set are dropped. */
+function setPlotted(names: string[]): void {
+  state.plotted = names;
+  dataGen += 1;
+  void refreshCursors();
 }
 
 function duration(summary: Summary): number {
@@ -237,18 +247,31 @@ function windowFor(playhead: number, span: number, summary: Summary): View {
   return { t0: a, t1: b };
 }
 
-/** True while the banner shows a plot query's error; a later good query clears only that. */
-let queryError = false;
+/** Who raised a banner message; only the owner's later success clears it. */
+type ErrorOwner = "query" | "project" | "action";
 
-function setError(message: string, fromQuery = false): void {
-  queryError = fromQuery;
-  els.error.hidden = false;
-  els.error.textContent = message;
+const errors = new Map<ErrorOwner, string>();
+
+function paintErrors(): void {
+  const text = [...errors.values()].join(" ");
+  els.error.hidden = text === "";
+  els.error.textContent = text;
+}
+
+function setError(message: string, owner: ErrorOwner): void {
+  errors.set(owner, message);
+  paintErrors();
+}
+
+function clearError(owner?: ErrorOwner): void {
+  if (owner) errors.delete(owner);
+  else errors.clear();
+  paintErrors();
 }
 
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
-/** A short confirmation, such as a saved export. It clears itself. */
+/** A short message that is not an error, such as a saved export or the end of the log. It clears itself. */
 function setNotice(message: string): void {
   const notice = document.getElementById("notice") as HTMLElement;
   notice.textContent = message;
@@ -258,12 +281,6 @@ function setNotice(message: string): void {
     notice.hidden = true;
     notice.textContent = "";
   }, 6000);
-}
-
-function clearError(): void {
-  queryError = false;
-  els.error.hidden = true;
-  els.error.textContent = "";
 }
 
 function paintBusy(label?: string): void {
@@ -325,6 +342,13 @@ function mapChannel(): number {
   return Math.min(255, Math.round(value));
 }
 
+/** Runs deck mutations one at a time, each building its new list from the state the last one left. */
+function serialDeck(work: () => Promise<void>): Promise<void> {
+  const run = deckQueue.then(work);
+  deckQueue = run.catch(() => undefined);
+  return run;
+}
+
 async function withBusy(label: string, work: () => Promise<void>): Promise<void> {
   state.busy += 1;
   paintBusy(label);
@@ -332,7 +356,7 @@ async function withBusy(label: string, work: () => Promise<void>): Promise<void>
   try {
     await work();
   } catch (err) {
-    setError(errText(err));
+    setError(errText(err), "action");
   } finally {
     state.busy = Math.max(0, state.busy - 1);
     paintBusy();
@@ -427,8 +451,8 @@ function renderSignals(): void {
     input.type = "checkbox";
     input.checked = state.plotted.includes(signal.name);
     input.addEventListener("change", () => {
-      if (input.checked) state.plotted = [...state.plotted, signal.name];
-      else state.plotted = state.plotted.filter((name) => name !== signal.name);
+      if (input.checked) setPlotted([...state.plotted, signal.name]);
+      else setPlotted(state.plotted.filter((name) => name !== signal.name));
       state.dirty = true;
       renderChrome();
       draw();
@@ -497,8 +521,22 @@ function renderMarks(): void {
   }
 }
 
+let eventRows: { tUs: number; button: HTMLElement; selected: boolean }[] = [];
+
+/** Marks the event rows at the playhead; cheap enough to run on every draw. */
+function syncEventSelection(): void {
+  for (const row of eventRows) {
+    const selected = Math.abs(row.tUs - state.playhead) <= 500;
+    if (selected === row.selected) continue;
+    row.selected = selected;
+    row.button.classList.toggle("is-selected", selected);
+    if (selected) row.button.scrollIntoView({ block: "nearest" });
+  }
+}
+
 function renderEvents(): void {
   els.eventList.replaceChildren();
+  eventRows = [];
   const events = state.summary?.events ?? [];
   if (events.length === 0) {
     const note = document.createElement("p");
@@ -513,11 +551,7 @@ function renderEvents(): void {
     button.className = "event-row";
     const severity = severityOf(event.label);
     button.classList.add(severity);
-    const selected = Math.abs(event.tUs - state.playhead) <= 500;
-    if (selected) {
-      button.classList.add("is-selected");
-      queueMicrotask(() => button.scrollIntoView({ block: "nearest" }));
-    }
+    eventRows.push({ tUs: event.tUs, button, selected: false });
     const dot = document.createElement("span");
     dot.className = `event-dot ${severity}`;
     const time = document.createElement("span");
@@ -527,12 +561,10 @@ function renderEvents(): void {
     label.className = "event-l";
     label.textContent = event.label;
     button.append(dot, time, label);
-    button.addEventListener("click", () => {
-      scrubTo(event.tUs);
-      renderEvents();
-    });
+    button.addEventListener("click", () => scrubTo(event.tUs));
     els.eventList.append(button);
   }
+  syncEventSelection();
   if (state.summary?.eventsTruncated) {
     const note = document.createElement("p");
     note.className = "empty-note";
@@ -625,6 +657,7 @@ function draw(): void {
   placeCrosshair(traces);
   renderTransport();
   renderLegend();
+  syncEventSelection();
 }
 
 function traceNames(): string[] {
@@ -682,7 +715,7 @@ async function refresh(): Promise<void> {
     return;
   }
   queryFlight = true;
-  const token = ++queryToken;
+  const gen = dataGen;
   const view = windowFor(state.playhead, state.span, summary);
   const width = els.plot.getBoundingClientRect().width || 800;
   const maxPoints = Math.max(200, Math.min(4000, Math.round(width * 2)));
@@ -702,16 +735,16 @@ async function refresh(): Promise<void> {
       api.valuesAt(state.playhead),
       api.busLoad(bus.t0, bus.t1),
     ]);
-    if (token !== queryToken) return;
+    if (gen !== dataGen) return;
     state.series = series;
     state.frame = frame;
     state.held = held;
     state.bus = load;
     state.view = view;
-    if (queryError) clearError();
+    clearError("query");
     draw();
   } catch (err) {
-    if (token === queryToken) setError(errText(err), true);
+    if (gen === dataGen) setError(errText(err), "query");
   } finally {
     queryFlight = false;
     if (queryAgain) {
@@ -731,6 +764,7 @@ async function refreshOverview(): Promise<void> {
     return;
   }
   if (state.overviewName === name && state.overview) return;
+  const gen = dataGen;
   try {
     const series = await api.query({
       t0Us: summary.tStartUs,
@@ -738,11 +772,12 @@ async function refreshOverview(): Promise<void> {
       signals: [name],
       maxPoints: 700,
     });
+    if (gen !== dataGen) return;
     state.overview = series[0]?.points ?? null;
     state.overviewName = name;
     draw();
   } catch {
-    state.overview = null;
+    if (gen === dataGen) state.overview = null;
   }
 }
 
@@ -777,6 +812,7 @@ function resetDeck(): void {
 }
 
 function adoptSummary(summary: Summary, mode: "fresh" | "keep"): void {
+  dataGen += 1;
   state.summary = summary;
   timeoutInput().value = String(summary.timeoutFactor);
   if (mode === "fresh") {
@@ -799,13 +835,17 @@ function adoptSummary(summary: Summary, mode: "fresh" | "keep"): void {
     state.overview = null;
     state.overviewName = null;
   }
-  clearError();
+  clearError("action");
+  clearError("query");
+  if (mode === "fresh") clearError("project");
   renderChrome();
   void refresh();
   void refreshOverview();
+  void refreshCursors();
 }
 
 function applyProject(opened: ProjectOpen, path: string | null): void {
+  dataGen += 1;
   state.summary = opened.summary;
   state.bookmarks = opened.project.bookmarks;
   state.playhead = opened.project.view.playheadUs;
@@ -831,9 +871,9 @@ function applyProject(opened: ProjectOpen, path: string | null): void {
   state.cluster = (opened.project.cluster ?? {}) as ClusterBindings;
   state.compareOn = Boolean(state.comparePath) && !opened.warnings.some((warning) => warning.startsWith("Compare"));
   els.compareOffset.value = String(state.compareOffsetUs / 1000);
+  clearError();
+  if (opened.warnings.length) setError(opened.warnings.join(" "), "project");
   void refreshCursors();
-  if (opened.warnings.length) setError(opened.warnings.join(" "));
-  else clearError();
   renderChrome();
   void refresh();
   void refreshOverview();
@@ -881,7 +921,7 @@ async function openLog(): Promise<void> {
   try {
     adoptSummary(await withIndex(`Indexing ${basename(path)}`, () => api.beginOpen(path)), "fresh");
   } catch (err) {
-    setError(errText(err));
+    setError(errText(err), "action");
   }
 }
 
@@ -897,7 +937,7 @@ async function openMap(): Promise<void> {
     state.dirty = true;
     renderChrome();
   } catch (err) {
-    setError(errText(err));
+    setError(errText(err), "action");
   }
 }
 
@@ -917,7 +957,7 @@ async function addMap(): Promise<void> {
     state.dirty = true;
     renderChrome();
   } catch (err) {
-    setError(errText(err));
+    setError(errText(err), "action");
   }
 }
 
@@ -936,7 +976,7 @@ async function openProject(): Promise<void> {
 async function saveProject(asNew: boolean): Promise<void> {
   const project = currentProject();
   if (!state.summary) {
-    setError("Nothing to save yet.");
+    setError("Nothing to save yet.", "action");
     return;
   }
   if (!api.inTauri()) {
@@ -1001,17 +1041,17 @@ async function stepFrame(direction: "next" | "prev"): Promise<void> {
   try {
     const frame = await api.step(state.playhead, direction);
     if (!frame) {
-      setError(direction === "next" ? "End of log." : "Start of log.");
+      setNotice(direction === "next" ? "End of log." : "Start of log.");
       return;
     }
-    clearError();
+    clearError("action");
     state.playhead = frame.tUs;
     state.frame = frame;
     state.dirty = true;
     draw();
     scheduleRefresh();
   } catch (err) {
-    setError(errText(err));
+    setError(errText(err), "action");
   }
 }
 
@@ -1024,7 +1064,7 @@ function markers(): { t: number }[] {
 function stepEvent(direction: 1 | -1): void {
   const list = markers();
   if (list.length === 0) {
-    setError("No events or bookmarks in this log.");
+    setNotice("No events or bookmarks in this log.");
     return;
   }
   const hit =
@@ -1032,10 +1072,9 @@ function stepEvent(direction: 1 | -1): void {
       ? list.find((item) => item.t > state.playhead + 0.5)
       : [...list].reverse().find((item) => item.t < state.playhead - 0.5);
   if (!hit) {
-    setError(direction > 0 ? "No later event." : "No earlier event.");
+    setNotice(direction > 0 ? "No later event." : "No earlier event.");
     return;
   }
-  clearError();
   scrubTo(hit.t);
 }
 
@@ -1147,10 +1186,11 @@ function onKey(event: KeyboardEvent): void {
     void loadSample();
     return;
   }
+  if (els.help.open) return;
   if (typingTarget(event.target)) return;
   if (event.key === "?" || (event.shiftKey && event.key === "/")) {
     event.preventDefault();
-    if (!els.help.open) els.help.showModal();
+    els.help.showModal();
     return;
   }
   if (event.key === "/") {
@@ -1278,7 +1318,7 @@ async function ingestPath(path: string): Promise<void> {
     }
     adoptSummary(await withIndex(`Indexing ${basename(path)}`, () => api.beginOpen(path)), "fresh");
   } catch (err) {
-    setError(errText(err));
+    setError(errText(err), "action");
   }
 }
 
@@ -1355,20 +1395,19 @@ function renderMath(): void {
     label.textContent = channel.unit ? `${channel.name} = ${channel.expr} ${channel.unit}` : `${channel.name} = ${channel.expr}`;
     button.append(label);
     button.addEventListener("click", () => {
-      if (!state.plotted.includes(channel.name)) state.plotted = [...state.plotted, channel.name];
+      if (state.plotted.includes(channel.name)) return;
+      setPlotted([...state.plotted, channel.name]);
       state.dirty = true;
       renderChrome();
+      draw();
       void refresh();
+      void refreshOverview();
     });
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "mark-x";
     remove.textContent = "×";
-    remove.addEventListener("click", () => {
-      state.math = state.math.filter((item) => item.name !== channel.name);
-      state.plotted = state.plotted.filter((name) => name !== channel.name);
-      void syncMath();
-    });
+    remove.addEventListener("click", () => void removeMath(channel.name));
     row.append(button, remove);
     els.mathList.append(row);
   }
@@ -1395,10 +1434,7 @@ function renderTriggers(): void {
     remove.type = "button";
     remove.className = "mark-x";
     remove.textContent = "×";
-    remove.addEventListener("click", () => {
-      state.triggers = state.triggers.filter((item) => item.id !== trigger.id);
-      void syncTriggers();
-    });
+    remove.addEventListener("click", () => void removeTrigger(trigger.id));
     row.append(label, remove);
     els.trigList.append(row);
   }
@@ -1434,28 +1470,36 @@ async function addMath(): Promise<void> {
   const expr = (document.getElementById("math-expr") as HTMLInputElement).value.trim();
   const unit = (document.getElementById("math-unit") as HTMLInputElement).value.trim();
   if (!name || !expr) {
-    setError("A math channel needs a name and an expression.");
+    setError("A math channel needs a name and an expression.", "action");
     return;
   }
-  const next = [...state.math.filter((channel) => channel.name !== name), { name, unit, expr }];
-  await withBusy("Compiling math", async () => {
-    const summary = await api.setMath(next);
-    state.math = next;
-    if (!state.plotted.includes(name)) state.plotted = [...state.plotted, name];
-    adoptSummary(summary, "keep");
-    state.dirty = true;
-    renderChrome();
-    (document.getElementById("math-name") as HTMLInputElement).value = "";
-    (document.getElementById("math-expr") as HTMLInputElement).value = "";
-  });
+  await serialDeck(() =>
+    withBusy("Compiling math", async () => {
+      const next = [...state.math.filter((channel) => channel.name !== name), { name, unit, expr }];
+      const summary = await api.setMath(next);
+      state.math = next;
+      if (!state.plotted.includes(name)) setPlotted([...state.plotted, name]);
+      adoptSummary(summary, "keep");
+      state.dirty = true;
+      renderChrome();
+      (document.getElementById("math-name") as HTMLInputElement).value = "";
+      (document.getElementById("math-expr") as HTMLInputElement).value = "";
+    }),
+  );
 }
 
-async function syncMath(): Promise<void> {
-  await withBusy("Compiling math", async () => {
-    adoptSummary(await api.setMath(state.math), "keep");
-    state.dirty = true;
-    renderChrome();
-  });
+async function removeMath(name: string): Promise<void> {
+  await serialDeck(() =>
+    withBusy("Compiling math", async () => {
+      const next = state.math.filter((channel) => channel.name !== name);
+      const summary = await api.setMath(next);
+      state.math = next;
+      setPlotted(state.plotted.filter((plotted) => plotted !== name));
+      adoptSummary(summary, "keep");
+      state.dirty = true;
+      renderChrome();
+    }),
+  );
 }
 
 async function addTrigger(): Promise<void> {
@@ -1463,14 +1507,15 @@ async function addTrigger(): Promise<void> {
   const op = (document.getElementById("trig-op") as HTMLSelectElement).value;
   const value = Number((document.getElementById("trig-value") as HTMLInputElement).value);
   if (!signal || !Number.isFinite(value)) {
-    setError("A trigger needs a signal and a finite level.");
+    setError("A trigger needs a signal and a finite level.", "action");
     return;
   }
-  state.triggers = [
-    ...state.triggers,
-    { id: `t-${Date.now().toString(36)}`, signal, op, value },
-  ];
-  await syncTriggers();
+  const trigger: ThresholdTrigger = { id: `t-${Date.now().toString(36)}`, signal, op, value };
+  await syncTriggers((current) => [...current, trigger]);
+}
+
+async function removeTrigger(id: string): Promise<void> {
+  await syncTriggers((current) => current.filter((item) => item.id !== id));
 }
 
 function timeoutInput(): HTMLInputElement {
@@ -1482,25 +1527,32 @@ async function applyTimeoutFactor(): Promise<void> {
   const current = state.summary?.timeoutFactor;
   if (!state.summary || factor === current) return;
   if (!Number.isFinite(factor) || factor < 1 || factor > 100) {
-    setError("The timeout must be between 1 and 100 cycle times.");
+    setError("The timeout must be between 1 and 100 cycle times.", "action");
     timeoutInput().value = String(current);
     return;
   }
-  await withBusy("Re-indexing timeouts", async () => {
-    adoptSummary(await api.setTimeoutFactor(factor), "keep");
-    state.dirty = true;
-    renderChrome();
+  await serialDeck(async () => {
+    await withBusy("Re-indexing timeouts", async () => {
+      adoptSummary(await api.setTimeoutFactor(factor), "keep");
+      state.dirty = true;
+      renderChrome();
+    });
+    // A refused value leaves the field showing the factor in effect.
+    timeoutInput().value = String(state.summary?.timeoutFactor ?? current);
   });
-  // A refused value leaves the field showing the factor in effect.
-  timeoutInput().value = String(state.summary?.timeoutFactor ?? current);
 }
 
-async function syncTriggers(): Promise<void> {
-  await withBusy("Arming triggers", async () => {
-    adoptSummary(await api.setTriggers(state.triggers), "keep");
-    state.dirty = true;
-    renderChrome();
-  });
+async function syncTriggers(change: (current: ThresholdTrigger[]) => ThresholdTrigger[]): Promise<void> {
+  await serialDeck(() =>
+    withBusy("Arming triggers", async () => {
+      const next = change(state.triggers);
+      const summary = await api.setTriggers(next);
+      state.triggers = next;
+      adoptSummary(summary, "keep");
+      state.dirty = true;
+      renderChrome();
+    }),
+  );
 }
 
 async function openCompare(): Promise<void> {
@@ -1512,53 +1564,66 @@ async function openCompare(): Promise<void> {
     { name: "Logs", extensions: ["slog", "slbin", "csv", "txt", "log", "asc", "blf"] },
   ]);
   if (!path) return;
-  await withBusy(`Comparing ${basename(path)}`, async () => {
-    const summary = await api.openComparePath(path);
-    state.compareOn = true;
-    state.comparePath = path;
-    adoptSummary(summary, "keep");
-    state.dirty = true;
-    renderChrome();
-  });
+  await serialDeck(() =>
+    withBusy(`Comparing ${basename(path)}`, async () => {
+      const summary = await api.openComparePath(path);
+      state.compareOn = true;
+      state.comparePath = path;
+      adoptSummary(summary, "keep");
+      state.dirty = true;
+      renderChrome();
+    }),
+  );
 }
 
 async function ingestCompareFile(file: File): Promise<void> {
-  await withBusy(`Comparing ${file.name}`, async () => {
-    const summary = await api.openCompareBytes(await file.arrayBuffer());
-    state.compareOn = true;
-    state.comparePath = file.name;
-    adoptSummary(summary, "keep");
-    state.dirty = true;
-    renderChrome();
-  });
+  await serialDeck(() =>
+    withBusy(`Comparing ${file.name}`, async () => {
+      const summary = await api.openCompareBytes(await file.arrayBuffer());
+      state.compareOn = true;
+      state.comparePath = file.name;
+      adoptSummary(summary, "keep");
+      state.dirty = true;
+      renderChrome();
+    }),
+  );
 }
 
 async function clearCompareDrive(): Promise<void> {
-  await withBusy("Clearing compare", async () => {
-    const summary = await api.clearCompare();
-    state.compareOn = false;
-    state.comparePath = null;
-    state.compareOffsetUs = 0;
-    els.compareOffset.value = "0";
-    adoptSummary(summary, "keep");
-    state.dirty = true;
-    renderChrome();
-  });
+  await serialDeck(() =>
+    withBusy("Clearing compare", async () => {
+      const summary = await api.clearCompare();
+      state.compareOn = false;
+      state.comparePath = null;
+      state.compareOffsetUs = 0;
+      els.compareOffset.value = "0";
+      adoptSummary(summary, "keep");
+      state.dirty = true;
+      renderChrome();
+    }),
+  );
 }
 
 async function applyOffset(): Promise<void> {
   const ms = Number(els.compareOffset.value);
   if (!Number.isFinite(ms)) return;
-  state.compareOffsetUs = Math.round(ms * 1000);
+  const offsetUs = Math.round(ms * 1000);
   if (!state.compareOn) {
+    state.compareOffsetUs = offsetUs;
     state.dirty = true;
     renderCompare();
     return;
   }
-  await withBusy("Aligning drives", async () => {
-    adoptSummary(await api.setCompareOffset(state.compareOffsetUs), "keep");
-    state.dirty = true;
-    renderChrome();
+  await serialDeck(async () => {
+    await withBusy("Aligning drives", async () => {
+      const summary = await api.setCompareOffset(offsetUs);
+      state.compareOffsetUs = offsetUs;
+      adoptSummary(summary, "keep");
+      state.dirty = true;
+      renderChrome();
+    });
+    // A refused offset leaves the field showing the offset in effect.
+    els.compareOffset.value = String(state.compareOffsetUs / 1000);
   });
 }
 
@@ -1573,6 +1638,8 @@ function dropCursor(which: "a" | "b"): void {
 }
 
 async function refreshCursors(): Promise<void> {
+  const seq = ++cursorSeq;
+  const gen = dataGen;
   const a = state.cursorA;
   const b = state.cursorB;
   if (a == null && b == null) {
@@ -1590,13 +1657,15 @@ async function refreshCursors(): Promise<void> {
   const t0 = Math.min(a, b);
   const t1 = Math.max(a, b);
   const name = state.plotted[0];
+  let text: string;
   try {
     const stats = await api.signalStats(name, t0, t1);
-    state.cursorText = `Δt ${formatSpan(t1 - t0)} · ${name} Δ ${formatValue(stats.last - stats.first)} · min ${formatValue(stats.min)} max ${formatValue(stats.max)} avg ${formatValue(stats.avg)}`;
-    clearError();
+    text = `Δt ${formatSpan(t1 - t0)} · ${name} Δ ${formatValue(stats.last - stats.first)} · min ${formatValue(stats.min)} max ${formatValue(stats.max)} avg ${formatValue(stats.avg)}`;
   } catch (err) {
-    state.cursorText = errText(err);
+    text = errText(err);
   }
+  if (seq !== cursorSeq || gen !== dataGen) return;
+  state.cursorText = text;
   renderTransport();
   draw();
 }
@@ -1604,7 +1673,7 @@ async function refreshCursors(): Promise<void> {
 async function exportRange(kind: "csv" | "slog"): Promise<void> {
   const window = exportWindow();
   if (!window || !state.summary) {
-    setError("Open a log before exporting.");
+    setError("Open a log before exporting.", "action");
     return;
   }
   const names = state.plotted.length ? state.plotted : state.summary.signals.slice(0, 1).map((signal) => signal.name);
@@ -1635,7 +1704,7 @@ async function exportRange(kind: "csv" | "slog"): Promise<void> {
 
 async function captureBus(): Promise<void> {
   if (!els.captureArm.checked) {
-    setError("Tick Listen only before a SocketCAN capture. The socket is read-only.");
+    setError("Tick Listen only before a SocketCAN capture. The socket is read-only.", "action");
     return;
   }
   const iface = els.captureIface.value.trim();
@@ -1793,6 +1862,7 @@ function bind(): void {
     state.cursorA = null;
     state.cursorB = null;
     state.cursorText = "";
+    cursorSeq += 1;
     state.dirty = true;
     draw();
   });
