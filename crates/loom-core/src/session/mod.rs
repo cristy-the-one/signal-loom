@@ -197,9 +197,8 @@ impl Session {
         self.summary()
     }
 
-    /// Read frames from a SocketCAN interface. This does not transmit.
-    pub fn capture_socketcan(&mut self, iface: &str, duration_ms: u64) -> Result<Summary> {
-        let text = crate::socketcan::capture_slog(iface, duration_ms)?;
+    /// Open the SLOG text a SocketCAN capture on `iface` produced.
+    pub fn open_capture(&mut self, iface: &str, text: String) -> Result<Summary> {
         self.open_bytes(&format!("{iface}.slog"), text.into_bytes())
     }
 

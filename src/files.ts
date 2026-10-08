@@ -3,7 +3,7 @@ import { els } from "./dom";
 import { basename, errText } from "./format";
 import { adoptEdited, adoptSummary, applyProject, currentView } from "./project";
 import { renderChrome, state } from "./state";
-import { setError, withBusy, withIndex } from "./status";
+import { indexThen, setError, withBusy, withProjectIndex } from "./status";
 
 export interface FileFilter {
   name: string;
@@ -78,11 +78,17 @@ export function mapChannel(): number {
 }
 
 /** Indexes in the background, then adopts the result as a new log or as an edit to the current one. */
-async function indexInto(label: string, start: () => Promise<void>, as: "fresh" | "edit"): Promise<void> {
-  try {
-    const summary = await withIndex(label, start);
+function indexInto(label: string, start: () => Promise<void>, as: "fresh" | "edit"): Promise<void> {
+  return indexThen(label, start, (summary) => {
     if (as === "fresh") adoptSummary(summary, "fresh");
     else adoptEdited(summary);
+  });
+}
+
+/** Opens a project in the background, then applies it. `path` is where it was saved, null for an upload. */
+async function openProjectJob(label: string, start: () => Promise<void>, path: string | null): Promise<void> {
+  try {
+    applyProject(await withProjectIndex(label, start), path);
   } catch (err) {
     setError(errText(err), "action");
   }
@@ -119,9 +125,11 @@ export async function openProject(): Promise<void> {
 }
 
 async function openProjectPath(path: string): Promise<void> {
-  await withBusy(`Opening ${basename(path)}`, async () => {
-    applyProject(await api.openProjectPath(path), path);
-  });
+  await openProjectJob(`Opening ${basename(path)}`, () => api.beginProject(path), path);
+}
+
+async function openProjectText(name: string, json: string): Promise<void> {
+  await openProjectJob(`Opening ${name}`, () => api.beginProjectJson(json), null);
 }
 
 export async function saveProject(asNew: boolean): Promise<void> {
@@ -152,26 +160,28 @@ export async function saveProject(asNew: boolean): Promise<void> {
 
 async function ingestFile(file: File, mode: "replace" | "add" = "replace"): Promise<void> {
   const name = file.name.toLowerCase();
-  await withBusy(`Indexing ${file.name}`, async () => {
-    if (name.endsWith(".loom")) {
-      applyProject(await api.openProjectJson(await file.text()), null);
-      return;
+  if (name.endsWith(".loom")) {
+    await openProjectText(file.name, await file.text());
+    return;
+  }
+  if (name.endsWith(".json") && mode !== "add") {
+    const text = await file.text();
+    if (text.includes('"format"') && text.includes("signal-loom")) {
+      await openProjectText(file.name, text);
+    } else {
+      await withBusy(`Indexing ${file.name}`, async () => {
+        adoptEdited(await api.openMapJson(text));
+      });
     }
-    if (name.endsWith(".dbc") || (name.endsWith(".json") && mode === "add")) {
+    return;
+  }
+  await withBusy(`Indexing ${file.name}`, async () => {
+    if (name.endsWith(".dbc") || name.endsWith(".json")) {
       const text = await file.text();
       const summary = mode === "add"
         ? await api.addMapJson(text, mapChannel())
         : await api.openMapJson(text);
       adoptEdited(summary);
-      return;
-    }
-    if (name.endsWith(".json")) {
-      const text = await file.text();
-      if (text.includes('"format"') && text.includes("signal-loom")) {
-        applyProject(await api.openProjectJson(text), null);
-      } else {
-        adoptEdited(await api.openMapJson(text));
-      }
       return;
     }
     adoptSummary(await api.openBytes(file.name, await file.arrayBuffer()), "fresh");

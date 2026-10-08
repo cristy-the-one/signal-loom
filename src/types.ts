@@ -30,6 +30,8 @@ export interface IndexStatus {
   frames: number;
   skipped: number;
   summary?: Summary;
+  /** Set when the finished job opened a project: the project as loaded and what could not be opened. */
+  project?: { project: ProjectFile; warnings: string[] };
   error?: string;
 }
 

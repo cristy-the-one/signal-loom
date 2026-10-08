@@ -120,11 +120,8 @@ fn step_frame(
 }
 
 #[tauri::command(async)]
-fn open_project(
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<loom_core::ProjectOpen, String> {
-    lift(state.with_session(|session| session.load_project_file(PathBuf::from(path).as_path())))
+fn begin_open_project(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    lift(state.begin_project_file(PathBuf::from(path)))
 }
 
 #[tauri::command(async)]
@@ -216,8 +213,12 @@ fn set_timeout_factor(
 }
 
 #[tauri::command(async)]
-fn open_compare(state: State<'_, AppState>, path: String) -> Result<loom_core::Summary, String> {
-    lift(state.with_session(|session| session.open_compare_path(PathBuf::from(path).as_path())))
+fn begin_open_compare(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    lift(state.begin(move |session, control| {
+        session
+            .open_compare_path_controlled(PathBuf::from(path).as_path(), Some(control))
+            .map(|_| ())
+    }))
 }
 
 #[tauri::command(async)]
@@ -241,12 +242,12 @@ fn bus_load(
 }
 
 #[tauri::command(async)]
-fn capture_can(
+fn begin_capture_can(
     state: State<'_, AppState>,
     iface: String,
     duration_ms: u64,
-) -> Result<loom_core::Summary, String> {
-    lift(state.with_session(|session| session.capture_socketcan(&iface, duration_ms)))
+) -> Result<(), String> {
+    lift(state.begin_capture(iface, duration_ms))
 }
 
 #[tauri::command(async)]
@@ -283,7 +284,7 @@ pub fn run() {
             values_at,
             frame_at,
             step_frame,
-            open_project,
+            begin_open_project,
             write_project,
             signal_stats,
             export_csv,
@@ -293,11 +294,11 @@ pub fn run() {
             set_math,
             set_triggers,
             set_timeout_factor,
-            open_compare,
+            begin_open_compare,
             set_compare_offset,
             clear_compare,
             bus_load,
-            capture_can
+            begin_capture_can
         ])
         .run(tauri::generate_context!())
         .expect("error while running Signal Loom");

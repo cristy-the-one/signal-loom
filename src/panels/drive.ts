@@ -6,7 +6,7 @@ import { windowFor } from "../model";
 import { adoptEdited, adoptSummary } from "../project";
 import { cancelCursorStats, refreshCursors } from "../query";
 import { draw, state } from "../state";
-import { serialDeck, setError, setNotice, withBusy } from "../status";
+import { indexThen, serialDeck, setError, setNotice, withBusy } from "../status";
 
 export function renderCompare(): void {
   if (!state.compareOn) {
@@ -21,8 +21,7 @@ async function openCompare(): Promise<void> {
   const path = await pickPath(els.fileCompare, LOG_FILTERS);
   if (!path) return;
   await serialDeck(() =>
-    withBusy(`Comparing ${basename(path)}`, async () => {
-      const summary = await api.openComparePath(path);
+    indexThen(`Comparing ${basename(path)}`, () => api.beginCompare(path), (summary) => {
       state.compareOn = true;
       state.comparePath = path;
       adoptEdited(summary);
@@ -155,9 +154,9 @@ async function captureBus(): Promise<void> {
   }
   const iface = els.captureIface.value.trim();
   const durationMs = Math.round(Number(els.captureMs.value));
-  await withBusy(`Listening on ${iface}`, async () => {
-    adoptSummary(await api.captureCan(iface, durationMs), "fresh");
-  });
+  await indexThen(`Listening on ${iface}`, () => api.beginCapture(iface, durationMs), (summary) =>
+    adoptSummary(summary, "fresh"),
+  );
 }
 
 export function bindDrive(): void {

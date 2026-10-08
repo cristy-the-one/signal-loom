@@ -172,7 +172,16 @@ pub struct ProjectOpen {
     pub warnings: Vec<String>,
 }
 
-/// Polled while a log or DBC is indexed on a background thread.
+/// What opening a project adds to the summary: the project as loaded, and the
+/// notes about what could not be opened.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenedProject {
+    pub project: crate::project::ProjectFile,
+    pub warnings: Vec<String>,
+}
+
+/// Polled while a log, DBC, project or capture runs on a background thread.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexStatus {
@@ -185,6 +194,9 @@ pub struct IndexStatus {
     pub skipped: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<Summary>,
+    /// Set when the finished job opened a project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<OpenedProject>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
