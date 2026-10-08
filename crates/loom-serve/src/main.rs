@@ -4,14 +4,12 @@
 //! so `npm run dev:preview` can exercise the UI in a browser. It binds to
 //! 127.0.0.1 only and is not a network service.
 
-use loom_core::{
-    IndexControl, IndexStatus, MathChannel, Query, Session, StepDir, ThresholdTrigger,
-};
+use loom_core::{Engine, MathChannel, Query, StepDir, ThresholdTrigger};
 use serde::Deserialize;
 use std::env;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const MAX_BODY: usize = 32 * 1024 * 1024;
@@ -24,29 +22,11 @@ fn main() {
         std::process::exit(1);
     });
     eprintln!("signal-loom engine listening on http://{addr}");
-    let hub = Hub {
-        session: Arc::new(Mutex::new(Session::new())),
-        control: Arc::new(IndexControl::default()),
-        phase: Arc::new(Mutex::new(Phase::Idle)),
-    };
+    let engine = Arc::new(Engine::new());
     for mut request in server.incoming_requests() {
-        let response = dispatch(&hub, &mut request);
+        let response = dispatch(&engine, &mut request);
         let _ = request.respond(response);
     }
-}
-
-struct Hub {
-    session: Arc<Mutex<Session>>,
-    control: Arc<IndexControl>,
-    phase: Arc<Mutex<Phase>>,
-}
-
-#[derive(Clone)]
-enum Phase {
-    Idle,
-    Running,
-    Ready,
-    Failed(String),
 }
 
 fn parse_port() -> u16 {
@@ -66,7 +46,7 @@ fn parse_port() -> u16 {
     43128
 }
 
-fn dispatch(hub: &Hub, request: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+fn dispatch(engine: &Arc<Engine>, request: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
     // The UI reaches this process through the Vite proxy, so every legitimate
     // request is same-origin. Refuse other sites and DNS-rebound hostnames.
     if !header(request, "host").is_some_and(|host| is_loopback_authority(&host))
@@ -86,37 +66,28 @@ fn dispatch(hub: &Hub, request: &mut Request) -> Response<std::io::Cursor<Vec<u8
     }
 
     let result = (|| -> Result<Vec<u8>, String> {
-        let mut session = hub.session.lock().map_err(|err| err.to_string())?;
-        match (method, path.as_str()) {
-            (Method::Get, "/api/health") => Ok(br#"{"ok":true}"#.to_vec()),
-            (Method::Get, "/api/summary") => json(&lift(session.summary())?),
-            (Method::Post, "/api/open-sample") => json(&lift(session.open_sample())?),
-            (Method::Post, "/api/open-path") => {
-                let req: PathBody = parse_json(&body)?;
-                json(&lift(session.open_path(PathBuf::from(req.path).as_path()))?)
-            }
+        // Job endpoints must not wait for the session lock a running index holds.
+        match (&method, path.as_str()) {
+            (Method::Get, "/api/health") => return Ok(br#"{"ok":true}"#.to_vec()),
             (Method::Post, "/api/begin-open") => {
                 let req: PathBody = parse_json(&body)?;
-                drop(session);
-                begin(hub, move |session, control| {
+                return begin(engine, move |session, control| {
                     session
                         .open_path_controlled(PathBuf::from(req.path).as_path(), Some(control))
                         .map(|_| ())
-                })
+                });
             }
             (Method::Post, "/api/begin-map") => {
                 let req: PathBody = parse_json(&body)?;
-                drop(session);
-                begin(hub, move |session, control| {
+                return begin(engine, move |session, control| {
                     session
                         .open_map_path_controlled(PathBuf::from(req.path).as_path(), Some(control))
                         .map(|_| ())
-                })
+                });
             }
             (Method::Post, "/api/begin-add-map") => {
                 let req: AddMapBody = parse_json(&body)?;
-                drop(session);
-                begin(hub, move |session, control| {
+                return begin(engine, move |session, control| {
                     session
                         .add_map_path_controlled(
                             PathBuf::from(req.path).as_path(),
@@ -124,118 +95,158 @@ fn dispatch(hub: &Hub, request: &mut Request) -> Response<std::io::Cursor<Vec<u8
                             Some(control),
                         )
                         .map(|_| ())
-                })
+                });
             }
-            (Method::Get, "/api/progress") | (Method::Post, "/api/progress") => {
-                drop(session);
-                json(&progress(hub, true)?)
+            (Method::Get | Method::Post, "/api/progress") => {
+                return json(&lift(engine.progress(true))?);
             }
-            (Method::Post, "/api/cancel") => {
-                hub.control.request_cancel();
-                drop(session);
-                json(&progress(hub, false)?)
+            (Method::Post, "/api/cancel") => return json(&lift(engine.cancel())?),
+            _ => {}
+        }
+        match (method, path.as_str()) {
+            (Method::Get, "/api/summary") => {
+                json(&lift(engine.with_session(|session| session.summary()))?)
+            }
+            (Method::Post, "/api/open-sample") => {
+                json(&lift(engine.with_session(|session| session.open_sample()))?)
+            }
+            (Method::Post, "/api/open-path") => {
+                let req: PathBody = parse_json(&body)?;
+                json(&lift(engine.with_session(|session| {
+                    session.open_path(PathBuf::from(req.path).as_path())
+                }))?)
             }
             (Method::Post, "/api/open-bytes") => {
                 let name = filename.unwrap_or_else(|| "upload.log".into());
-                json(&lift(session.open_bytes(&name, body.clone()))?)
+                json(&lift(engine.with_session(|session| {
+                    session.open_bytes(&name, body.clone())
+                }))?)
             }
             (Method::Post, "/api/open-map-path") => {
                 let req: PathBody = parse_json(&body)?;
-                json(&lift(
-                    session.open_map_path(PathBuf::from(req.path).as_path()),
-                )?)
+                json(&lift(engine.with_session(|session| {
+                    session.open_map_path(PathBuf::from(req.path).as_path())
+                }))?)
             }
             (Method::Post, "/api/open-map") => {
                 let json_text = json_text(&body)?;
-                json(&lift(session.open_map_json(&json_text))?)
+                json(&lift(
+                    engine.with_session(|session| session.open_map_json(&json_text)),
+                )?)
             }
             (Method::Post, "/api/add-map") => {
                 let req: AddJsonBody = parse_json(&body)?;
-                json(&lift(session.add_map_json(&req.json, req.channel))?)
+                json(&lift(engine.with_session(|session| {
+                    session.add_map_json(&req.json, req.channel)
+                }))?)
             }
             (Method::Post, "/api/query") => {
                 let query: Query = parse_json(&body)?;
-                json(&lift(session.query(&query))?)
+                json(&lift(engine.with_session(|session| session.query(&query)))?)
             }
             (Method::Post, "/api/values") => {
                 let req: TimeBody = parse_json(&body)?;
-                json(&lift(session.values_at(req.t_us))?)
+                json(&lift(
+                    engine.with_session(|session| session.values_at(req.t_us)),
+                )?)
             }
             (Method::Post, "/api/step") => {
                 let req: StepBody = parse_json(&body)?;
-                json(&lift(session.step(req.t_us, req.direction))?)
+                json(&lift(engine.with_session(|session| {
+                    session.step(req.t_us, req.direction)
+                }))?)
             }
             (Method::Post, "/api/frame") => {
                 let req: TimeBody = parse_json(&body)?;
-                json(&lift(session.frame_at(req.t_us))?)
+                json(&lift(
+                    engine.with_session(|session| session.frame_at(req.t_us)),
+                )?)
             }
             (Method::Post, "/api/open-project-path") => {
                 let req: PathBody = parse_json(&body)?;
-                json(&lift(
-                    session.load_project_file(PathBuf::from(req.path).as_path()),
-                )?)
+                json(&lift(engine.with_session(|session| {
+                    session.load_project_file(PathBuf::from(req.path).as_path())
+                }))?)
             }
             (Method::Post, "/api/open-project") => {
                 let req: ProjectBody = parse_json(&body)?;
                 let base = req.base_dir.map(PathBuf::from);
-                json(&lift(
-                    session.load_project_json(&req.json, base.as_deref()),
-                )?)
+                json(&lift(engine.with_session(|session| {
+                    session.load_project_json(&req.json, base.as_deref())
+                }))?)
             }
             (Method::Post, "/api/bus") => {
                 let req: ExportBody = parse_json(&body)?;
-                json(&lift(session.bus_load(req.t0_us, req.t1_us))?)
+                json(&lift(engine.with_session(|session| {
+                    session.bus_load(req.t0_us, req.t1_us)
+                }))?)
             }
             (Method::Post, "/api/capture") => {
                 let req: CaptureBody = parse_json(&body)?;
-                json(&lift(
-                    session.capture_socketcan(&req.iface, req.duration_ms),
-                )?)
+                json(&lift(engine.with_session(|session| {
+                    session.capture_socketcan(&req.iface, req.duration_ms)
+                }))?)
             }
             (Method::Post, "/api/stats") => {
                 let req: StatsBody = parse_json(&body)?;
-                json(&lift(session.stats(&req.name, req.t0_us, req.t1_us))?)
+                json(&lift(engine.with_session(|session| {
+                    session.stats(&req.name, req.t0_us, req.t1_us)
+                }))?)
             }
             (Method::Post, "/api/export-csv") => {
                 let req: ExportBody = parse_json(&body)?;
-                let text = lift(session.export_csv(&req.names, req.t0_us, req.t1_us))?;
+                let text =
+                    lift(engine.with_session(|session| {
+                        session.export_csv(&req.names, req.t0_us, req.t1_us)
+                    }))?;
                 json(&serde_json::json!({ "text": text }))
             }
             (Method::Post, "/api/export-slog") => {
                 let req: ExportBody = parse_json(&body)?;
-                let text = lift(session.export_slog(req.t0_us, req.t1_us))?;
+                let text =
+                    lift(engine.with_session(|session| session.export_slog(req.t0_us, req.t1_us)))?;
                 json(&serde_json::json!({ "text": text }))
             }
             (Method::Post, "/api/math") => {
                 let req: MathBody = parse_json(&body)?;
-                json(&lift(session.set_math(req.channels))?)
+                json(&lift(
+                    engine.with_session(|session| session.set_math(req.channels)),
+                )?)
             }
             (Method::Post, "/api/triggers") => {
                 let req: TriggerBody = parse_json(&body)?;
-                json(&lift(session.set_triggers(req.triggers))?)
+                json(&lift(
+                    engine.with_session(|session| session.set_triggers(req.triggers)),
+                )?)
             }
             (Method::Post, "/api/timeout-factor") => {
                 let req: TimeoutBody = parse_json(&body)?;
-                json(&lift(session.set_timeout_factor(req.factor))?)
+                json(&lift(engine.with_session(|session| {
+                    session.set_timeout_factor(req.factor)
+                }))?)
             }
             (Method::Post, "/api/compare-path") => {
                 let req: PathBody = parse_json(&body)?;
-                json(&lift(
-                    session.open_compare_path(PathBuf::from(req.path).as_path()),
-                )?)
+                json(&lift(engine.with_session(|session| {
+                    session.open_compare_path(PathBuf::from(req.path).as_path())
+                }))?)
             }
             (Method::Post, "/api/compare-bytes") => {
-                json(&lift(session.open_compare_bytes(body.clone()))?)
+                json(&lift(engine.with_session(|session| {
+                    session.open_compare_bytes(body.clone())
+                }))?)
             }
             (Method::Post, "/api/compare-offset") => {
                 let req: OffsetBody = parse_json(&body)?;
-                session.set_compare_offset(req.offset_us);
-                json(&lift(session.summary())?)
+                json(&lift(engine.with_session(|session| {
+                    session.set_compare_offset(req.offset_us);
+                    session.summary()
+                }))?)
             }
-            (Method::Post, "/api/compare-clear") => {
+            (Method::Post, "/api/compare-clear") => json(&lift(engine.with_session(|session| {
                 session.clear_compare();
-                json(&lift(session.summary())?)
-            }
+                session.summary()
+            }))?),
             _ => Err(format!("no route for {path}")),
         }
     })();
@@ -272,95 +283,13 @@ struct AddJsonBody {
 }
 
 fn begin(
-    hub: &Hub,
-    work: impl FnOnce(&mut Session, &IndexControl) -> loom_core::Result<()> + Send + 'static,
+    engine: &Arc<Engine>,
+    work: impl FnOnce(&mut loom_core::Session, &loom_core::IndexControl) -> loom_core::Result<()>
+        + Send
+        + 'static,
 ) -> Result<Vec<u8>, String> {
-    {
-        let mut phase = hub.phase.lock().map_err(|err| err.to_string())?;
-        if matches!(*phase, Phase::Running) {
-            return Err("an index is already running".into());
-        }
-        hub.control.reset(0);
-        *phase = Phase::Running;
-    }
-    let session = Arc::clone(&hub.session);
-    let control = Arc::clone(&hub.control);
-    let phase = Arc::clone(&hub.phase);
-    std::thread::spawn(move || {
-        let result = {
-            let mut session = match session.lock() {
-                Ok(guard) => guard,
-                Err(err) => {
-                    if let Ok(mut phase) = phase.lock() {
-                        *phase = Phase::Failed(err.to_string());
-                    }
-                    return;
-                }
-            };
-            work(&mut session, &control)
-        };
-        if let Ok(mut phase) = phase.lock() {
-            *phase = match result {
-                Ok(()) => Phase::Ready,
-                Err(err) => Phase::Failed(err.to_string()),
-            };
-        }
-    });
+    lift(engine.begin(work))?;
     json(&serde_json::json!({ "started": true }))
-}
-
-/// `take` hands a finished result to the caller and resets to idle. Cancel
-/// only peeks, so a result that lands as Cancel is clicked still reaches the poll.
-fn progress(hub: &Hub, take: bool) -> Result<IndexStatus, String> {
-    let mut phase = hub.phase.lock().map_err(|err| err.to_string())?;
-    let (bytes_done, bytes_total, frames, skipped) = hub.control.snapshot();
-    let mut status = IndexStatus {
-        running: false,
-        done: false,
-        idle: false,
-        bytes_done,
-        bytes_total,
-        frames,
-        skipped,
-        summary: None,
-        error: None,
-    };
-    let current = if take {
-        std::mem::replace(&mut *phase, Phase::Idle)
-    } else {
-        phase.clone()
-    };
-    match current {
-        Phase::Idle => status.idle = true,
-        Phase::Running => {
-            *phase = Phase::Running;
-            status.running = true;
-        }
-        Phase::Ready => match hub.session.lock() {
-            Ok(session) => match session.summary() {
-                Ok(summary) => {
-                    status.done = true;
-                    status.bytes_done = summary.bytes;
-                    status.frames = summary.frame_count;
-                    status.skipped = summary.skipped_records;
-                    status.summary = Some(summary);
-                }
-                Err(err) => {
-                    status.done = true;
-                    status.error = Some(err.to_string());
-                }
-            },
-            Err(err) => {
-                *phase = Phase::Ready;
-                return Err(err.to_string());
-            }
-        },
-        Phase::Failed(message) => {
-            status.done = true;
-            status.error = Some(message);
-        }
-    }
-    Ok(status)
 }
 
 #[derive(Deserialize)]

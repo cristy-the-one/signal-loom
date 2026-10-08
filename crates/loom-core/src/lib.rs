@@ -10,6 +10,7 @@ mod decode;
 mod dto;
 mod error;
 mod index;
+mod jobs;
 mod map;
 mod project;
 mod scan;
@@ -25,6 +26,7 @@ pub use dto::{
 };
 pub use error::{Error, Result};
 pub use index::IndexControl;
+pub use jobs::Engine;
 pub use map::SignalMap;
 pub use project::{Bookmark, ProjectFile, ViewState, PROJECT_FORMAT};
 pub use project::{MathChannel, Note, ThresholdTrigger};
