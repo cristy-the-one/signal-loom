@@ -576,7 +576,8 @@ impl IndexedLog {
     fn scan_from(&self, idx: usize, mut visit: impl FnMut(&Rec) -> bool) -> Result<()> {
         let checkpoint = &self.checkpoints[idx];
         self.source.with_reader(|reader| {
-            let mut scanner = Scanner::resume(reader, self.body, checkpoint.offset)?;
+            let mut scanner =
+                Scanner::resume_at(reader, self.body, checkpoint.offset, checkpoint.t_us)?;
             let mut last = Some(checkpoint.t_us);
             while let Some(mut rec) = scanner.next_rec()? {
                 match order_time(&mut last, rec.t_us) {

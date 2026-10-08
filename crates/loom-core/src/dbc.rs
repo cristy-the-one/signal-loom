@@ -1,7 +1,7 @@
 //! Vector DBC import.
 //!
 //! This reads the message and signal records a cluster engineer actually
-//! uses: `BO_`, `SG_`, `VAL_`, message comments, and `GenMsgCycleTime`.
+//! uses: `BO_`, `SG_`, `VAL_`, and `GenMsgCycleTime`.
 //! A multiplexor (`M`) and its cases (`m0`, `m1`, …) are imported. A case is
 //! decoded only while the multiplexor matches. A broken record is skipped
 //! and listed on the map; the rest of the file is still used.
@@ -9,13 +9,13 @@
 use crate::decode::{DecodeSpec, Endian};
 use crate::error::{Error, Result};
 use crate::map::{unique_name, MapMessage, MappedSignal, SignalMap};
+use crate::scan::id::mask_29;
 use std::collections::{HashMap, HashSet};
 
 pub fn parse(text: &str) -> Result<SignalMap> {
     let mut messages: Vec<MessageBuild> = Vec::new();
     let mut current: Option<usize> = None;
     let mut cycles: HashMap<u32, u64> = HashMap::new();
-    let mut comments: HashMap<u32, String> = HashMap::new();
     let mut warnings = Vec::new();
 
     for raw in text.lines() {
@@ -65,9 +65,6 @@ pub fn parse(text: &str) -> Result<SignalMap> {
         }
         if let Some(id) = cycle_time(line) {
             cycles.insert(id.0, id.1);
-        }
-        if let Some((id, comment)) = message_comment(line) {
-            comments.insert(id, comment);
         }
     }
 
@@ -143,7 +140,6 @@ pub fn parse(text: &str) -> Result<SignalMap> {
             "DBC has no usable signals. Malformed records were skipped.{extra}"
         )));
     }
-    let _ = comments;
     Ok(SignalMap {
         name: "DBC import".to_string(),
         signals,
@@ -360,16 +356,6 @@ fn value_table(line: &str) -> Option<ValueTable> {
     Some(ValueTable { id, name, rows })
 }
 
-fn message_comment(line: &str) -> Option<(u32, String)> {
-    // CM_ BO_ 416 "Powertrain";
-    let rest = line.strip_prefix("CM_")?.trim();
-    let rest = rest.strip_prefix("BO_")?.trim();
-    let mut parts = rest.split_whitespace();
-    let id = normalize_id(parse_int(parts.next()?).ok()?);
-    let comment = quoted(rest).unwrap_or_default();
-    Some((id, comment))
-}
-
 fn push_warn(warnings: &mut Vec<String>, message: impl Into<String>) {
     if warnings.len() < 32 {
         let message = message.into();
@@ -390,7 +376,7 @@ fn parse_int(text: &str) -> std::result::Result<u32, String> {
 
 /// Vector sets bit 31 on extended identifiers.
 fn normalize_id(id: u32) -> u32 {
-    id & 0x1FFF_FFFF
+    mask_29(id)
 }
 
 #[cfg(test)]
