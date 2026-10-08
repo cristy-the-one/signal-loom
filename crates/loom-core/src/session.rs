@@ -4,7 +4,10 @@ use crate::dto::{
     Summary, ValueDto, WindowStats,
 };
 use crate::error::{Error, Result};
-use crate::index::{decimate_points, IndexControl, IndexedLog, QueryWindow, Series};
+use crate::index::{
+    csv_header, decimate_points, truncation_note, Export, IndexControl, IndexedLog, QueryWindow,
+    Series, EXPORT_ROW_CAP,
+};
 use crate::map::SignalMap;
 use crate::project::{self, MathChannel, ProjectFile, ThresholdTrigger};
 use crate::scan::LogFormat;
@@ -491,13 +494,19 @@ impl Session {
     }
 
     pub fn export_csv(&self, names: &[String], t0_us: u64, t1_us: u64) -> Result<String> {
+        Ok(self.export_csv_report(names, t0_us, t1_us)?.text)
+    }
+
+    /// The CSV export with its row count and whether the row cap cut it short.
+    /// Physical signals and math channels export on their own, not together.
+    pub fn export_csv_report(&self, names: &[String], t0_us: u64, t1_us: u64) -> Result<Export> {
         let (math, physical): (Vec<String>, Vec<String>) = names
             .iter()
             .cloned()
             .partition(|name| self.math.iter().any(|channel| &channel.name == name));
         match (math.is_empty(), physical.is_empty()) {
             (true, _) => self.log()?.export_csv(&physical, t0_us, t1_us),
-            (false, true) => export_math_csv(self, &math, t0_us, t1_us),
+            (false, true) => export_math_csv(self, &math, t0_us, t1_us, EXPORT_ROW_CAP),
             (false, false) => Err(Error::msg(
                 "export the math channel on its own, or export physical signals on their own",
             )),
@@ -505,21 +514,26 @@ impl Session {
     }
 
     pub fn export_slog(&self, t0_us: u64, t1_us: u64) -> Result<String> {
+        Ok(self.export_slog_report(t0_us, t1_us)?.text)
+    }
+
+    /// The trimmed SLOG with its row count and whether the row cap cut it short.
+    pub fn export_slog_report(&self, t0_us: u64, t1_us: u64) -> Result<Export> {
         self.log()?.export_slog(t0_us, t1_us)
     }
 
     /// Export to a `.csv` file on disk. Returns the bytes written.
     pub fn save_csv(&self, path: &Path, names: &[String], t0_us: u64, t1_us: u64) -> Result<u64> {
-        let text = self.export_csv(names, t0_us, t1_us)?;
-        project::write_as(path, "csv", &text)?;
-        Ok(text.len() as u64)
+        let export = self.export_csv_report(names, t0_us, t1_us)?;
+        project::write_as(path, "csv", &export.text)?;
+        Ok(export.text.len() as u64)
     }
 
     /// Trim the log to a `.slog` file on disk. Returns the bytes written.
     pub fn save_slog(&self, path: &Path, t0_us: u64, t1_us: u64) -> Result<u64> {
-        let text = self.export_slog(t0_us, t1_us)?;
-        project::write_as(path, "slog", &text)?;
-        Ok(text.len() as u64)
+        let export = self.export_slog_report(t0_us, t1_us)?;
+        project::write_as(path, "slog", &export.text)?;
+        Ok(export.text.len() as u64)
     }
 
     pub fn bus_load(&self, t0_us: u64, t1_us: u64) -> Result<crate::dto::BusLoad> {
@@ -1096,17 +1110,21 @@ fn stats_of_points(name: &str, series: &Series) -> Result<WindowStats> {
     })
 }
 
-fn export_math_csv(session: &Session, names: &[String], t0_us: u64, t1_us: u64) -> Result<String> {
-    let mut header = String::from("t_us");
+/// A wide CSV of math channels. The 4,000,000-sample limit on the raw signals
+/// is enforced by `IndexedLog::samples`; `cap` limits the rows written.
+fn export_math_csv(
+    session: &Session,
+    names: &[String],
+    t0_us: u64,
+    t1_us: u64,
+    cap: usize,
+) -> Result<Export> {
     let mut columns = Vec::new();
     for name in names {
         let channel = session
             .math_channel(name)
             .ok_or_else(|| Error::msg(format!("no math channel named {name}")))?;
-        let series = session.math_series(channel, t0_us, t1_us)?;
-        header.push(',');
-        header.push_str(name);
-        columns.push(series);
+        columns.push(session.math_series(channel, t0_us, t1_us)?);
     }
     let mut times = BTreeSet::new();
     for series in &columns {
@@ -1114,10 +1132,11 @@ fn export_math_csv(session: &Session, names: &[String], t0_us: u64, t1_us: u64) 
             times.insert(*t);
         }
     }
-    let mut out = header;
-    out.push('\n');
+    let truncated = times.len() > cap;
+    let mut out = csv_header(names.iter().map(String::as_str));
     let mut cursors = vec![0usize; columns.len()];
-    for t in times {
+    let mut rows = 0usize;
+    for t in times.into_iter().take(cap) {
         out.push_str(&t.to_string());
         for (series, cursor) in columns.iter().zip(cursors.iter_mut()) {
             out.push(',');
@@ -1129,8 +1148,16 @@ fn export_math_csv(session: &Session, names: &[String], t0_us: u64, t1_us: u64) 
             }
         }
         out.push('\n');
+        rows += 1;
     }
-    Ok(out)
+    if truncated {
+        out.push_str(&truncation_note(cap));
+    }
+    Ok(Export {
+        text: out,
+        rows,
+        truncated,
+    })
 }
 
 /// How many of the map's message ids carry at least one frame in the log.
@@ -1687,5 +1714,67 @@ F 30000 1A0 401F000000000000
             .events
             .iter()
             .any(|event| event.label == "Trigger VehicleSpeed > 50"));
+    }
+
+    const COMMA_MAP: &str = r#"{"name":"dash","version":1,"messages":[{"id":"0x1A0","name":"Dash",
+        "signals":[{"name":"Speed, km/h","startBit":0,"bitLength":16,"factor":0.25,"unit":"km/h"}]}]}"#;
+
+    #[test]
+    fn a_signal_name_with_a_comma_is_quoted_in_the_export_header() {
+        let mut session = Session::new();
+        session
+            .open_bytes("main.slog", RPM_LOG.as_bytes().to_vec())
+            .unwrap();
+        session.open_map_json(COMMA_MAP).unwrap();
+        let export = session
+            .export_csv_report(&["Speed, km/h".to_string()], 0, 20_000)
+            .unwrap();
+        assert_eq!(export.text.lines().next(), Some("t_us,\"Speed, km/h\""));
+        assert!(!export.truncated);
+    }
+
+    #[test]
+    fn a_math_channel_name_with_a_quote_is_escaped_in_the_export_header() {
+        let mut session = Session::new();
+        session
+            .open_bytes("main.slog", RPM_LOG.as_bytes().to_vec())
+            .unwrap();
+        session.open_map_json(RPM_MAP).unwrap();
+        session
+            .set_math(vec![MathChannel {
+                name: "A\"B".to_string(),
+                expr: "EngineRPM * 2".to_string(),
+                unit: String::new(),
+            }])
+            .unwrap();
+        let csv = session
+            .export_csv(&["A\"B".to_string()], 0, 20_000)
+            .unwrap();
+        assert_eq!(csv.lines().next(), Some("t_us,\"A\"\"B\""));
+    }
+
+    #[test]
+    fn a_math_export_cut_at_the_row_cap_says_so() {
+        let mut session = Session::new();
+        session
+            .open_bytes("main.slog", RPM_LOG.as_bytes().to_vec())
+            .unwrap();
+        session.open_map_json(RPM_MAP).unwrap();
+        session
+            .set_math(vec![MathChannel {
+                name: "Double".to_string(),
+                expr: "EngineRPM * 2".to_string(),
+                unit: String::new(),
+            }])
+            .unwrap();
+        let names = ["Double".to_string()];
+        let whole = export_math_csv(&session, &names, 0, 20_000, 2).unwrap();
+        assert_eq!((whole.rows, whole.truncated), (2, false));
+        let cut = export_math_csv(&session, &names, 0, 20_000, 1).unwrap();
+        assert_eq!((cut.rows, cut.truncated), (1, true));
+        assert_eq!(
+            cut.text,
+            "t_us,Double\n0,1600.000000\n# Truncated by Signal Loom at 1 rows. Narrow the window to export the rest.\n"
+        );
     }
 }

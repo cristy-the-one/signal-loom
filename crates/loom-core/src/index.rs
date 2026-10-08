@@ -17,6 +17,41 @@ const MAX_WARNINGS: usize = 32;
 const MAX_QUERY_POINTS: usize = 8_000;
 /// Full-resolution reads for statistics and export. 16 bytes per sample.
 const MAX_WINDOW_SAMPLES: usize = 4_000_000;
+/// Most data rows one export writes. A longer window is cut here, and the
+/// export says so.
+pub(crate) const EXPORT_ROW_CAP: usize = 500_000;
+
+/// One export: its text, how many data rows it holds, and whether the row cap
+/// cut it short. A cut export also ends with a `#` line saying so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    pub text: String,
+    pub rows: usize,
+    pub truncated: bool,
+}
+
+pub(crate) fn truncation_note(cap: usize) -> String {
+    format!("# Truncated by Signal Loom at {cap} rows. Narrow the window to export the rest.\n")
+}
+
+/// The first line of a wide CSV export: `t_us`, then one column per name. A
+/// name holding a comma, a double quote, CR or LF is quoted, and its quotes
+/// doubled (RFC 4180).
+pub(crate) fn csv_header<'a>(columns: impl IntoIterator<Item = &'a str>) -> String {
+    let mut line = String::from("t_us");
+    for name in columns {
+        line.push(',');
+        if name.contains([',', '"', '\r', '\n']) {
+            line.push('"');
+            line.push_str(&name.replace('"', "\"\""));
+            line.push('"');
+        } else {
+            line.push_str(name);
+        }
+    }
+    line.push('\n');
+    line
+}
 
 /// Shared with the UI while a path is indexed. The scan checks `cancel`
 /// every few dozen records and publishes how far the file has been read.
@@ -765,7 +800,17 @@ impl IndexedLog {
         })
     }
 
-    pub fn export_csv(&self, names: &[String], t0_us: u64, t1_us: u64) -> Result<String> {
+    pub fn export_csv(&self, names: &[String], t0_us: u64, t1_us: u64) -> Result<Export> {
+        self.export_csv_capped(names, t0_us, t1_us, EXPORT_ROW_CAP)
+    }
+
+    fn export_csv_capped(
+        &self,
+        names: &[String],
+        t0_us: u64,
+        t1_us: u64,
+        cap: usize,
+    ) -> Result<Export> {
         if names.is_empty() {
             return Err(Error::msg("export needs at least one signal"));
         }
@@ -779,13 +824,9 @@ impl IndexedLog {
                 .ok_or_else(|| Error::msg(format!("no signal named {name}")))?;
             indexes.push(idx);
         }
-        let mut out = String::from("t_us");
-        for name in names {
-            out.push(',');
-            out.push_str(name);
-        }
-        out.push('\n');
+        let mut out = csv_header(names.iter().map(String::as_str));
         let mut rows = 0usize;
+        let mut truncated = false;
         let mut held = self.snapshot(self.floor_checkpoint(t0));
         let mut dirty = false;
         self.scan_from(self.floor_checkpoint(t0), |rec| {
@@ -799,7 +840,8 @@ impl IndexedLog {
                 }
             });
             if dirty && rec.t_us >= t0 {
-                if rows >= 500_000 {
+                if rows == cap {
+                    truncated = true;
                     return false;
                 }
                 out.push_str(&rec.t_us.to_string());
@@ -817,15 +859,27 @@ impl IndexedLog {
         if rows == 0 {
             return Err(Error::msg("that window has no samples to export"));
         }
-        Ok(out)
+        if truncated {
+            out.push_str(&truncation_note(cap));
+        }
+        Ok(Export {
+            text: out,
+            rows,
+            truncated,
+        })
     }
 
-    pub fn export_slog(&self, t0_us: u64, t1_us: u64) -> Result<String> {
+    pub fn export_slog(&self, t0_us: u64, t1_us: u64) -> Result<Export> {
+        self.export_slog_capped(t0_us, t1_us, EXPORT_ROW_CAP)
+    }
+
+    fn export_slog_capped(&self, t0_us: u64, t1_us: u64, cap: usize) -> Result<Export> {
         let (t0, t1) = ordered_range(t0_us, t1_us);
         let mut out = String::from(
             "SLOGv1\n# Trimmed by Signal Loom. Synthetic or captured, this is only the selected window.\n",
         );
         let mut rows = 0usize;
+        let mut truncated = false;
         self.scan_from(self.floor_checkpoint(t0), |rec| {
             if rec.t_us > t1 {
                 return false;
@@ -833,30 +887,32 @@ impl IndexedLog {
             if rec.t_us < t0 {
                 return true;
             }
-            if rows >= 500_000 {
+            let line = match &rec.kind {
+                RecKind::Frame { id, dlc, data, .. } => {
+                    format!("F {} {id:X} {}\n", rec.t_us, hex_payload(data, *dlc))
+                }
+                RecKind::Event { label } => format!("E {} {label}\n", rec.t_us),
+                RecKind::Sample { .. } => return true,
+            };
+            if rows == cap {
+                truncated = true;
                 return false;
             }
-            match &rec.kind {
-                RecKind::Frame { id, dlc, data, .. } => {
-                    out.push_str(&format!(
-                        "F {} {id:X} {}\n",
-                        rec.t_us,
-                        hex_payload(data, *dlc)
-                    ));
-                    rows += 1;
-                }
-                RecKind::Event { label } => {
-                    out.push_str(&format!("E {} {label}\n", rec.t_us));
-                    rows += 1;
-                }
-                RecKind::Sample { .. } => {}
-            }
+            out.push_str(&line);
+            rows += 1;
             true
         })?;
         if rows == 0 {
             return Err(Error::msg("that window has no frames to export"));
         }
-        Ok(out)
+        if truncated {
+            out.push_str(&truncation_note(cap));
+        }
+        Ok(Export {
+            text: out,
+            rows,
+            truncated,
+        })
     }
 
     /// Whether `name` is a decoded signal of this log.
@@ -1914,5 +1970,54 @@ mod tests {
         assert_eq!(log.records_in_window(600_000, 300_000), 512);
         assert_eq!(log.records_in_window(0, 1_000_000), 1001);
         assert_eq!(log.records_in_window(900_000, 2_000_000), 233);
+    }
+
+    #[test]
+    fn a_signal_name_with_a_comma_is_quoted_in_the_csv_header() {
+        let map = SignalMap::parse(
+            r#"{"name":"dash","version":1,"messages":[{"id":"0x1A0","name":"Dash",
+            "signals":[{"name":"Speed, km/h","startBit":0,"bitLength":16,"factor":0.25,"unit":"km/h"}]}]}"#,
+        )
+        .unwrap();
+        let log = IndexedLog::open_bytes(
+            b"SLOGv1\nF 0 1A0 800C881378640000\nF 10000 1A0 800C881378640000\n".to_vec(),
+            Some(&map),
+        )
+        .unwrap();
+        let export = log
+            .export_csv(&["Speed, km/h".to_string()], 0, 20_000)
+            .unwrap();
+        assert_eq!(export.text.lines().next(), Some("t_us,\"Speed, km/h\""));
+        assert!(!export.truncated);
+    }
+
+    #[test]
+    fn a_csv_export_cut_at_the_row_cap_says_so() {
+        let log = ramp_log();
+        let names = ["Speed".to_string()];
+        let whole = log.export_csv_capped(&names, 0, 1_000_000, 1001).unwrap();
+        assert_eq!((whole.rows, whole.truncated), (1001, false));
+        assert!(!whole.text.contains("Truncated"));
+        let cut = log.export_csv_capped(&names, 0, 1_000_000, 3).unwrap();
+        assert_eq!((cut.rows, cut.truncated), (3, true));
+        assert_eq!(
+            cut.text,
+            "t_us,Speed\n0,0.000000\n1000,1.000000\n2000,2.000000\n# Truncated by Signal Loom at 3 rows. Narrow the window to export the rest.\n"
+        );
+    }
+
+    #[test]
+    fn a_slog_export_cut_at_the_row_cap_says_so() {
+        let text = b"SLOGv1\nF 0 1A0 01\nF 1000 1A0 02\nF 2000 1A0 03\n".to_vec();
+        let log = IndexedLog::open_bytes(text, None).unwrap();
+        let whole = log.export_slog_capped(0, 2_000, 3).unwrap();
+        assert_eq!((whole.rows, whole.truncated), (3, false));
+        let cut = log.export_slog_capped(0, 2_000, 2).unwrap();
+        assert_eq!((cut.rows, cut.truncated), (2, true));
+        assert_eq!(cut.text.lines().count(), 5);
+        assert_eq!(
+            cut.text.lines().last(),
+            Some("# Truncated by Signal Loom at 2 rows. Narrow the window to export the rest.")
+        );
     }
 }
