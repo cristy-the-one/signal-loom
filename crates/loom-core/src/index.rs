@@ -317,14 +317,12 @@ impl IndexedLog {
                 .filter_map(|name| self.name_index.get(name).copied())
                 .collect()
         };
-        let bucket_count = (max_points / 2).max(1);
-        let mut buckets = vec![vec![None; bucket_count]; wanted.len()];
+        let mut buckets: Vec<Vec<Option<Bucket>>> = vec![Vec::new(); wanted.len()];
         let mut lead = vec![None; wanted.len()];
-        let slot_of: HashMap<usize, usize> = wanted
-            .iter()
-            .enumerate()
-            .map(|(slot, &signal)| (signal, slot))
-            .collect();
+        let mut slot_of: Vec<Option<usize>> = vec![None; self.signals.len()];
+        for (slot, &signal) in wanted.iter().enumerate() {
+            slot_of[signal] = Some(slot);
+        }
 
         let idx = self.floor_checkpoint(t0);
         let mut held = self.snapshot(idx);
@@ -342,8 +340,12 @@ impl IndexedLog {
                 return false;
             }
             self.touch(rec, &mut held, |signal, value| {
-                if let Some(&slot) = slot_of.get(&signal) {
-                    push_bucket(&mut buckets[slot], bucket_count, t0, t1, rec.t_us, value);
+                if let Some(slot) = slot_of.get(signal).copied().flatten() {
+                    let row = &mut buckets[slot];
+                    if row.is_empty() {
+                        row.resize(bucket_count(max_points, lead[slot].is_some()), None);
+                    }
+                    push_bucket(row, t0, t1, rec.t_us, value);
                 }
             });
             true
@@ -357,7 +359,7 @@ impl IndexedLog {
             let signal = &self.signals[signal_i];
             let mut points = Vec::new();
             for bucket in buckets[slot].iter().flatten() {
-                points.extend(bucket.emit());
+                bucket.emit(&mut points);
             }
             if let Some(value) = lead[slot] {
                 let replace = match points.first() {
@@ -367,12 +369,14 @@ impl IndexedLog {
                     }
                 };
                 if replace {
+                    // Only a budget of two forces a choice: the lead and one bucket point.
+                    // The earlier point gives way so the series still ends on the latest one.
+                    let excess = (points.len() + 1).saturating_sub(max_points);
+                    points.drain(..excess);
                     points.insert(0, (t0, value));
                 }
             }
-            if points.len() > max_points {
-                points.truncate(max_points);
-            }
+            points.truncate(max_points);
             series.push(Series {
                 name: signal.name.clone(),
                 unit: signal.unit.clone(),
@@ -1599,25 +1603,28 @@ struct Bucket {
 }
 
 impl Bucket {
-    fn emit(&self) -> Vec<(u64, f64)> {
+    fn emit(&self, out: &mut Vec<(u64, f64)>) {
         if self.min_t == self.max_t {
-            vec![(self.min_t, self.min_v)]
+            out.push((self.min_t, self.min_v));
         } else if self.min_t < self.max_t {
-            vec![(self.min_t, self.min_v), (self.max_t, self.max_v)]
+            out.push((self.min_t, self.min_v));
+            out.push((self.max_t, self.max_v));
         } else {
-            vec![(self.max_t, self.max_v), (self.min_t, self.min_v)]
+            out.push((self.max_t, self.max_v));
+            out.push((self.min_t, self.min_v));
         }
     }
 }
 
-fn push_bucket(
-    buckets: &mut [Option<Bucket>],
-    bucket_count: usize,
-    t0: u64,
-    t1: u64,
-    t: u64,
-    value: f64,
-) {
+/// Buckets for one signal. Each bucket emits up to two points and a lead point
+/// takes one more, so with a lead the budget loses a slot before it is halved.
+fn bucket_count(max_points: usize, has_lead: bool) -> usize {
+    let budget = if has_lead { max_points - 1 } else { max_points };
+    (budget / 2).max(1)
+}
+
+fn push_bucket(buckets: &mut [Option<Bucket>], t0: u64, t1: u64, t: u64, value: f64) {
+    let bucket_count = buckets.len();
     let span = t1.saturating_sub(t0).max(1);
     let mut index = ((u128::from(t.saturating_sub(t0)) * u128::from(bucket_count as u64))
         / u128::from(span)) as usize;
@@ -1643,5 +1650,82 @@ fn push_bucket(
                 bucket.max_t = t;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Speed is `i` km/h at `i * 1000` µs for i in 0..=1000, a dense rising ramp.
+    fn ramp_log() -> IndexedLog {
+        let mut text = String::from("t_us,signal,value,unit\n");
+        for i in 0..=1000u64 {
+            text.push_str(&format!("{},Speed,{},km/h\n", i * 1000, i));
+        }
+        IndexedLog::open_bytes(text.into_bytes(), None).unwrap()
+    }
+
+    fn speed_points(log: &IndexedLog, t0_us: u64, max_points: usize) -> Vec<(u64, f64)> {
+        let series = log
+            .query(&QueryWindow {
+                t0_us,
+                t1_us: 1_000_000,
+                signals: vec!["Speed".into()],
+                max_points,
+            })
+            .unwrap();
+        series[0].points.clone()
+    }
+
+    #[test]
+    fn dense_window_keeps_last_sample_for_even_budgets() {
+        let log = ramp_log();
+        for max_points in (2..=64).step_by(2) {
+            let points = speed_points(&log, 300_500, max_points);
+            assert!(points.len() <= max_points, "{max_points}: {points:?}");
+            assert_eq!(points.first(), Some(&(300_500, 300.0)), "{max_points}");
+            assert_eq!(points.last(), Some(&(1_000_000, 1000.0)), "{max_points}");
+        }
+    }
+
+    #[test]
+    fn points_never_exceed_max_points() {
+        let log = ramp_log();
+        for max_points in 0..=40 {
+            for t0_us in [0, 300_500] {
+                let points = speed_points(&log, t0_us, max_points);
+                assert!(
+                    points.len() <= max_points.max(2),
+                    "{max_points} at {t0_us}: {points:?}"
+                );
+                assert_eq!(points.last(), Some(&(1_000_000, 1000.0)));
+            }
+        }
+    }
+
+    #[test]
+    fn signal_without_samples_in_window_keeps_its_lead_point() {
+        let text = "t_us,signal,value,unit\n0,Speed,7,km/h\n0,RPM,800,rpm\n2000,Speed,9,km/h\n5000,Oil,30,kPa\n";
+        let log = IndexedLog::open_bytes(text.as_bytes().to_vec(), None).unwrap();
+        let series = log
+            .query(&QueryWindow {
+                t0_us: 1000,
+                t1_us: 3000,
+                signals: vec!["Speed".into(), "RPM".into(), "Oil".into()],
+                max_points: 10,
+            })
+            .unwrap();
+        let points = |name: &str| {
+            series
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap()
+                .points
+                .clone()
+        };
+        assert_eq!(points("Speed"), vec![(1000, 7.0), (2000, 9.0)]);
+        assert_eq!(points("RPM"), vec![(1000, 800.0)]);
+        assert_eq!(points("Oil"), Vec::<(u64, f64)>::new());
     }
 }
