@@ -1653,6 +1653,38 @@ fn push_bucket(buckets: &mut [Option<Bucket>], t0: u64, t1: u64, t: u64, value: 
     }
 }
 
+/// Reduce a time-sorted series to at most `max_points` with the min/max
+/// buckets and lead point `query` gives a physical series. A first point at the
+/// window start takes the lead's place, whether it is the value held there or
+/// a sample taken exactly at the start. Points must
+/// lie in the window with strictly rising times, as `samples` and
+/// `Compiled::eval_series` produce them.
+pub(crate) fn decimate_points(
+    points: Vec<(u64, f64)>,
+    t0_us: u64,
+    t1_us: u64,
+    max_points: usize,
+) -> Vec<(u64, f64)> {
+    let (t0, t1) = ordered_range(t0_us, t1_us);
+    let max_points = max_points.clamp(2, MAX_QUERY_POINTS);
+    let lead = points.first().filter(|(t, _)| *t == t0).copied();
+    let mut buckets = vec![None; bucket_count(max_points, lead.is_some())];
+    for &(t, value) in &points[usize::from(lead.is_some())..] {
+        push_bucket(&mut buckets, t0, t1, t, value);
+    }
+    let mut out = Vec::new();
+    for bucket in buckets.iter().flatten() {
+        bucket.emit(&mut out);
+    }
+    if let Some(lead) = lead {
+        let excess = (out.len() + 1).saturating_sub(max_points);
+        out.drain(..excess);
+        out.insert(0, lead);
+    }
+    out.truncate(max_points);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
