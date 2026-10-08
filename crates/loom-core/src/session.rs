@@ -8,7 +8,10 @@ use crate::index::{decimate_points, IndexControl, IndexedLog, QueryWindow, Serie
 use crate::map::SignalMap;
 use crate::project::{self, MathChannel, ProjectFile, ThresholdTrigger};
 use crate::scan::LogFormat;
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 /// A DBC or JSON map larger than this is not a signal map.
@@ -23,7 +26,7 @@ const SAMPLE_MAP_NAME: &str = "cluster.map.json";
 /// One open recording. The UI asks for windows; the index stays here.
 #[derive(Default)]
 pub struct Session {
-    log: Option<IndexedLog>,
+    log: LogSlot,
     map: Option<SignalMap>,
     log_label: String,
     log_path: Option<PathBuf>,
@@ -35,6 +38,37 @@ pub struct Session {
     map_notes: Vec<String>,
     /// Set by the user or a project; `None` is the default.
     timeout_factor: Option<f64>,
+}
+
+/// The open log and what is derived from it. The log is replaced only through
+/// `set`, which drops the derived data, so a new log cannot show old triggers.
+#[derive(Default)]
+struct LogSlot {
+    log: Option<IndexedLog>,
+    trigger_events: RefCell<Option<TriggerEvents>>,
+}
+
+/// Event lane for one trigger set on one log: the log's own events merged with
+/// the trigger crossings, capped. Valid only while `triggers` is the live set.
+struct TriggerEvents {
+    triggers: Vec<ThresholdTrigger>,
+    events: Vec<EventDto>,
+    warnings: Vec<String>,
+}
+
+impl LogSlot {
+    fn set(&mut self, log: Option<IndexedLog>) {
+        self.log = log;
+        self.trigger_events.get_mut().take();
+    }
+}
+
+impl Deref for LogSlot {
+    type Target = Option<IndexedLog>;
+
+    fn deref(&self) -> &Option<IndexedLog> {
+        &self.log
+    }
 }
 
 impl Session {
@@ -63,7 +97,7 @@ impl Session {
         self.map_path = map_path;
         self.log_label = SAMPLE_LOG_NAME.to_string();
         self.log_path = Some(log_path);
-        self.log = Some(log);
+        self.log.set(Some(log));
         self.summary()
     }
 
@@ -123,7 +157,7 @@ impl Session {
             }
             self.map_notes = kept_notes;
         }
-        self.log = Some(indexed);
+        self.log.set(Some(indexed));
         self.summary()
     }
 
@@ -170,7 +204,7 @@ impl Session {
         self.map_notes = kept_notes;
         self.log_label = label.to_string();
         self.log_path = None;
-        self.log = Some(indexed);
+        self.log.set(Some(indexed));
         self.summary()
     }
 
@@ -370,16 +404,9 @@ impl Session {
     }
 
     pub fn set_triggers(&mut self, triggers: Vec<ThresholdTrigger>) -> Result<Summary> {
+        let log = self.log()?;
         for trigger in &triggers {
-            if !matches!(
-                trigger.op.as_str(),
-                ">" | "<" | ">=" | "<=" | "gt" | "lt" | "ge" | "le"
-            ) {
-                return Err(Error::msg("trigger comparison must be >, <, >=, or <="));
-            }
-            if !trigger.value.is_finite() {
-                return Err(Error::msg("trigger level must be finite"));
-            }
+            check_trigger(log, &self.math, trigger)?;
         }
         self.triggers = triggers;
         self.summary()
@@ -543,6 +570,7 @@ impl Session {
     pub fn summary(&self) -> Result<Summary> {
         let log = self.log()?;
         let uses_map = log.format() != LogFormat::DecodedCsv;
+        let (events, trigger_warnings) = self.merged_events(log);
         Ok(Summary {
             timeout_factor: self.timeout_factor(),
             map_match: map_match(self.map.as_ref(), log),
@@ -597,7 +625,7 @@ impl Session {
                 }
                 signals
             },
-            events: self.merged_events(log)?,
+            events,
             skipped_records: log.skipped(),
             warnings: {
                 let mut warnings = Vec::new();
@@ -611,6 +639,7 @@ impl Session {
                 }
                 warnings.extend(self.map_notes.iter().cloned());
                 warnings.extend(log.warnings().iter().cloned());
+                warnings.extend(trigger_warnings);
                 warnings
             },
         })
@@ -623,12 +652,12 @@ impl Session {
     }
 
     pub fn load_project_json(&mut self, text: &str, base: Option<&Path>) -> Result<ProjectOpen> {
-        let project = ProjectFile::parse(text)?;
+        let (text, mut warnings) = drop_unreadable_triggers(text);
+        let mut project = ProjectFile::parse(&text)?;
         let base = base
             .map(Path::to_path_buf)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let mut warnings = Vec::new();
 
         if project::is_network_path(&project.log_path) {
             return Err(Error::msg(format!(
@@ -709,6 +738,14 @@ impl Session {
             }
         };
 
+        project.triggers.retain(|trigger| {
+            let fit = check_trigger(&log, &project.math, trigger);
+            if let Err(err) = &fit {
+                warnings.push(format!("Trigger {} was not loaded: {err}", trigger.id));
+            }
+            fit.is_ok()
+        });
+
         self.map_notes = map
             .as_ref()
             .map(|map| map.warnings.clone())
@@ -718,7 +755,7 @@ impl Session {
         self.map_path = map_path;
         self.log_label = log_label;
         self.log_path = Some(log_path);
-        self.log = Some(log);
+        self.log.set(Some(log));
         self.math = project.math.clone();
         self.triggers = project.triggers.clone();
         self.compare_offset_us = project.compare_offset_us;
@@ -746,7 +783,14 @@ impl Session {
         })
     }
 
-    fn merged_events(&self, log: &IndexedLog) -> Result<Vec<EventDto>> {
+    /// The event lane and any trigger that could not be evaluated. Cached per
+    /// log and trigger set; a read failure is reported but not cached, so a
+    /// retry scans again.
+    fn merged_events(&self, log: &IndexedLog) -> (Vec<EventDto>, Vec<String>) {
+        let mut cache = self.log.trigger_events.borrow_mut();
+        if let Some(hit) = cache.as_ref().filter(|hit| hit.triggers == self.triggers) {
+            return (hit.events.clone(), hit.warnings.clone());
+        }
         let mut events: Vec<EventDto> = log
             .events()
             .iter()
@@ -755,17 +799,35 @@ impl Session {
                 label: label.clone(),
             })
             .collect();
+        let mut warnings = Vec::new();
+        let mut cacheable = true;
         for trigger in &self.triggers {
-            let Ok(hits) = log.crossings(&trigger.signal, &trigger.op, trigger.value) else {
-                continue;
-            };
-            for (t_us, label) in hits {
-                events.push(EventDto { t_us, label });
+            match log.crossings(&trigger.signal, trigger.op, trigger.value) {
+                Ok(hits) => events.extend(
+                    hits.into_iter()
+                        .map(|(t_us, label)| EventDto { t_us, label }),
+                ),
+                Err(err) => {
+                    warnings.push(format!(
+                        "Trigger {} {} {} could not be evaluated: {err}",
+                        trigger.signal,
+                        trigger.op.symbol(),
+                        trigger.value
+                    ));
+                    cacheable &= !log.has_signal(&trigger.signal);
+                }
             }
         }
         events.sort_by_key(|event| event.t_us);
         events.truncate(5_000);
-        Ok(events)
+        if cacheable {
+            *cache = Some(TriggerEvents {
+                triggers: self.triggers.clone(),
+                events: events.clone(),
+                warnings: warnings.clone(),
+            });
+        }
+        (events, warnings)
     }
 
     pub fn write_project(&self, path: &Path, project: &ProjectFile) -> Result<()> {
@@ -785,7 +847,7 @@ impl Session {
         let main = rebuild(self.log.as_ref(), self.map.as_ref(), control)?;
         let compare = rebuild(self.compare.as_ref(), self.map.as_ref(), control)?;
         if main.is_some() {
-            self.log = main;
+            self.log.set(main);
         }
         if compare.is_some() {
             self.compare = compare;
@@ -811,6 +873,57 @@ fn rebuild(
         Some(bytes) => IndexedLog::open_shared(bytes, map).map(Some),
         None => Ok(None),
     }
+}
+
+/// A trigger the open log can evaluate: a finite level on a decoded signal.
+/// Math channels are not decoded signals, so a trigger cannot target one.
+fn check_trigger(log: &IndexedLog, math: &[MathChannel], trigger: &ThresholdTrigger) -> Result<()> {
+    if !trigger.value.is_finite() {
+        return Err(Error::msg("trigger level must be finite"));
+    }
+    if !log.has_signal(&trigger.signal) {
+        let why = if math.iter().any(|channel| channel.name == trigger.signal) {
+            "triggers work on logged signals, not math channels"
+        } else {
+            "no such signal in this log"
+        };
+        return Err(Error::msg(format!(
+            "trigger signal {}: {why}",
+            trigger.signal
+        )));
+    }
+    Ok(())
+}
+
+/// Remove triggers that do not parse (an unknown comparison, a missing field)
+/// so one bad entry does not fail the whole project. Each one is reported.
+fn drop_unreadable_triggers(text: &str) -> (Cow<'_, str>, Vec<String>) {
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (Cow::Borrowed(text), Vec::new());
+    };
+    let Some(items) = root
+        .get_mut("triggers")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return (Cow::Borrowed(text), Vec::new());
+    };
+    let mut warnings = Vec::new();
+    for (at, item) in std::mem::take(items).into_iter().enumerate() {
+        match serde_json::from_value::<ThresholdTrigger>(item.clone()) {
+            Ok(_) => items.push(item),
+            Err(err) => {
+                let id = item
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| format!("#{}", at + 1), str::to_string);
+                warnings.push(format!("Trigger {id} was not loaded: {err}"));
+            }
+        }
+    }
+    if warnings.is_empty() {
+        return (Cow::Borrowed(text), warnings);
+    }
+    (Cow::Owned(root.to_string()), warnings)
 }
 
 fn extend_notes(notes: &mut Vec<String>, extra: &[String]) {
@@ -1066,6 +1179,7 @@ fn find_up(relative: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::TriggerOp;
 
     const RPM_LOG: &str = "SLOGv1\nF 0 1A0 800C881378640000\nF 10000 1A0 800C881378640000\n";
     const RPM_MAP: &str = r#"{"name":"rpm","version":1,"messages":[{"id":"0x1A0","name":"Powertrain",
@@ -1368,5 +1482,200 @@ mod tests {
             "{err}"
         );
         assert_eq!(session.math.len(), 1);
+    }
+
+    const SWING_LOG: &str = "SLOGv1
+F 0 1A0 800C000000000000
+F 10000 1A0 401F000000000000
+F 20000 1A0 800C000000000000
+F 30000 1A0 401F000000000000
+";
+    const SWING_MAP_HALF: &str = r#"{"name":"rpm","version":1,"messages":[{"id":"0x1A0","name":"Powertrain",
+        "signals":[{"name":"EngineRPM","startBit":0,"bitLength":16,"factor":0.5,"unit":"rpm"}]}]}"#;
+    const SWING_MAP_RENAMED: &str = r#"{"name":"rpm","version":1,"messages":[{"id":"0x1A0","name":"Powertrain",
+        "signals":[{"name":"Revs","startBit":0,"bitLength":16,"factor":0.25,"unit":"rpm"}]}]}"#;
+
+    fn rpm_trigger(op: TriggerOp, value: f64) -> ThresholdTrigger {
+        ThresholdTrigger {
+            id: "rev".into(),
+            signal: "EngineRPM".into(),
+            op,
+            value,
+        }
+    }
+
+    fn trigger_events(summary: &Summary) -> Vec<(u64, &str)> {
+        summary
+            .events
+            .iter()
+            .map(|event| (event.t_us, event.label.as_str()))
+            .collect()
+    }
+
+    fn swing_session() -> Session {
+        let mut session = Session::new();
+        session
+            .open_bytes("swing.slog", SWING_LOG.as_bytes().to_vec())
+            .unwrap();
+        session.open_map_json(RPM_MAP).unwrap();
+        session
+    }
+
+    #[test]
+    fn trigger_ops_keep_their_wire_strings() {
+        for (op, wire) in [
+            (TriggerOp::Gt, ">"),
+            (TriggerOp::Lt, "<"),
+            (TriggerOp::Ge, ">="),
+            (TriggerOp::Le, "<="),
+        ] {
+            let json = serde_json::to_string(&op).unwrap();
+            assert_eq!(json, format!("\"{wire}\""));
+            assert_eq!(serde_json::from_str::<TriggerOp>(&json).unwrap(), op);
+        }
+        for (word, op) in [
+            ("gt", TriggerOp::Gt),
+            ("lt", TriggerOp::Lt),
+            ("ge", TriggerOp::Ge),
+            ("le", TriggerOp::Le),
+        ] {
+            let json = format!("\"{word}\"");
+            assert_eq!(serde_json::from_str::<TriggerOp>(&json).unwrap(), op);
+        }
+        assert!(serde_json::from_str::<TriggerOp>("\"=\"").is_err());
+        let trigger = rpm_trigger(TriggerOp::Ge, 1500.0);
+        assert_eq!(
+            serde_json::to_string(&trigger).unwrap(),
+            r#"{"id":"rev","signal":"EngineRPM","op":">=","value":1500.0}"#
+        );
+    }
+
+    #[test]
+    fn a_trigger_on_an_unknown_signal_is_refused_by_name() {
+        let mut session = swing_session();
+        let mut ghost = rpm_trigger(TriggerOp::Gt, 1500.0);
+        ghost.signal = "EngineRMP".into();
+        let err = session.set_triggers(vec![ghost]).unwrap_err().to_string();
+        assert!(err.contains("EngineRMP"), "{err}");
+        assert!(session.triggers.is_empty());
+    }
+
+    #[test]
+    fn a_trigger_on_a_math_channel_is_refused() {
+        let mut session = swing_session();
+        session
+            .set_math(vec![MathChannel {
+                name: "Half".into(),
+                unit: "rpm".into(),
+                expr: "EngineRPM / 2".into(),
+            }])
+            .unwrap();
+        let mut on_math = rpm_trigger(TriggerOp::Gt, 100.0);
+        on_math.signal = "Half".into();
+        let err = session.set_triggers(vec![on_math]).unwrap_err().to_string();
+        assert!(err.contains("Half") && err.contains("math"), "{err}");
+    }
+
+    #[test]
+    fn trigger_events_follow_the_triggers_and_the_log() {
+        let mut session = swing_session();
+        let summary = session
+            .set_triggers(vec![rpm_trigger(TriggerOp::Gt, 1500.0)])
+            .unwrap();
+        assert_eq!(
+            trigger_events(&summary),
+            [
+                (10_000, "Trigger EngineRPM > 1500"),
+                (30_000, "Trigger EngineRPM > 1500")
+            ]
+        );
+        assert!(session.log.trigger_events.borrow().is_some());
+
+        let summary = session
+            .set_triggers(vec![rpm_trigger(TriggerOp::Le, 800.0)])
+            .unwrap();
+        assert_eq!(
+            trigger_events(&summary),
+            [
+                (0, "Trigger EngineRPM <= 800"),
+                (20_000, "Trigger EngineRPM <= 800")
+            ]
+        );
+
+        session
+            .set_triggers(vec![rpm_trigger(TriggerOp::Gt, 1500.0)])
+            .unwrap();
+        session.reindex_controlled(None).unwrap();
+        assert!(session.log.trigger_events.borrow().is_none());
+
+        // Doubling the factor puts 800 rpm at 1600: hot from the first frame.
+        let summary = session.open_map_json(SWING_MAP_HALF).unwrap();
+        assert_eq!(trigger_events(&summary), [(0, "Trigger EngineRPM > 1500")]);
+    }
+
+    #[test]
+    fn a_trigger_whose_signal_leaves_the_log_is_reported_not_dropped_silently() {
+        let mut session = swing_session();
+        session
+            .set_triggers(vec![rpm_trigger(TriggerOp::Gt, 1500.0)])
+            .unwrap();
+        let summary = session.open_map_json(SWING_MAP_RENAMED).unwrap();
+        assert!(trigger_events(&summary).is_empty());
+        assert_eq!(
+            summary.warnings,
+            ["Trigger EngineRPM > 1500 could not be evaluated: no signal named EngineRPM"]
+        );
+    }
+
+    #[test]
+    fn opening_a_log_clears_the_triggers_and_their_events() {
+        let mut session = swing_session();
+        session
+            .set_triggers(vec![rpm_trigger(TriggerOp::Gt, 1500.0)])
+            .unwrap();
+        let summary = session
+            .open_bytes("again.slog", SWING_LOG.as_bytes().to_vec())
+            .unwrap();
+        assert!(trigger_events(&summary).is_empty());
+    }
+
+    #[test]
+    fn a_project_with_a_bad_trigger_loads_without_it() {
+        let root = fixtures();
+        let project = serde_json::json!({
+            "format": "signal-loom",
+            "version": 1,
+            "logPath": root.join("cluster_drive.slog"),
+            "signalMapPath": root.join("cluster.map.json"),
+            "view": { "playheadUs": 0, "spanUs": 1_000_000, "plotted": [] },
+            "triggers": [
+                { "id": "fast", "signal": "VehicleSpeed", "op": ">", "value": 50.0 },
+                { "id": "odd-op", "signal": "VehicleSpeed", "op": "~", "value": 50.0 },
+                { "id": "ghost", "signal": "NoSuchSignal", "op": "<", "value": 1.0 }
+            ]
+        })
+        .to_string();
+        let mut session = Session::new();
+        let opened = session.load_project_json(&project, None).unwrap();
+        let kept: Vec<&str> = opened
+            .project
+            .triggers
+            .iter()
+            .map(|trigger| trigger.id.as_str())
+            .collect();
+        assert_eq!(kept, ["fast"]);
+        assert_eq!(session.triggers.len(), 1);
+        assert_eq!(opened.warnings.len(), 2, "{:?}", opened.warnings);
+        assert!(opened.warnings[0].starts_with("Trigger odd-op was not loaded: "));
+        assert!(opened.warnings[0].contains("unknown variant `~`"));
+        assert_eq!(
+            opened.warnings[1],
+            "Trigger ghost was not loaded: trigger signal NoSuchSignal: no such signal in this log"
+        );
+        assert!(opened
+            .summary
+            .events
+            .iter()
+            .any(|event| event.label == "Trigger VehicleSpeed > 50"));
     }
 }
