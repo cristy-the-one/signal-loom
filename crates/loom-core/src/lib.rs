@@ -25,9 +25,9 @@ pub use dto::{
     Query, SeriesDto, SignalDto, StepDir, Summary, ValueDto, WindowStats,
 };
 pub use error::{Error, Result};
-pub use index::IndexControl;
+pub use index::{Export, IndexControl};
 pub use jobs::Engine;
 pub use map::SignalMap;
-pub use project::{Bookmark, ProjectFile, ViewState, PROJECT_FORMAT};
+pub use project::{write_as, Bookmark, ProjectFile, ViewState, PROJECT_FORMAT};
 pub use project::{MathChannel, Note, ThresholdTrigger, TriggerOp};
 pub use session::Session;

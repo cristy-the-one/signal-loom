@@ -18,3 +18,4 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 loom-core = { path = "../crates/loom-core" }
+serde = { workspace = true }

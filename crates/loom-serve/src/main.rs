@@ -4,7 +4,7 @@
 //! so `npm run dev:preview` can exercise the UI in a browser. It binds to
 //! 127.0.0.1 only and is not a network service.
 
-use loom_core::{Engine, MathChannel, Query, StepDir, ThresholdTrigger};
+use loom_core::{Engine, Export, MathChannel, Query, StepDir, ThresholdTrigger};
 use serde::Deserialize;
 use std::env;
 use std::io::Read;
@@ -104,28 +104,13 @@ fn dispatch(engine: &Arc<Engine>, request: &mut Request) -> Response<std::io::Cu
             _ => {}
         }
         match (method, path.as_str()) {
-            (Method::Get, "/api/summary") => {
-                json(&lift(engine.with_session(|session| session.summary()))?)
-            }
             (Method::Post, "/api/open-sample") => {
                 json(&lift(engine.with_session(|session| session.open_sample()))?)
-            }
-            (Method::Post, "/api/open-path") => {
-                let req: PathBody = parse_json(&body)?;
-                json(&lift(engine.with_session(|session| {
-                    session.open_path(PathBuf::from(req.path).as_path())
-                }))?)
             }
             (Method::Post, "/api/open-bytes") => {
                 let name = filename.unwrap_or_else(|| "upload.log".into());
                 json(&lift(engine.with_session(|session| {
                     session.open_bytes(&name, body.clone())
-                }))?)
-            }
-            (Method::Post, "/api/open-map-path") => {
-                let req: PathBody = parse_json(&body)?;
-                json(&lift(engine.with_session(|session| {
-                    session.open_map_path(PathBuf::from(req.path).as_path())
                 }))?)
             }
             (Method::Post, "/api/open-map") => {
@@ -195,17 +180,17 @@ fn dispatch(engine: &Arc<Engine>, request: &mut Request) -> Response<std::io::Cu
             }
             (Method::Post, "/api/export-csv") => {
                 let req: ExportBody = parse_json(&body)?;
-                let text =
-                    lift(engine.with_session(|session| {
-                        session.export_csv(&req.names, req.t0_us, req.t1_us)
-                    }))?;
-                json(&serde_json::json!({ "text": text }))
+                let export = lift(engine.with_session(|session| {
+                    session.export_csv_report(&req.names, req.t0_us, req.t1_us)
+                }))?;
+                export_json(&export)
             }
             (Method::Post, "/api/export-slog") => {
                 let req: ExportBody = parse_json(&body)?;
-                let text =
-                    lift(engine.with_session(|session| session.export_slog(req.t0_us, req.t1_us)))?;
-                json(&serde_json::json!({ "text": text }))
+                let export = lift(
+                    engine.with_session(|session| session.export_slog_report(req.t0_us, req.t1_us)),
+                )?;
+                export_json(&export)
             }
             (Method::Post, "/api/math") => {
                 let req: MathBody = parse_json(&body)?;
@@ -386,6 +371,15 @@ fn json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
     serde_json::to_vec(value).map_err(|err| err.to_string())
 }
 
+/// An export's text, its data row count, and whether the row cap cut it short.
+fn export_json(export: &Export) -> Result<Vec<u8>, String> {
+    json(&serde_json::json!({
+        "text": export.text,
+        "rows": export.rows,
+        "truncated": export.truncated,
+    }))
+}
+
 fn read_body(request: &mut Request) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     request
@@ -439,4 +433,24 @@ fn respond(status: u16, body: Vec<u8>) -> Response<std::io::Cursor<Vec<u8>>> {
 
 fn header_line(name: &str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("header")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_export_cut_at_the_row_cap_reports_its_rows_and_the_cut() {
+        let export = Export {
+            text: "t_us,A\n0,1.000000\n".into(),
+            rows: 500_000,
+            truncated: true,
+        };
+        let body = export_json(&export).unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({ "text": "t_us,A\n0,1.000000\n", "rows": 500000, "truncated": true })
+        );
+    }
 }
