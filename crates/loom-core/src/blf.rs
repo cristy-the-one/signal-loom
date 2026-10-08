@@ -78,13 +78,8 @@ pub fn inflate_container(object: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Next decodable object inside an inflated container. `at` advances past it.
-/// A malformed tail is dropped silently here; use `next_inner_checked` to see it.
-pub fn next_inner(data: &[u8], at: &mut usize, container_off: u64) -> Option<Rec> {
-    next_inner_checked(data, at, container_off).ok().flatten()
-}
-
-/// Like `next_inner`, but a container whose objects run out mid-object is an
-/// error that says where, so the caller can report the dropped bytes. `at` moves
+/// A container whose objects run out mid-object is an error that says where,
+/// so the caller can report the dropped bytes. `at` moves
 /// to the end of the container in that case.
 pub fn next_inner_checked(
     data: &[u8],
@@ -272,7 +267,7 @@ fn copy8(bytes: &[u8], at: usize) -> Result<[u8; 8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_inner_checked, CAN_MESSAGE};
+    use super::{next_inner_checked, CAN_MESSAGE, LOG_CONTAINER};
     use crate::index::IndexedLog;
     use crate::scan::{LogFormat, RecKind, Scanner};
 
@@ -350,6 +345,29 @@ mod tests {
             "object at container offset 48 is cut short; the rest of the container was dropped"
         );
         assert_eq!(at, container.len());
+    }
+
+    #[test]
+    fn container_with_a_cut_short_object_is_counted_as_skipped() {
+        let mut payload = vec![0u8; 16];
+        payload[0] = 1;
+        payload[3] = 8;
+        payload[4..8].copy_from_slice(&0x1A0u32.to_le_bytes());
+        payload[8..16].copy_from_slice(&[0x80, 0x0C, 0x88, 0x13, 0x78, 0x64, 0x00, 0x00]);
+        // A container body starts with a 16-byte header. Method 0 is uncompressed.
+        let mut body = vec![0u8; 16];
+        body.extend_from_slice(&lobj(CAN_MESSAGE, &payload));
+        body.extend_from_slice(b"LOBJ");
+        body.extend_from_slice(&[0u8; 8]);
+        let bytes = blf_file(&[lobj(LOG_CONTAINER, &body)]);
+        let log = IndexedLog::open_bytes(bytes, None).unwrap();
+        assert_eq!(log.format().label(), "BLF");
+        assert_eq!(log.frame_count(), 1);
+        assert_eq!(log.skipped(), 1);
+        assert!(log.warnings().contains(
+            &"byte 144: object at container offset 48 is cut short; the rest of the container was dropped"
+                .to_string()
+        ));
     }
 
     fn lobj(obj_type: u32, payload: &[u8]) -> Vec<u8> {

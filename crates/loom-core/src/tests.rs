@@ -978,7 +978,7 @@ garbage
     assert_eq!(log.format().label(), "candump");
     assert_eq!(log.frame_count(), 4, "skipped {}", log.skipped());
     assert!(log.skipped() >= 1);
-    assert!(log.t_end_us() > 2_000);
+    assert_eq!(log.t_end_us(), 2_000);
     let first = log.step_frame(u64::MAX, false).unwrap();
     assert!(first.is_some());
 }

@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::map::parse_can_id;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 
 /// On-disk / in-memory log family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +245,11 @@ impl<'a> Scanner<'a> {
         } else {
             0
         };
+        let last_stamp_us = if format == LogFormat::Candump {
+            candump_clock_before(reader, offset, time_origin_us)?
+        } else {
+            0
+        };
         let start = if asc_relative { 0 } else { offset };
         reader
             .seek(SeekFrom::Start(start))
@@ -257,7 +262,7 @@ impl<'a> Scanner<'a> {
             header_pending: false,
             asc_hex: asc.hex,
             time_origin_us,
-            last_stamp_us: 0,
+            last_stamp_us,
             asc_relative,
             asc_micros: asc.micros,
             asc_symbolic: 0,
@@ -364,37 +369,28 @@ impl<'a> Scanner<'a> {
         let start = self.pos;
         let mut tag = [0u8; 1];
         if let Err(err) = self.read_exact_bin(&mut tag) {
-            if self.pos == start {
+            if self.pos == start && matches!(err, Error::Binary { .. }) {
                 return Ok(None);
             }
-            self.note_skip(err.to_string());
-            return Ok(None);
+            return self.bin_fault(err);
         }
         let t_us = match self.read_u64() {
             Ok(value) => value,
-            Err(err) => {
-                self.note_skip(err.to_string());
-                return Ok(None);
-            }
+            Err(err) => return self.bin_fault(err),
         };
         match tag[0] {
             1 => {
                 let id = match self.read_u32() {
                     Ok(value) => value,
-                    Err(err) => {
-                        self.note_skip(err.to_string());
-                        return Ok(None);
-                    }
+                    Err(err) => return self.bin_fault(err),
                 };
                 let mut dlc_buf = [0u8; 1];
                 if let Err(err) = self.read_exact_bin(&mut dlc_buf) {
-                    self.note_skip(err.to_string());
-                    return Ok(None);
+                    return self.bin_fault(err);
                 }
                 let mut data = [0u8; 8];
                 if let Err(err) = self.read_exact_bin(&mut data) {
-                    self.note_skip(err.to_string());
-                    return Ok(None);
+                    return self.bin_fault(err);
                 }
                 let dlc = dlc_buf[0].min(8);
                 let mut wide = [0u8; MAX_DATA];
@@ -415,10 +411,7 @@ impl<'a> Scanner<'a> {
             2 => {
                 let len = match self.read_u16() {
                     Ok(value) => value as usize,
-                    Err(err) => {
-                        self.note_skip(err.to_string());
-                        return Ok(None);
-                    }
+                    Err(err) => return self.bin_fault(err),
                 };
                 if len > 4_000 {
                     self.note_skip(format!("byte {start}: event label is too long"));
@@ -427,8 +420,7 @@ impl<'a> Scanner<'a> {
                 let mut buf = vec![0u8; len];
                 if len > 0 {
                     if let Err(err) = self.read_exact_bin(&mut buf) {
-                        self.note_skip(err.to_string());
-                        return Ok(None);
+                        return self.bin_fault(err);
                     }
                 }
                 let Ok(label) = String::from_utf8(buf) else {
@@ -451,16 +443,27 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// A record cut short by the end of the file is counted as skipped. Any other
+    /// read failure is returned, so the index does not end as if the log were complete.
+    fn bin_fault(&mut self, err: Error) -> Result<Option<Rec>> {
+        if !matches!(err, Error::Binary { .. }) {
+            return Err(err);
+        }
+        self.note_skip(err.to_string());
+        Ok(None)
+    }
+
     fn next_text(&mut self) -> Result<Option<Rec>> {
         loop {
             let start = self.pos;
             let line = match self.read_line() {
                 Ok(Some(line)) => line,
                 Ok(None) => return Ok(None),
-                Err(err) => {
+                Err(err @ Error::Parse { .. }) => {
                     self.note_skip(err.to_string());
                     continue;
                 }
+                Err(err) => return Err(err),
             };
             let trimmed = line.trim().trim_start_matches('\u{feff}');
             if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -483,7 +486,7 @@ impl<'a> Scanner<'a> {
                 csv_format(trimmed)?;
                 continue;
             }
-            match self.parse_line(trimmed, start) {
+            match self.parse_line(trimmed) {
                 Ok(mut rec) => {
                     rec.offset = start;
                     rec.starts_container = false;
@@ -496,13 +499,13 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    fn parse_line(&mut self, line: &str, start: u64) -> Result<Rec> {
+    fn parse_line(&mut self, line: &str) -> Result<Rec> {
         match self.format {
             LogFormat::Slog => self.parse_slog(line),
             LogFormat::CanCsv => self.parse_can_csv(line),
             LogFormat::DecodedCsv => self.parse_decoded_csv(line),
             LogFormat::Asc => self.parse_asc(line),
-            LogFormat::Candump => self.parse_candump(line, start),
+            LogFormat::Candump => self.parse_candump(line),
             LogFormat::Slbin | LogFormat::Blf => unreachable!(),
         }
     }
@@ -597,7 +600,9 @@ impl<'a> Scanner<'a> {
         if parts.iter().any(|part| part.eq_ignore_ascii_case("CANFD")) {
             return self.parse_asc_fd(&parts, t_us);
         }
-        let channel = parts.get(1).and_then(|tok| tok.parse().ok()).unwrap_or(0);
+        let channel = parts[1]
+            .parse::<u8>()
+            .map_err(|_| self.err_msg("ASC channel is not a number"))?;
         let raw_id = parts.get(2).copied().unwrap_or("");
         let extended = raw_id.ends_with('x') || raw_id.ends_with('X');
         let id_tok = raw_id.trim_end_matches(['x', 'X']);
@@ -614,6 +619,7 @@ impl<'a> Scanner<'a> {
         let dlc_tok = parts.get(marker + 1).copied().unwrap_or("0");
         let dlc = asc_dlc_len(dlc_tok).ok_or_else(|| self.err_msg("ASC dlc is not a number"))?;
         let available = parts.get(marker + 2..).unwrap_or(&[]);
+        self.check_payload_len(available, dlc)?;
         let (data, n) = read_hex_bytes(available, dlc).map_err(|message| self.err_msg(&message))?;
         Ok(frame_rec(t_us, id, extended, channel, n, data))
     }
@@ -625,8 +631,9 @@ impl<'a> Scanner<'a> {
             .unwrap_or(0);
         let channel = parts
             .get(fd + 1)
-            .and_then(|tok| tok.parse().ok())
-            .unwrap_or(0);
+            .ok_or_else(|| self.err_msg("CAN FD line is missing its channel"))?
+            .parse::<u8>()
+            .map_err(|_| self.err_msg("ASC channel is not a number"))?;
         let raw_id = parts.get(fd + 3).copied().unwrap_or("");
         let extended = raw_id.ends_with('x') || raw_id.ends_with('X');
         let id_tok = raw_id.trim_end_matches(['x', 'X']);
@@ -641,16 +648,25 @@ impl<'a> Scanner<'a> {
             .parse()
             .map_err(|_| self.err_msg("CAN FD length is not a number"))?;
         let available = parts.get(marker + 3..).unwrap_or(&[]);
+        self.check_payload_len(available, len)?;
         let (data, n) = read_hex_bytes(available, len).map_err(|message| self.err_msg(&message))?;
         Ok(frame_rec(t_us, id, extended, channel, n, data))
     }
 
-    fn parse_candump(&mut self, line: &str, start: u64) -> Result<Rec> {
+    /// A payload shorter than its declared length is skipped, not kept as a shorter frame.
+    fn check_payload_len(&self, available: &[&str], want: usize) -> Result<()> {
+        if available.len() < want.min(MAX_DATA) {
+            return self.bad("payload is shorter than its DLC");
+        }
+        Ok(())
+    }
+
+    fn parse_candump(&mut self, line: &str) -> Result<Rec> {
         if line.to_ascii_uppercase().contains("ERRORFRAME") {
-            return Ok(event_rec(
-                candump_time(line, start, self.time_origin_us).unwrap_or(start),
-                "Error frame".into(),
-            ));
+            if let Some(t_us) = candump_time(line, self.time_origin_us) {
+                self.last_stamp_us = t_us;
+            }
+            return Ok(event_rec(self.last_stamp_us, "Error frame".into()));
         }
         if let Some(rest) = line.trim().strip_prefix('(') {
             let Some((num, after)) = rest.split_once(')') else {
@@ -661,15 +677,8 @@ impl<'a> Scanner<'a> {
             self.last_stamp_us = t_us;
             return self.candump_rest(t_us, after.trim());
         }
-        // A line with no clock keeps moving forward. A byte offset is only used
-        // when it does not step behind a timestamp already seen in this file.
-        let t_us = if start >= self.last_stamp_us {
-            start
-        } else {
-            self.last_stamp_us.saturating_add(1)
-        };
-        self.last_stamp_us = t_us;
-        self.candump_rest(t_us, line)
+        // A line with no clock takes the time of the record before it.
+        self.candump_rest(self.last_stamp_us, line)
     }
 
     fn candump_rest(&self, t_us: u64, text: &str) -> Result<Rec> {
@@ -683,16 +692,26 @@ impl<'a> Scanner<'a> {
             return self.hash_frame(t_us, parts[index], channel);
         }
         if parts.len() >= 3 && parts[2].starts_with('[') {
-            return self.bracket_frame(t_us, parts[0], parts[1], &parts[3..]);
+            return self.bracket_frame(t_us, parts[0], parts[1], parts[2], &parts[3..]);
         }
         if parts.len() >= 2 && parts[1].starts_with('[') {
-            return self.bracket_frame(t_us, "", parts[0], &parts[2..]);
+            return self.bracket_frame(t_us, "", parts[0], parts[1], &parts[2..]);
         }
         self.bad("candump line was not recognized")
     }
 
-    fn bracket_frame(&self, t_us: u64, iface: &str, id_tok: &str, bytes: &[&str]) -> Result<Rec> {
+    fn bracket_frame(
+        &self,
+        t_us: u64,
+        iface: &str,
+        id_tok: &str,
+        len_tok: &str,
+        bytes: &[&str],
+    ) -> Result<Rec> {
         let id = candump_id(id_tok).map_err(|message| self.err_msg(&message))?;
+        if let Ok(want) = len_tok.trim_matches(['[', ']']).parse::<usize>() {
+            self.check_payload_len(bytes, want)?;
+        }
         let (data, n) =
             read_hex_bytes(bytes, MAX_DATA).map_err(|message| self.err_msg(&message))?;
         Ok(frame_rec(
@@ -839,9 +858,7 @@ impl<'a> Scanner<'a> {
 
     fn pull(&mut self) -> Result<Option<u8>> {
         if self.buf_at >= self.buf_len {
-            self.buf_len = self
-                .reader
-                .read(&mut self.buf)
+            self.buf_len = read_retrying(self.reader, &mut self.buf)
                 .map_err(|err| Error::msg(format!("read failed: {err}")))?;
             self.buf_at = 0;
             if self.buf_len == 0 {
@@ -859,9 +876,7 @@ impl<'a> Scanner<'a> {
         let mut off = 0;
         while off < buf.len() {
             if self.buf_at >= self.buf_len {
-                let n = self
-                    .reader
-                    .read(&mut buf[off..])
+                let n = read_retrying(self.reader, &mut buf[off..])
                     .map_err(|err| Error::msg(format!("binary read failed: {err}")))?;
                 if n == 0 {
                     return Err(Error::Binary {
@@ -916,14 +931,22 @@ impl<'a> Scanner<'a> {
             }
         }
         loop {
-            if let Some(mut rec) =
-                crate::blf::next_inner(&self.blf_buf, &mut self.blf_at, self.blf_container)
-            {
-                if self.blf_fresh {
-                    rec.starts_container = true;
-                    self.blf_fresh = false;
+            match crate::blf::next_inner_checked(
+                &self.blf_buf,
+                &mut self.blf_at,
+                self.blf_container,
+            ) {
+                Ok(Some(mut rec)) => {
+                    if self.blf_fresh {
+                        rec.starts_container = true;
+                        self.blf_fresh = false;
+                    }
+                    return Ok(Some(rec));
                 }
-                return Ok(Some(rec));
+                Ok(None) => {}
+                Err(message) => {
+                    self.note_skip(format!("byte {}: {message}", self.blf_container));
+                }
             }
             self.blf_buf.clear();
             self.blf_at = 0;
@@ -978,6 +1001,9 @@ impl<'a> Scanner<'a> {
         object[..16].copy_from_slice(&head);
         if obj_size > 16 {
             if let Err(err) = self.read_exact_bin(&mut object[16..]) {
+                if !matches!(err, Error::Binary { .. }) {
+                    return Err(err);
+                }
                 self.note_skip(format!("byte {start}: {err}"));
                 return Ok(None);
             }
@@ -985,7 +1011,11 @@ impl<'a> Scanner<'a> {
         let pad = (4 - (obj_size % 4)) % 4;
         if pad > 0 {
             let mut junk = [0u8; 3];
-            let _ = self.read_exact_bin(&mut junk[..pad]);
+            if let Err(err) = self.read_exact_bin(&mut junk[..pad]) {
+                if !matches!(err, Error::Binary { .. }) {
+                    return Err(err);
+                }
+            }
         }
         Ok(Some((start, object, obj_type)))
     }
@@ -1175,12 +1205,63 @@ fn candump_id(text: &str) -> std::result::Result<u32, String> {
     Ok(id & 0x1FFF_FFFF)
 }
 
-fn candump_time(line: &str, start: u64, origin: u64) -> Option<u64> {
+fn candump_time(line: &str, origin: u64) -> Option<u64> {
     let rest = line.trim().strip_prefix('(')?;
     let (num, _) = rest.split_once(')')?;
     let stamp = seconds_to_us(num.trim()).ok()?;
-    let _ = start;
     Some(stamp.saturating_sub(origin))
+}
+
+/// The candump clock a build from byte 0 holds just before `offset`: the last
+/// timestamp above it, or 0 when no line before has one. Reads backwards in
+/// growing chunks, so a clockless run of any length costs a single pass.
+fn candump_clock_before(reader: &mut dyn ReadSeek, offset: u64, origin: u64) -> Result<u64> {
+    let mut window: Vec<u8> = Vec::new();
+    let mut lo = offset;
+    let mut step = 4096u64;
+    while lo > 0 {
+        let take = step.min(lo);
+        lo -= take;
+        let mut head = vec![0u8; take as usize];
+        reader
+            .seek(SeekFrom::Start(lo))
+            .map_err(|err| Error::msg(format!("could not seek log: {err}")))?;
+        reader
+            .read_exact(&mut head)
+            .map_err(|err| Error::msg(format!("could not read log: {err}")))?;
+        head.extend_from_slice(&window);
+        window = head;
+        if let Some(t_us) = last_candump_stamp(&window, lo == 0, origin) {
+            return Ok(t_us);
+        }
+        step = step.saturating_mul(2);
+    }
+    Ok(0)
+}
+
+/// Last candump timestamp in `window`, the bytes just before an offset. Unless the
+/// window starts at byte 0, its first line may be cut, so it is not used.
+fn last_candump_stamp(window: &[u8], from_start: bool, origin: u64) -> Option<u64> {
+    let body = if from_start {
+        window
+    } else {
+        let first_break = window.iter().position(|byte| *byte == b'\n')?;
+        &window[first_break + 1..]
+    };
+    body.split(|byte| *byte == b'\n').rev().find_map(|raw| {
+        let text = std::str::from_utf8(raw).ok()?;
+        candump_time(text.trim_start_matches('\u{feff}'), origin)
+    })
+}
+
+/// `read` again when a signal interrupted it. Any other failure is returned.
+fn read_retrying(reader: &mut dyn ReadSeek, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match reader.read(buf) {
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
 }
 
 fn peek_prefix(reader: &mut dyn ReadSeek) -> Result<String> {
@@ -1315,4 +1396,221 @@ pub fn hex_payload(data: &[u8], dlc: u8) -> String {
         out.push(HEX[(byte & 0xf) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Serves `inner` up to byte `fail_at`, then fails every read.
+    struct FailingReader {
+        inner: Cursor<Vec<u8>>,
+        fail_at: u64,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let pos = self.inner.position();
+            if pos >= self.fail_at {
+                return Err(std::io::Error::other("cable pulled"));
+            }
+            let room = (self.fail_at - pos).min(buf.len() as u64) as usize;
+            self.inner.read(&mut buf[..room])
+        }
+    }
+
+    impl Seek for FailingReader {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(to)
+        }
+    }
+
+    /// Fails the first `left` reads with `Interrupted`, then serves `inner`.
+    struct Interrupted {
+        inner: Cursor<Vec<u8>>,
+        left: u32,
+    }
+
+    impl Read for Interrupted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.left > 0 {
+                self.left -= 1;
+                return Err(std::io::Error::from(ErrorKind::Interrupted));
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for Interrupted {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(to)
+        }
+    }
+
+    fn frame(t_us: u64, id: u32, bytes: &[u8]) -> Rec {
+        let mut data = [0u8; MAX_DATA];
+        data[..bytes.len()].copy_from_slice(bytes);
+        Rec {
+            offset: 0,
+            t_us,
+            starts_container: false,
+            kind: RecKind::Frame {
+                id,
+                extended: false,
+                channel: 0,
+                dlc: bytes.len() as u8,
+                data,
+            },
+        }
+    }
+
+    fn stamps(scanner: &mut Scanner) -> Vec<u64> {
+        std::iter::from_fn(|| scanner.next_rec().unwrap())
+            .map(|rec| rec.t_us)
+            .collect()
+    }
+
+    #[test]
+    fn persistent_text_read_error_ends_the_scan() {
+        let text = b"SLOGv1\nF 0 1A0 0102\nF 1000 1A0 0304\n".to_vec();
+        let mut reader = FailingReader {
+            inner: Cursor::new(text),
+            fail_at: 10,
+        };
+        let mut scanner = Scanner::open(&mut reader, LogFormat::Slog).unwrap();
+        let err = scanner
+            .next_rec()
+            .expect_err("a failing read must end the scan with an error");
+        assert_eq!(err.to_string(), "read failed: cable pulled");
+    }
+
+    #[test]
+    fn interrupted_text_reads_are_retried() {
+        let text = b"SLOGv1\nF 0 1A0 0102\n".to_vec();
+        let mut reader = Interrupted {
+            inner: Cursor::new(text),
+            left: 2,
+        };
+        let mut scanner = Scanner::open(&mut reader, LogFormat::Slog).unwrap();
+        let rec = scanner.next_rec().unwrap().unwrap();
+        let RecKind::Frame { id, dlc, .. } = rec.kind else {
+            panic!("expected a frame");
+        };
+        assert_eq!((id, dlc), (0x1A0, 2));
+        assert!(scanner.next_rec().unwrap().is_none());
+    }
+
+    #[test]
+    fn persistent_binary_read_error_is_returned() {
+        let bytes = encode_slb1(&[frame(1_000, 0x1A0, &[1, 2]), frame(2_000, 0x1A0, &[3, 4])]);
+        // 16 header bytes, then 22 per frame. The second frame is cut off mid-record.
+        let mut reader = FailingReader {
+            inner: Cursor::new(bytes),
+            fail_at: 16 + 22 + 5,
+        };
+        let mut scanner = Scanner::open(&mut reader, LogFormat::Slbin).unwrap();
+        assert_eq!(scanner.next_rec().unwrap().unwrap().t_us, 1_000);
+        let err = scanner
+            .next_rec()
+            .expect_err("an I/O failure must not look like the end of the log");
+        assert_eq!(err.to_string(), "binary read failed: cable pulled");
+    }
+
+    #[test]
+    fn truncated_binary_record_is_counted_as_skipped() {
+        let mut bytes = encode_slb1(&[frame(1_000, 0x1A0, &[1, 2]), frame(2_000, 0x1A0, &[3, 4])]);
+        bytes.truncate(16 + 22 + 10);
+        let mut reader = Cursor::new(bytes);
+        let mut scanner = Scanner::open(&mut reader, LogFormat::Slbin).unwrap();
+        assert_eq!(scanner.next_rec().unwrap().unwrap().t_us, 1_000);
+        assert!(scanner.next_rec().unwrap().is_none());
+        assert_eq!(scanner.skipped(), 1);
+        assert_eq!(
+            scanner.notes(),
+            vec!["byte 47: truncated record".to_string()]
+        );
+    }
+
+    #[test]
+    fn clockless_candump_line_takes_the_previous_stamp() {
+        let text = "(1.500000) can0 100#01\ncan0 100#02\n(2.000000) can0 100#03\n";
+        let mut reader = Cursor::new(text.as_bytes().to_vec());
+        let mut scanner = Scanner::open(&mut reader, LogFormat::Candump).unwrap();
+        assert_eq!(stamps(&mut scanner), vec![1_500_000, 1_500_000, 2_000_000]);
+    }
+
+    #[test]
+    fn candump_resume_recovers_the_clock_from_before_the_checkpoint() {
+        // The clockless run is longer than one backward read chunk.
+        let mut text = String::from("(1.000000) can0 100#01\n");
+        text += &"100#00\n".repeat(700);
+        text += "(2.000000) can0 100#02\n";
+        text += &"100#00\n".repeat(700);
+        let last = (text.len() - "100#00\n".len()) as u64;
+        let mut reader = Cursor::new(text.into_bytes());
+        let mut resumed = Scanner::resume(&mut reader, LogFormat::Candump, last).unwrap();
+        let rec = resumed.next_rec().unwrap().unwrap();
+        assert_eq!(rec.offset, last);
+        assert_eq!(rec.t_us, 2_000_000);
+    }
+
+    #[test]
+    fn asc_short_payload_and_bad_channel_are_skipped_and_counted() {
+        let text = "\
+base hex timestamps absolute
+0.000000 1 1A0 Rx d 8 01 02 03 04 05 06 07 08
+0.001000 1 1A0 Rx d 4 01 02
+0.002000 x 1A0 Rx d 1 01
+0.003000 1 1A0 Rx d 1 03
+";
+        let mut reader = Cursor::new(text.as_bytes().to_vec());
+        let mut scanner = Scanner::open(&mut reader, LogFormat::Asc).unwrap();
+        assert_eq!(stamps(&mut scanner), vec![0, 3_000]);
+        assert_eq!(scanner.skipped(), 2);
+        assert_eq!(
+            scanner.notes(),
+            vec![
+                "line 3: payload is shorter than its DLC".to_string(),
+                "line 4: ASC channel is not a number".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn candump_short_bracket_payload_is_skipped_and_counted() {
+        let text = "can0 100 [4] 01 02\ncan0 100 [2] 01 02\n";
+        let mut reader = Cursor::new(text.as_bytes().to_vec());
+        let mut scanner = Scanner::open(&mut reader, LogFormat::Candump).unwrap();
+        assert_eq!(stamps(&mut scanner), vec![0]);
+        assert_eq!(scanner.skipped(), 1);
+        assert_eq!(
+            scanner.notes(),
+            vec!["line 1: payload is shorter than its DLC".to_string()]
+        );
+    }
+
+    #[test]
+    fn blf_object_body_read_failure_is_returned() {
+        let mut bytes = b"LOGG".to_vec();
+        bytes.extend_from_slice(&144u32.to_le_bytes());
+        bytes.resize(144, 0);
+        let mut object = b"LOBJ".to_vec();
+        object.extend_from_slice(&32u16.to_le_bytes());
+        object.extend_from_slice(&1u16.to_le_bytes());
+        object.extend_from_slice(&48u32.to_le_bytes());
+        object.extend_from_slice(&1u32.to_le_bytes());
+        object.resize(48, 0);
+        bytes.extend_from_slice(&object);
+        // The object body starts at byte 160. Fail five bytes into it.
+        let mut reader = FailingReader {
+            inner: Cursor::new(bytes),
+            fail_at: 165,
+        };
+        let mut scanner = Scanner::open(&mut reader, LogFormat::Blf).unwrap();
+        let err = scanner
+            .next_rec()
+            .expect_err("an I/O failure in a BLF object must not be skipped");
+        assert_eq!(err.to_string(), "binary read failed: cable pulled");
+    }
 }
