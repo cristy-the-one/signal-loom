@@ -1,6 +1,7 @@
 use crate::decode::DecodeSpec;
 use crate::error::{Error, Result};
 use crate::map::SignalMap;
+use crate::project::TriggerOp;
 use crate::scan::{hex_payload, sniff, FrameData, LogFormat, ReadSeek, Rec, RecKind, Scanner};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -820,22 +821,20 @@ impl IndexedLog {
         Ok(out)
     }
 
-    pub fn crossings(&self, name: &str, op: &str, level: f64) -> Result<Vec<(u64, String)>> {
+    /// Whether `name` is a decoded signal of this log.
+    pub fn has_signal(&self, name: &str) -> bool {
+        self.name_index.contains_key(name)
+    }
+
+    /// Times where `name` first satisfies `op` against `level`, until it stops
+    /// doing so. At most 200 hits.
+    pub fn crossings(&self, name: &str, op: TriggerOp, level: f64) -> Result<Vec<(u64, String)>> {
         let idx = self
             .name_index
             .get(name)
             .copied()
             .ok_or_else(|| Error::msg(format!("no signal named {name}")))?;
-        let pred = |value: f64| match op {
-            ">" | "gt" => value > level,
-            "<" | "lt" => value < level,
-            ">=" | "ge" => value >= level,
-            "<=" | "le" => value <= level,
-            _ => false,
-        };
-        if !matches!(op, ">" | "<" | ">=" | "<=" | "gt" | "lt" | "ge" | "le") {
-            return Err(Error::msg("trigger comparison must be >, <, >=, or <="));
-        }
+        let label = format!("Trigger {name} {} {level}", op.symbol());
         let mut events = Vec::new();
         let mut armed = true;
         let mut held = self.snapshot(0);
@@ -844,9 +843,9 @@ impl IndexedLog {
                 if signal != idx {
                     return;
                 }
-                let hot = pred(value);
+                let hot = op.holds(value, level);
                 if hot && armed {
-                    events.push((rec.t_us, format!("Trigger {name} {op} {level}")));
+                    events.push((rec.t_us, label.clone()));
                     armed = false;
                 } else if !hot {
                     armed = true;

@@ -425,7 +425,7 @@ fn math_stats_export_and_integrity() {
         .set_triggers(vec![crate::ThresholdTrigger {
             id: "hot".into(),
             signal: "WheelFL".into(),
-            op: ">".into(),
+            op: crate::project::TriggerOp::Gt,
             value: 99.0,
         }])
         .unwrap();
