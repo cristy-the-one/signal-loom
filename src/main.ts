@@ -182,6 +182,9 @@ let queryAgain = false;
 let refreshTimer = 0;
 let lastFetch = 0;
 let playStamp = 0;
+let tickFrame = 0;
+let drawFrame = 0;
+let legendKey: string | null = null;
 
 function must<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -221,11 +224,37 @@ function defaultPlotted(summary: Summary): string[] {
     .map((signal) => signal.name);
 }
 
+interface SignalEntry {
+  signal: SignalInfo;
+  index: number;
+  color: string | null;
+}
+
+let entriesOf: Summary | null = null;
+let entries = new Map<string, SignalEntry>();
+
+/** Name to signal, list position and colour for one summary; built once per summary, colours on first use. */
+function signalEntries(summary: Summary): Map<string, SignalEntry> {
+  if (entriesOf === summary) return entries;
+  const next = new Map<string, SignalEntry>();
+  summary.signals.forEach((signal, index) => {
+    if (!next.has(signal.name)) next.set(signal.name, { signal, index, color: null });
+  });
+  entriesOf = summary;
+  entries = next;
+  return next;
+}
+
+function signalNamed(name: string): SignalInfo | undefined {
+  return state.summary ? signalEntries(state.summary).get(name)?.signal : undefined;
+}
+
 function colorFor(name: string): string {
   const base = name.replace(/ · B$/, "");
-  const index = state.summary?.signals.findIndex((signal) => signal.name === base) ?? 0;
-  const signal = state.summary?.signals.find((item) => item.name === base);
-  return familyColor(base, signal?.messageName ?? "", index < 0 ? 0 : index);
+  const entry = state.summary ? signalEntries(state.summary).get(base) : undefined;
+  if (!entry) return familyColor(base, "", 0);
+  entry.color ??= familyColor(base, entry.signal.messageName ?? "", entry.index);
+  return entry.color;
 }
 
 function windowFor(playhead: number, span: number, summary: Summary): View {
@@ -363,12 +392,17 @@ async function withBusy(label: string, work: () => Promise<void>): Promise<void>
   }
 }
 
-function renderChrome(): void {
-  const summary = state.summary;
+/** The project name and the unsaved marker; the part of the chrome a signal toggle changes. */
+function renderDirty(): void {
   const project = state.projectPath ? basename(state.projectPath) : "Untitled";
   els.projectName.textContent = state.dirty ? `${project} ·` : project;
-  document.title = summary ? `Signal Loom — ${summary.logLabel}` : "Signal Loom";
   els.save.classList.toggle("is-dirty", state.dirty);
+}
+
+function renderChrome(): void {
+  const summary = state.summary;
+  renderDirty();
+  document.title = summary ? `Signal Loom — ${summary.logLabel}` : "Signal Loom";
   if (!summary) {
     els.logName.textContent = "No log";
     els.logMeta.textContent = "Open a recording to index it";
@@ -454,7 +488,7 @@ function renderSignals(): void {
       if (input.checked) setPlotted([...state.plotted, signal.name]);
       else setPlotted(state.plotted.filter((name) => name !== signal.name));
       state.dirty = true;
-      renderChrome();
+      renderDirty();
       draw();
       void refresh();
       void refreshOverview();
@@ -573,33 +607,42 @@ function renderEvents(): void {
   }
 }
 
+/** Rebuilds the legend only when a swatch, name, reading or unit it shows differs from the last build. */
 function renderLegend(): void {
-  els.legend.replaceChildren();
-  for (const name of state.plotted) {
-    const signal = state.summary?.signals.find((item) => item.name === name);
+  const rows = state.plotted.map((name) => {
+    const signal = signalNamed(name);
     const held = state.held.find((item) => item.name === name);
-    const item = document.createElement("div");
-    item.className = "legend-item";
-    const swatch = document.createElement("i");
-    swatch.style.background = colorFor(name);
-    const label = document.createElement("span");
-    label.className = "name";
-    label.textContent = name;
-    const reading = document.createElement("span");
-    reading.className = "val";
     const readout = readoutFor(signal);
-    reading.textContent = held
+    const reading = held
       ? held.label
         ? `${formatReading(held.value, readout)} ${held.label}`
         : formatReading(held.value, readout)
       : "—".padStart(readout.width);
-    const unit = document.createElement("span");
-    unit.className = "unit";
-    unit.textContent = signal?.unit ?? "";
-    item.append(swatch, label, reading, unit);
-    els.legend.append(item);
-  }
-  els.scaleNote.hidden = state.plotted.length < 2;
+    return { name, color: colorFor(name), reading, unit: signal?.unit ?? "" };
+  });
+  els.scaleNote.hidden = rows.length < 2;
+  const key = rows.map((row) => [row.color, row.name, row.reading, row.unit].join("\u0001")).join("\u0002");
+  if (key === legendKey) return;
+  legendKey = key;
+  els.legend.replaceChildren(
+    ...rows.map((row) => {
+      const item = document.createElement("div");
+      item.className = "legend-item";
+      const swatch = document.createElement("i");
+      swatch.style.background = row.color;
+      const label = document.createElement("span");
+      label.className = "name";
+      label.textContent = row.name;
+      const reading = document.createElement("span");
+      reading.className = "val";
+      reading.textContent = row.reading;
+      const unit = document.createElement("span");
+      unit.className = "unit";
+      unit.textContent = row.unit;
+      item.append(swatch, label, reading, unit);
+      return item;
+    }),
+  );
 }
 
 function stageMessage(): string | null {
@@ -609,7 +652,21 @@ function stageMessage(): string | null {
   return null;
 }
 
+/** Paints on the next animation frame; any number of requests before it share one paint. */
+function requestDraw(): void {
+  // While playing, tick paints every frame.
+  if (drawFrame || (state.playing && state.summary)) return;
+  drawFrame = requestAnimationFrame(() => {
+    drawFrame = 0;
+    draw();
+  });
+}
+
 function draw(): void {
+  if (drawFrame) {
+    cancelAnimationFrame(drawFrame);
+    drawFrame = 0;
+  }
   const summary = state.summary;
   const message = stageMessage();
   els.stageMsg.hidden = message == null;
@@ -619,7 +676,7 @@ function draw(): void {
     const base = name.replace(/ · B$/, "");
     const series = state.series.find((item) => item.name === name);
     const points = series?.points ?? [];
-    const info = summary?.signals.find((signal) => signal.name === base);
+    const info = signalNamed(base);
     let min = info?.min ?? null;
     let max = info?.max ?? null;
     if (min == null || max == null || max <= min) {
@@ -684,7 +741,7 @@ function placeCrosshair(traces: Trace[]): void {
   els.crossTime.textContent = formatUs(state.hoverT);
   const nameWidth = Math.max(0, ...traces.map((trace) => trace.name.length));
   const lines = traces.map((trace) => {
-    const signal = state.summary?.signals.find((item) => item.name === trace.name.replace(/ · B$/, ""));
+    const signal = signalNamed(trace.name.replace(/ · B$/, ""));
     const value = heldValue(trace.points, state.hoverT ?? 0);
     return formatHover(trace.name.padEnd(nameWidth), value, signal?.unit ?? "", readoutFor(signal));
   });
@@ -695,7 +752,7 @@ function scrubTo(t: number): void {
   if (!state.summary) return;
   state.playhead = clamp(t, state.summary.tStartUs, state.summary.tEndUs);
   state.dirty = true;
-  draw();
+  requestDraw();
   scheduleRefresh();
 }
 
@@ -1048,7 +1105,7 @@ async function stepFrame(direction: "next" | "prev"): Promise<void> {
     state.playhead = frame.tUs;
     state.frame = frame;
     state.dirty = true;
-    draw();
+    requestDraw();
     scheduleRefresh();
   } catch (err) {
     setError(errText(err), "action");
@@ -1113,7 +1170,7 @@ function zoom(factor: number, anchor: number | null = null): void {
   }
   state.span = nextSpan;
   state.dirty = true;
-  draw();
+  requestDraw();
   scheduleRefresh();
 }
 
@@ -1133,11 +1190,15 @@ function togglePlay(): void {
   renderTransport();
   if (state.playing) {
     playStamp = 0;
-    requestAnimationFrame(tick);
+    tickFrame = requestAnimationFrame(tick);
+  } else {
+    cancelAnimationFrame(tickFrame);
+    tickFrame = 0;
   }
 }
 
 function tick(now: number): void {
+  tickFrame = 0;
   if (!state.playing || !state.summary) return;
   if (!playStamp) playStamp = now;
   const dt = now - playStamp;
@@ -1152,7 +1213,7 @@ function tick(now: number): void {
     lastFetch = now;
     void refresh();
   }
-  if (state.playing) requestAnimationFrame(tick);
+  if (state.playing) tickFrame = requestAnimationFrame(tick);
 }
 
 function typingTarget(target: EventTarget | null): boolean {
@@ -1888,11 +1949,11 @@ function bind(): void {
     const view = windowFor(state.playhead, state.span, state.summary);
     state.hoverT = timeOnPlot(els.plot, event.clientX, view);
     state.hoverX = event.clientX;
-    draw();
+    requestDraw();
   });
   els.plot.addEventListener("pointerleave", () => {
     state.hoverT = null;
-    draw();
+    requestDraw();
   });
 
   const scrubTimeline = (event: PointerEvent) => {
