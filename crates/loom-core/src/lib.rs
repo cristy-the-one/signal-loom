@@ -29,5 +29,5 @@ pub use index::IndexControl;
 pub use jobs::Engine;
 pub use map::SignalMap;
 pub use project::{Bookmark, ProjectFile, ViewState, PROJECT_FORMAT};
-pub use project::{MathChannel, Note, ThresholdTrigger};
+pub use project::{MathChannel, Note, ThresholdTrigger, TriggerOp};
 pub use session::Session;
