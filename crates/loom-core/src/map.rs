@@ -10,13 +10,41 @@ pub struct SignalMap {
     pub signals: Vec<MappedSignal>,
     pub messages: Vec<MapMessage>,
     pub warnings: Vec<String>,
-    /// A message is late after this many of its cycle times without a frame.
-    pub timeout_factor: f64,
+}
+
+/// A message is late after this many of its cycle times without a frame. The
+/// session owns it and hands it to every index it builds; this is the one
+/// place that says what a valid value is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimeoutFactor(f64);
+
+impl TimeoutFactor {
+    pub const MIN: f64 = 1.0;
+    pub const MAX: f64 = 100.0;
+
+    pub fn new(factor: f64) -> Result<Self> {
+        if factor.is_finite() && (Self::MIN..=Self::MAX).contains(&factor) {
+            return Ok(Self(factor));
+        }
+        Err(Error::msg(format!(
+            "timeout must be between {} and {} cycle times",
+            Self::MIN,
+            Self::MAX
+        )))
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
 }
 
 /// 2.5 cycles: a 100 ms message times out after 250 ms, as receiving ECUs
 /// commonly configure it. One lost frame still stays inside it.
-pub const DEFAULT_TIMEOUT_FACTOR: f64 = 2.5;
+impl Default for TimeoutFactor {
+    fn default() -> Self {
+        Self(2.5)
+    }
+}
 
 /// One CAN message described by a map or a DBC.
 #[derive(Debug, Clone)]
@@ -125,7 +153,6 @@ impl SignalMap {
             signals,
             messages,
             warnings: Vec::new(),
-            timeout_factor: DEFAULT_TIMEOUT_FACTOR,
         })
     }
 

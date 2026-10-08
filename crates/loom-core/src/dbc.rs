@@ -149,7 +149,6 @@ pub fn parse(text: &str) -> Result<SignalMap> {
         signals,
         messages: map_messages,
         warnings,
-        timeout_factor: crate::map::DEFAULT_TIMEOUT_FACTOR,
     })
 }
 

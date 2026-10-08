@@ -1,6 +1,6 @@
 use crate::decode::{DecodeSpec, Endian};
 use crate::error::{Error, Result};
-use crate::map::SignalMap;
+use crate::map::{SignalMap, TimeoutFactor};
 use crate::project::TriggerOp;
 use crate::scan::{hex_payload, sniff, FrameData, LogFormat, ReadSeek, Rec, RecKind, Scanner};
 use std::collections::{HashMap, HashSet};
@@ -251,27 +251,59 @@ struct Built {
 }
 
 impl IndexedLog {
+    /// Index with the default timeout factor.
+    #[cfg(test)]
     pub fn open_path(path: &Path, map: Option<&SignalMap>) -> Result<Self> {
         Self::open_path_controlled(path, map, None)
     }
 
+    #[cfg(test)]
     pub fn open_path_controlled(
         path: &Path,
         map: Option<&SignalMap>,
         control: Option<&IndexControl>,
     ) -> Result<Self> {
-        let format = sniff_path(path)?;
-        Self::build(Source::Path(path.to_path_buf()), format, map, control)
+        Self::open_path_timed(path, map, TimeoutFactor::default(), control)
     }
 
+    #[cfg(test)]
     pub fn open_bytes(bytes: Vec<u8>, map: Option<&SignalMap>) -> Result<Self> {
-        let format = sniff(&bytes)?;
-        Self::build(Source::Memory(Arc::new(bytes)), format, map, None)
+        Self::open_bytes_timed(bytes, map, TimeoutFactor::default())
     }
 
-    pub fn open_shared(bytes: Arc<Vec<u8>>, map: Option<&SignalMap>) -> Result<Self> {
+    /// Index `path`, marking a message late after `timeout` of its cycles.
+    pub fn open_path_timed(
+        path: &Path,
+        map: Option<&SignalMap>,
+        timeout: TimeoutFactor,
+        control: Option<&IndexControl>,
+    ) -> Result<Self> {
+        let format = sniff_path(path)?;
+        Self::build(
+            Source::Path(path.to_path_buf()),
+            format,
+            map,
+            timeout,
+            control,
+        )
+    }
+
+    pub fn open_bytes_timed(
+        bytes: Vec<u8>,
+        map: Option<&SignalMap>,
+        timeout: TimeoutFactor,
+    ) -> Result<Self> {
+        let format = sniff(&bytes)?;
+        Self::build(Source::Memory(Arc::new(bytes)), format, map, timeout, None)
+    }
+
+    pub fn open_shared(
+        bytes: Arc<Vec<u8>>,
+        map: Option<&SignalMap>,
+        timeout: TimeoutFactor,
+    ) -> Result<Self> {
         let format = sniff(bytes.as_slice())?;
-        Self::build(Source::Memory(bytes), format, map, None)
+        Self::build(Source::Memory(bytes), format, map, timeout, None)
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -511,6 +543,7 @@ impl IndexedLog {
         source: Source,
         format: LogFormat,
         map: Option<&SignalMap>,
+        timeout: TimeoutFactor,
         control: Option<&IndexControl>,
     ) -> Result<Self> {
         let byte_len = source.byte_len()?;
@@ -521,7 +554,7 @@ impl IndexedLog {
         let built = if format == LogFormat::DecodedCsv {
             scan_decoded(&scan_source, control)?
         } else {
-            scan_framed(&scan_source, format, map, control)?
+            scan_framed(&scan_source, format, map, timeout, control)?
         };
         if built.frame_count == 0 {
             return Err(Error::msg(
@@ -1010,6 +1043,7 @@ fn scan_framed(
     source: &Source,
     format: LogFormat,
     map: Option<&SignalMap>,
+    timeout: TimeoutFactor,
     control: Option<&IndexControl>,
 ) -> Result<Built> {
     let mut signals = Vec::new();
@@ -1054,9 +1088,7 @@ fn scan_framed(
                 .collect()
         })
         .unwrap_or_default();
-    let timeout_factor = map
-        .map(|map| map.timeout_factor)
-        .unwrap_or(crate::map::DEFAULT_TIMEOUT_FACTOR);
+    let timeout_factor = timeout.get();
     let mut last_seen: HashMap<u32, u64> = HashMap::new();
     let mut last_counter: HashMap<usize, u64> = HashMap::new();
     let checksums = source.with_reader(|reader| probe_checksums(&mut built, reader, format))?;

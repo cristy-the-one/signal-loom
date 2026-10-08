@@ -185,6 +185,10 @@ export function openProjectPath(path: string): Promise<ProjectOpen> {
   });
 }
 
+/**
+ * Browser preview: the upload has no folder, so the engine reports a relative log,
+ * map or compare path as unresolved instead of looking in its own directory.
+ */
 export function openProjectJson(json: string): Promise<ProjectOpen> {
   return http<ProjectOpen>("/api/open-project", {
     method: "POST",

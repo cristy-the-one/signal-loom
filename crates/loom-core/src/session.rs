@@ -1,14 +1,13 @@
-use crate::analyze::{compile, Compiled};
+use crate::analyze::Compiled;
 use crate::dto::{
     EventDto, FrameDto, MapMatch, PointDto, ProjectOpen, Query, SeriesDto, SignalDto, StepDir,
     Summary, ValueDto, WindowStats,
 };
 use crate::error::{Error, Result};
 use crate::index::{decimate_points, IndexControl, IndexedLog, QueryWindow, Series};
-use crate::map::SignalMap;
-use crate::project::{self, MathChannel, ProjectFile, ThresholdTrigger};
+use crate::map::{SignalMap, TimeoutFactor};
+use crate::project::{self, compile_math, Located, MathChannel, ProjectFile, ThresholdTrigger};
 use crate::scan::LogFormat;
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ops::Deref;
@@ -41,8 +40,8 @@ pub struct Session {
     compare: Option<IndexedLog>,
     compare_offset_us: i64,
     map_notes: Vec<String>,
-    /// Set by the user or a project; `None` is the default.
-    timeout_factor: Option<f64>,
+    /// Set by the user or a project. The one copy: every index is built from it.
+    timeout: TimeoutFactor,
 }
 
 /// The open log and what is derived from it. The log is replaced only through
@@ -85,15 +84,21 @@ impl Session {
         if let Some(path) = find_up("fixtures/hypercar_lap.slog") {
             return self.open_path(&path);
         }
-        let mut map = SignalMap::parse(SAMPLE_MAP)?;
-        map.timeout_factor = self.timeout_factor();
+        let map = SignalMap::parse(SAMPLE_MAP)?;
         let map_path = find_up(&format!("fixtures/{SAMPLE_MAP_NAME}"))
             .or_else(|| Some(PathBuf::from(format!("fixtures/{SAMPLE_MAP_NAME}"))));
         let (log, log_path) = if let Some(path) = find_up(&format!("fixtures/{SAMPLE_LOG_NAME}")) {
-            (IndexedLog::open_path(&path, Some(&map))?, path)
+            (
+                IndexedLog::open_path_timed(&path, Some(&map), self.timeout, None)?,
+                path,
+            )
         } else {
             (
-                IndexedLog::open_bytes(SAMPLE_SLOG.as_bytes().to_vec(), Some(&map))?,
+                IndexedLog::open_bytes_timed(
+                    SAMPLE_SLOG.as_bytes().to_vec(),
+                    Some(&map),
+                    self.timeout,
+                )?,
                 PathBuf::from(format!("fixtures/{SAMPLE_LOG_NAME}")),
             )
         };
@@ -128,12 +133,11 @@ impl Session {
             let mut map = parse_map_text(&text)?;
             name_dbc_from_path(&mut map, &sibling);
             incoming_notes = map.warnings.clone();
-            map.timeout_factor = self.timeout_factor();
             incoming_map = Some(map);
             incoming_path = Some(sibling);
         }
         let map_for_index = incoming_map.as_ref().or(self.map.as_ref());
-        let mut indexed = IndexedLog::open_path_controlled(path, map_for_index, control)?;
+        let mut indexed = IndexedLog::open_path_timed(path, map_for_index, self.timeout, control)?;
         let mut kept_notes = if incoming_map.is_none() {
             self.map_notes.clone()
         } else {
@@ -141,7 +145,7 @@ impl Session {
         };
         let set_aside = incoming_map.is_none() && !self.carried_map_fits(&indexed);
         if set_aside {
-            indexed = IndexedLog::open_path_controlled(path, None, control)?;
+            indexed = IndexedLog::open_path_timed(path, None, self.timeout, control)?;
             kept_notes = vec![self.set_aside_note()];
         }
         self.reset_deck();
@@ -192,12 +196,12 @@ impl Session {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("upload");
-        let mut indexed = IndexedLog::open_bytes(bytes, self.map.as_ref())?;
+        let mut indexed = IndexedLog::open_bytes_timed(bytes, self.map.as_ref(), self.timeout)?;
         let mut kept_notes = self.map_notes.clone();
         let set_aside = !self.carried_map_fits(&indexed);
         if set_aside {
             if let Some(bytes) = indexed.shared_bytes() {
-                indexed = IndexedLog::open_shared(bytes, None)?;
+                indexed = IndexedLog::open_shared(bytes, None, self.timeout)?;
             }
             kept_notes = vec![self.set_aside_note()];
         }
@@ -301,7 +305,6 @@ impl Session {
             }
         }
         self.map_notes = map.warnings.clone();
-        map.timeout_factor = self.timeout_factor();
         self.map = Some(map);
         if !append || self.map_path.is_none() {
             self.map_path = path;
@@ -398,16 +401,7 @@ impl Session {
 
     pub fn set_math(&mut self, channels: Vec<MathChannel>) -> Result<Summary> {
         for channel in &channels {
-            let name = channel.name.trim();
-            if name.is_empty() || name.len() > 64 {
-                return Err(Error::msg("math channel name must be 1 to 64 characters"));
-            }
-            if name.ends_with(" · B") {
-                return Err(Error::msg(
-                    "math channel names cannot end with the compare suffix",
-                ));
-            }
-            compile_math(&channels, channel)?;
+            channel.validate(&channels)?;
         }
         self.math = channels;
         self.summary()
@@ -416,7 +410,7 @@ impl Session {
     pub fn set_triggers(&mut self, triggers: Vec<ThresholdTrigger>) -> Result<Summary> {
         let log = self.log()?;
         for trigger in &triggers {
-            check_trigger(log, &self.math, trigger)?;
+            trigger.validate(Some(log), &self.math)?;
         }
         self.triggers = triggers;
         self.summary()
@@ -429,12 +423,21 @@ impl Session {
                 path.display()
             )));
         }
-        self.compare = Some(IndexedLog::open_path(path, self.map.as_ref())?);
+        self.compare = Some(IndexedLog::open_path_timed(
+            path,
+            self.map.as_ref(),
+            self.timeout,
+            None,
+        )?);
         self.summary()
     }
 
     pub fn open_compare_bytes(&mut self, bytes: Vec<u8>) -> Result<Summary> {
-        self.compare = Some(IndexedLog::open_bytes(bytes, self.map.as_ref())?);
+        self.compare = Some(IndexedLog::open_bytes_timed(
+            bytes,
+            self.map.as_ref(),
+            self.timeout,
+        )?);
         self.summary()
     }
 
@@ -447,34 +450,24 @@ impl Session {
         self.compare_offset_us = 0;
     }
 
-    /// A newly opened recording starts without the previous deck setup.
+    /// Message timeout in cycle times.
     pub fn timeout_factor(&self) -> f64 {
-        self.timeout_factor
-            .unwrap_or(crate::map::DEFAULT_TIMEOUT_FACTOR)
+        self.timeout.get()
     }
 
     /// Mark a message late after `factor` cycle times without a frame, and
     /// reindex so the event lane follows. A failed reindex keeps the old factor.
     pub fn set_timeout_factor(&mut self, factor: f64) -> Result<Summary> {
-        if !factor.is_finite() || !(1.0..=100.0).contains(&factor) {
-            return Err(Error::msg("timeout must be between 1 and 100 cycle times"));
-        }
-        let before = self.timeout_factor;
-        self.timeout_factor = Some(factor);
-        if let Some(map) = &mut self.map {
-            map.timeout_factor = factor;
-        }
+        let before = self.timeout;
+        self.timeout = TimeoutFactor::new(factor)?;
         if let Err(err) = self.reindex_controlled(None) {
-            self.timeout_factor = before;
-            let restored = self.timeout_factor();
-            if let Some(map) = &mut self.map {
-                map.timeout_factor = restored;
-            }
+            self.timeout = before;
             return Err(err);
         }
         self.summary()
     }
 
+    /// A newly opened recording starts without the previous deck setup.
     fn reset_deck(&mut self) {
         self.math.clear();
         self.triggers.clear();
@@ -662,12 +655,7 @@ impl Session {
     }
 
     pub fn load_project_json(&mut self, text: &str, base: Option<&Path>) -> Result<ProjectOpen> {
-        let (text, mut warnings) = drop_unreadable_triggers(text);
-        let mut project = ProjectFile::parse(&text)?;
-        let base = base
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
+        let (mut project, mut warnings) = ProjectFile::read(text)?;
 
         if project::is_network_path(&project.log_path) {
             return Err(Error::msg(format!(
@@ -690,7 +678,8 @@ impl Session {
 
         // Open the map and log into locals first. A project that fails to load
         // leaves the deck that was open untouched.
-        let (map, map_path) = match resolve_map(&base, project.signal_map_path.as_deref()) {
+        let timeout = project.timeout();
+        let (map, map_path) = match resolve_map(base, project.signal_map_path.as_deref()) {
             MapLoad::File(path) => {
                 let text = project::read_text_capped(&path, MAX_MAP_BYTES, "signal map")?;
                 let mut map = parse_map_text(&text)?;
@@ -709,28 +698,32 @@ impl Session {
                 }
                 (None, None)
             }
+            MapLoad::NoBase(stored) => {
+                warnings.push(no_base_note("signal map", &stored));
+                (None, None)
+            }
             MapLoad::None => (None, None),
         };
-        // The project's timeout applies to the index built for it.
-        let timeout_factor = project
-            .timeout_factor
-            .filter(|factor| factor.is_finite() && (1.0..=100.0).contains(factor));
-        let mut map = map;
-        if let Some(map) = &mut map {
-            map.timeout_factor = timeout_factor.unwrap_or(crate::map::DEFAULT_TIMEOUT_FACTOR);
-        }
 
-        let (log, log_label, log_path) = match resolve_log(&base, &project.log_path) {
+        let (log, log_label, log_path) = match resolve_log(base, &project.log_path) {
             LogLoad::File(path) => {
                 let label = path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(SAMPLE_LOG_NAME)
                     .to_string();
-                (IndexedLog::open_path(&path, map.as_ref())?, label, path)
+                (
+                    IndexedLog::open_path_timed(&path, map.as_ref(), timeout, None)?,
+                    label,
+                    path,
+                )
             }
             LogLoad::Embedded => {
-                let log = IndexedLog::open_bytes(SAMPLE_SLOG.as_bytes().to_vec(), map.as_ref())?;
+                let log = IndexedLog::open_bytes_timed(
+                    SAMPLE_SLOG.as_bytes().to_vec(),
+                    map.as_ref(),
+                    timeout,
+                )?;
                 warnings.push(
                     "Opened the built-in cluster sample because the project log path was not on disk."
                         .into(),
@@ -746,21 +739,20 @@ impl Session {
                     "project log not found: {stored}. Open the log, then save the project again."
                 )));
             }
+            LogLoad::NoBase(stored) => {
+                return Err(Error::msg(format!(
+                    "project log {stored} is a relative path and this project has no folder to resolve it against. Open the log, then save the project again."
+                )));
+            }
         };
 
-        project.triggers.retain(|trigger| {
-            let fit = check_trigger(&log, &project.math, trigger);
-            if let Err(err) = &fit {
-                warnings.push(format!("Trigger {} was not loaded: {err}", trigger.id));
-            }
-            fit.is_ok()
-        });
+        warnings.extend(project.drop_invalid(Some(&log)));
 
         self.map_notes = map
             .as_ref()
             .map(|map| map.warnings.clone())
             .unwrap_or_default();
-        self.timeout_factor = timeout_factor;
+        self.timeout = timeout;
         self.map = map;
         self.map_path = map_path;
         self.log_label = log_label;
@@ -776,13 +768,18 @@ impl Session {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            if let Some(path) = project::resolve_existing(&base, stored) {
-                match IndexedLog::open_path(&path, self.map.as_ref()) {
-                    Ok(log) => self.compare = Some(log),
-                    Err(err) => warnings.push(format!("Compare log did not open: {err}")),
+            match project::locate(base, stored) {
+                Located::Found(path) => {
+                    match IndexedLog::open_path_timed(&path, self.map.as_ref(), timeout, None) {
+                        Ok(log) => self.compare = Some(log),
+                        Err(err) => warnings.push(format!("Compare log did not open: {err}")),
+                    }
                 }
-            } else if !project::is_network_path(stored) {
-                warnings.push(format!("Compare log not found ({stored})."));
+                Located::Missing if !project::is_network_path(stored) => {
+                    warnings.push(format!("Compare log not found ({stored})."));
+                }
+                Located::Missing => {}
+                Located::NoBase => warnings.push(no_base_note("compare log", stored)),
             }
         }
 
@@ -841,7 +838,7 @@ impl Session {
     }
 
     pub fn write_project(&self, path: &Path, project: &ProjectFile) -> Result<()> {
-        project::write_project(path, project)
+        project::write_project(path, project, self.log.as_ref())
     }
 
     fn log(&self) -> Result<&IndexedLog> {
@@ -854,8 +851,13 @@ impl Session {
     /// compare log. Both are rebuilt before either is replaced, so a failed or
     /// cancelled rebuild leaves both as they were.
     fn reindex_controlled(&mut self, control: Option<&IndexControl>) -> Result<()> {
-        let main = rebuild(self.log.as_ref(), self.map.as_ref(), control)?;
-        let compare = rebuild(self.compare.as_ref(), self.map.as_ref(), control)?;
+        let main = rebuild(self.log.as_ref(), self.map.as_ref(), self.timeout, control)?;
+        let compare = rebuild(
+            self.compare.as_ref(),
+            self.map.as_ref(),
+            self.timeout,
+            control,
+        )?;
         if main.is_some() {
             self.log.set(main);
         }
@@ -871,69 +873,19 @@ impl Session {
 fn rebuild(
     log: Option<&IndexedLog>,
     map: Option<&SignalMap>,
+    timeout: TimeoutFactor,
     control: Option<&IndexControl>,
 ) -> Result<Option<IndexedLog>> {
     let Some(log) = log else {
         return Ok(None);
     };
     if let Some(path) = log.path() {
-        return IndexedLog::open_path_controlled(path, map, control).map(Some);
+        return IndexedLog::open_path_timed(path, map, timeout, control).map(Some);
     }
     match log.shared_bytes() {
-        Some(bytes) => IndexedLog::open_shared(bytes, map).map(Some),
+        Some(bytes) => IndexedLog::open_shared(bytes, map, timeout).map(Some),
         None => Ok(None),
     }
-}
-
-/// A trigger the open log can evaluate: a finite level on a decoded signal.
-/// Math channels are not decoded signals, so a trigger cannot target one.
-fn check_trigger(log: &IndexedLog, math: &[MathChannel], trigger: &ThresholdTrigger) -> Result<()> {
-    if !trigger.value.is_finite() {
-        return Err(Error::msg("trigger level must be finite"));
-    }
-    if !log.has_signal(&trigger.signal) {
-        let why = if math.iter().any(|channel| channel.name == trigger.signal) {
-            "triggers work on logged signals, not math channels"
-        } else {
-            "no such signal in this log"
-        };
-        return Err(Error::msg(format!(
-            "trigger signal {}: {why}",
-            trigger.signal
-        )));
-    }
-    Ok(())
-}
-
-/// Remove triggers that do not parse (an unknown comparison, a missing field)
-/// so one bad entry does not fail the whole project. Each one is reported.
-fn drop_unreadable_triggers(text: &str) -> (Cow<'_, str>, Vec<String>) {
-    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(text) else {
-        return (Cow::Borrowed(text), Vec::new());
-    };
-    let Some(items) = root
-        .get_mut("triggers")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return (Cow::Borrowed(text), Vec::new());
-    };
-    let mut warnings = Vec::new();
-    for (at, item) in std::mem::take(items).into_iter().enumerate() {
-        match serde_json::from_value::<ThresholdTrigger>(item.clone()) {
-            Ok(_) => items.push(item),
-            Err(err) => {
-                let id = item
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .map_or_else(|| format!("#{}", at + 1), str::to_string);
-                warnings.push(format!("Trigger {id} was not loaded: {err}"));
-            }
-        }
-    }
-    if warnings.is_empty() {
-        return (Cow::Borrowed(text), warnings);
-    }
-    (Cow::Owned(root.to_string()), warnings)
 }
 
 fn extend_notes(notes: &mut Vec<String>, extra: &[String]) {
@@ -951,6 +903,8 @@ enum MapLoad {
     File(PathBuf),
     Embedded,
     Missing(String),
+    /// A relative path in a project that has no folder.
+    NoBase(String),
     None,
 }
 
@@ -958,29 +912,48 @@ enum LogLoad {
     File(PathBuf),
     Embedded,
     Missing(String),
+    /// A relative path in a project that has no folder.
+    NoBase(String),
 }
 
-fn resolve_map(base: &Path, stored: Option<&str>) -> MapLoad {
+/// A project with no folder cannot say where a relative path points, and the
+/// engine's working directory is not where its author kept their files.
+fn no_base_note(what: &str, stored: &str) -> String {
+    format!(
+        "The {what} ({}) is a relative path and this project has no folder to resolve it against, so it was not opened. Open it with Open.",
+        stored.trim()
+    )
+}
+
+fn resolve_map(base: Option<&Path>, stored: Option<&str>) -> MapLoad {
     let Some(stored) = stored.map(str::trim).filter(|s| !s.is_empty()) else {
         return MapLoad::None;
     };
-    if let Some(path) = project::resolve_existing(base, stored) {
+    let located = project::locate(base, stored);
+    if let Located::Found(path) = located {
         return MapLoad::File(path);
     }
     if Path::new(stored).file_name().and_then(|n| n.to_str()) == Some(SAMPLE_MAP_NAME) {
         return MapLoad::Embedded;
     }
-    MapLoad::Missing(stored.to_string())
+    match located {
+        Located::NoBase => MapLoad::NoBase(stored.to_string()),
+        _ => MapLoad::Missing(stored.to_string()),
+    }
 }
 
-fn resolve_log(base: &Path, stored: &str) -> LogLoad {
-    if let Some(path) = project::resolve_existing(base, stored) {
+fn resolve_log(base: Option<&Path>, stored: &str) -> LogLoad {
+    let located = project::locate(base, stored);
+    if let Located::Found(path) = located {
         return LogLoad::File(path);
     }
     if Path::new(stored).file_name().and_then(|n| n.to_str()) == Some(SAMPLE_LOG_NAME) {
         return LogLoad::Embedded;
     }
-    LogLoad::Missing(stored.to_string())
+    match located {
+        Located::NoBase => LogLoad::NoBase(stored.to_string()),
+        _ => LogLoad::Missing(stored.to_string()),
+    }
 }
 
 fn name_dbc_from_path(map: &mut SignalMap, path: &Path) {
@@ -1033,24 +1006,6 @@ fn compare_series(
             series
         })
         .collect())
-}
-
-/// Compile a math channel. A math channel can use only signals from the log:
-/// naming another math channel is an error here, wherever it is evaluated, not
-/// a dependency that is quietly dropped on one path and fails on another.
-fn compile_math(channels: &[MathChannel], channel: &MathChannel) -> Result<Compiled> {
-    let compiled = compile(&channel.expr)?;
-    if let Some(dep) = compiled
-        .dependencies()
-        .iter()
-        .find(|dep| channels.iter().any(|other| other.name == **dep))
-    {
-        return Err(Error::msg(format!(
-            "math channel {} uses math channel {dep}. A math channel can only use signals from the log, so write the expression of {dep} into it",
-            channel.name
-        )));
-    }
-    Ok(compiled)
 }
 
 /// Evaluate a compiled channel over `base`, which holds a series for each of
@@ -1687,5 +1642,291 @@ F 30000 1A0 401F000000000000
             .events
             .iter()
             .any(|event| event.label == "Trigger VehicleSpeed > 50"));
+    }
+
+    fn cluster_project(extra: serde_json::Value) -> String {
+        let root = fixtures();
+        let mut project = serde_json::json!({
+            "format": "signal-loom",
+            "version": 1,
+            "logPath": root.join("cluster_drive.slog"),
+            "signalMapPath": root.join("cluster.map.json"),
+            "view": { "playheadUs": 0, "spanUs": 1_000_000, "plotted": [] },
+        });
+        project
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        project.to_string()
+    }
+
+    fn math(name: &str, expr: &str) -> MathChannel {
+        MathChannel {
+            name: name.to_string(),
+            unit: String::new(),
+            expr: expr.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_project_with_a_bad_math_channel_loads_the_good_one_and_warns() {
+        let project = cluster_project(serde_json::json!({
+            "math": [
+                { "name": "Half", "unit": "km/h", "expr": "VehicleSpeed / 2" },
+                { "name": "Broken", "unit": "", "expr": "VehicleSpeed +" },
+                { "name": "Chain", "unit": "", "expr": "Half * 2" },
+                { "name": "Cut", "unit": "" }
+            ]
+        }));
+        let mut session = Session::new();
+        let opened = session.load_project_json(&project, None).unwrap();
+        let kept: Vec<&str> = opened
+            .project
+            .math
+            .iter()
+            .map(|channel| channel.name.as_str())
+            .collect();
+        assert_eq!(kept, ["Half"]);
+        assert_eq!(session.math.len(), 1);
+        assert!(opened
+            .summary
+            .signals
+            .iter()
+            .any(|signal| signal.name == "Half"));
+        assert_eq!(opened.warnings.len(), 3, "{:?}", opened.warnings);
+        assert!(opened.warnings[0].starts_with("Math channel Cut was not loaded: "));
+        assert!(opened.warnings[0].contains("missing field `expr`"));
+        assert_eq!(
+            opened.warnings[1],
+            "Math channel Broken was not loaded: math expression ended early"
+        );
+        assert!(
+            opened.warnings[2].starts_with(
+                "Math channel Chain was not loaded: math channel Chain uses math channel Half."
+            ),
+            "{}",
+            opened.warnings[2]
+        );
+    }
+
+    #[test]
+    fn load_and_set_math_apply_the_same_rules() {
+        let long = "x".repeat(65);
+        let cases = [
+            ("   ", "VehicleSpeed"),
+            (long.as_str(), "VehicleSpeed"),
+            ("Speed · B", "VehicleSpeed"),
+            ("Bad", "VehicleSpeed +"),
+            ("Self", "Self + 1"),
+        ];
+        for (name, expr) in cases {
+            let mut session = Session::new();
+            session
+                .open_path(&fixtures().join("cluster_drive.slog"))
+                .unwrap();
+            let refused = session.set_math(vec![math(name, expr)]);
+            assert!(refused.is_err(), "set_math accepted {name:?} = {expr}");
+
+            let project = cluster_project(serde_json::json!({
+                "math": [{ "name": name, "unit": "", "expr": expr }]
+            }));
+            let opened = Session::new().load_project_json(&project, None).unwrap();
+            assert!(
+                opened.project.math.is_empty(),
+                "load kept {name:?} = {expr}"
+            );
+            assert_eq!(opened.warnings.len(), 1, "{:?}", opened.warnings);
+            assert!(
+                opened.warnings[0].ends_with(&refused.unwrap_err().to_string()),
+                "{:?}",
+                opened.warnings
+            );
+        }
+        let kept = Session::new()
+            .load_project_json(
+                &cluster_project(serde_json::json!({
+                    "math": [{ "name": "x".repeat(64), "unit": "", "expr": "VehicleSpeed" }]
+                })),
+                None,
+            )
+            .unwrap();
+        assert_eq!(kept.project.math.len(), 1, "64 characters is allowed");
+    }
+
+    #[test]
+    fn an_out_of_range_timeout_is_reported_and_the_default_applies() {
+        for bad in [0.5, 100.5, 500.0] {
+            let project = cluster_project(serde_json::json!({ "timeoutFactor": bad }));
+            let mut session = Session::new();
+            let opened = session.load_project_json(&project, None).unwrap();
+            assert_eq!(
+                opened.warnings,
+                [format!(
+                    "Timeout {bad} was not used: timeout must be between 1 and 100 cycle times. Using the default, 2.5."
+                )]
+            );
+            assert_eq!(opened.summary.timeout_factor, 2.5);
+            assert_eq!(opened.project.timeout_factor, None);
+        }
+        let project = cluster_project(serde_json::json!({ "timeoutFactor": 100.0 }));
+        let opened = Session::new().load_project_json(&project, None).unwrap();
+        assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+        assert_eq!(opened.summary.timeout_factor, 100.0);
+    }
+
+    #[test]
+    fn a_timeout_set_before_any_map_applies_to_the_map_that_follows() {
+        // A 100 ms message with gaps of 260 ms and 290 ms.
+        let log = "SLOGv1\nF 0 120 00\nF 100000 120 00\nF 200000 120 00\nF 460000 120 00\nF 750000 120 00\n";
+        let map = r#"{"name":"bus","version":1,"messages":[
+            {"id":"0x120","name":"Leds","cycleUs":100000,"signals":[
+                {"name":"Lamp","startBit":0,"bitLength":8}]}]}"#;
+        let late = |summary: &Summary| {
+            summary
+                .events
+                .iter()
+                .filter(|event| event.label.starts_with("Timeout"))
+                .count()
+        };
+        let mut session = Session::new();
+        session
+            .open_bytes("leds.slog", log.as_bytes().to_vec())
+            .unwrap();
+        session.set_timeout_factor(3.0).unwrap();
+        assert_eq!(late(&session.open_map_json(map).unwrap()), 0);
+        assert_eq!(session.timeout_factor(), 3.0);
+        assert!(session.set_timeout_factor(f64::NAN).is_err());
+        assert_eq!(late(&session.set_timeout_factor(2.5).unwrap()), 2);
+    }
+
+    #[test]
+    fn write_project_refuses_a_project_that_would_not_load_and_keeps_the_old_file() {
+        let dir = std::env::temp_dir().join(format!("loom-refuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("drive.loom");
+        let session = Session::new();
+        let mut project = ProjectFile::parse(&cluster_project(serde_json::json!({}))).unwrap();
+        session.write_project(&target, &project).unwrap();
+        let saved = std::fs::read(&target).unwrap();
+
+        project.math = vec![
+            math("Half", "VehicleSpeed / 2"),
+            math("Bad", "VehicleSpeed +"),
+        ];
+        project.timeout_factor = Some(0.0);
+        let err = session.write_project(&target, &project).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "this project would not load cleanly, so it was not saved. \
+             Math channel Bad: math expression ended early; \
+             Timeout 0: timeout must be between 1 and 100 cycle times"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), saved);
+
+        project.math.truncate(1);
+        project.timeout_factor = Some(4.0);
+        session.write_project(&target, &project).unwrap();
+        let reopened = Session::new().load_project_file(&target).unwrap();
+        assert!(reopened.warnings.is_empty(), "{:?}", reopened.warnings);
+        assert_eq!(reopened.project.math.len(), 1);
+        assert_eq!(reopened.summary.timeout_factor, 4.0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_trigger_that_does_not_fit_the_open_log_is_not_saved() {
+        let dir = std::env::temp_dir().join(format!("loom-trigger-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = Session::new();
+        session
+            .open_path(&fixtures().join("cluster_drive.slog"))
+            .unwrap();
+        session
+            .open_map_path(&fixtures().join("cluster.map.json"))
+            .unwrap();
+        let mut project = ProjectFile::parse(&cluster_project(serde_json::json!({}))).unwrap();
+        project.triggers = vec![ThresholdTrigger {
+            id: "ghost".into(),
+            signal: "NoSuchSignal".into(),
+            op: TriggerOp::Gt,
+            value: 1.0,
+        }];
+        let err = session
+            .write_project(&dir.join("t.loom"), &project)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "this project would not load cleanly, so it was not saved. \
+             Trigger ghost: trigger signal NoSuchSignal: no such signal in this log"
+        );
+        assert!(!dir.join("t.loom").exists());
+        project.triggers[0].signal = "VehicleSpeed".into();
+        session
+            .write_project(&dir.join("t.loom"), &project)
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn without_a_project_folder_a_relative_path_is_reported_and_not_opened() {
+        // These exist relative to this crate's directory, where the tests run.
+        let relative_map = "../../fixtures/hypercar_lap.dbc";
+        let relative_compare = "../../fixtures/cluster_drive.slog";
+        assert!(Path::new(relative_map).is_file() && Path::new(relative_compare).is_file());
+        let project = cluster_project(serde_json::json!({
+            "signalMapPath": relative_map,
+            "comparePath": relative_compare,
+        }));
+
+        let mut session = Session::new();
+        let opened = session.load_project_json(&project, None).unwrap();
+        assert!(opened.summary.map_label.is_none());
+        assert!(session.map.is_none());
+        assert!(session.compare.is_none());
+        assert_eq!(
+            opened.warnings,
+            [
+                "The signal map (../../fixtures/hypercar_lap.dbc) is a relative path and this project has no folder to resolve it against, so it was not opened. Open it with Open.",
+                "The compare log (../../fixtures/cluster_drive.slog) is a relative path and this project has no folder to resolve it against, so it was not opened. Open it with Open."
+            ]
+        );
+
+        let mut session = Session::new();
+        let opened = session
+            .load_project_json(&project, Some(&fixtures()))
+            .unwrap();
+        assert!(opened.summary.map_label.is_some());
+        assert!(session.compare.is_some());
+        assert!(
+            opened
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("relative path")),
+            "{:?}",
+            opened.warnings
+        );
+    }
+
+    #[test]
+    fn without_a_project_folder_a_relative_log_is_refused() {
+        let relative_log = "../../fixtures/hypercar_lap.slog";
+        assert!(Path::new(relative_log).is_file());
+        let project = serde_json::json!({
+            "format": "signal-loom",
+            "version": 1,
+            "logPath": relative_log,
+            "view": { "playheadUs": 0, "spanUs": 1_000_000, "plotted": [] },
+        })
+        .to_string();
+        let mut session = Session::new();
+        let err = session.load_project_json(&project, None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "project log ../../fixtures/hypercar_lap.slog is a relative path and this project has no folder to resolve it against. Open the log, then save the project again."
+        );
+        assert!(session.summary().is_err(), "nothing was opened");
+        session
+            .load_project_json(&project, Some(&fixtures()))
+            .unwrap();
     }
 }
