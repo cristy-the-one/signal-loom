@@ -1,7 +1,7 @@
 import * as api from "./api";
 import { els } from "./dom";
 import { basename, errText } from "./format";
-import { adoptEdited, adoptSummary, applyProject, currentProject } from "./project";
+import { adoptEdited, adoptSummary, applyProject, currentView } from "./project";
 import { renderChrome, state } from "./state";
 import { setError, withBusy, withIndex } from "./status";
 
@@ -125,15 +125,17 @@ async function openProjectPath(path: string): Promise<void> {
 }
 
 export async function saveProject(asNew: boolean): Promise<void> {
-  const project = currentProject();
   if (!state.summary) {
     setError("Nothing to save yet.", "action");
     return;
   }
+  const view = currentView();
   if (!api.inTauri()) {
-    download(`${basename(state.projectPath ?? "session.loom")}`, JSON.stringify(project, null, 2));
-    state.dirty = false;
-    renderChrome();
+    await withBusy("Saving project", async () => {
+      download(`${basename(state.projectPath ?? "session.loom")}`, await api.projectJson(view));
+      state.dirty = false;
+      renderChrome();
+    });
     return;
   }
   let path = asNew ? null : state.projectPath;
@@ -141,7 +143,7 @@ export async function saveProject(asNew: boolean): Promise<void> {
   if (!path) return;
   const target = withExtension(path, ".loom");
   await withBusy("Saving project", async () => {
-    await api.writeProject(target, project);
+    await api.writeProject(target, view);
     state.projectPath = target;
     state.dirty = false;
     renderChrome();

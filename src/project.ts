@@ -5,7 +5,7 @@ import { MIN_SPAN, defaultPlotted, duration, hasData } from "./model";
 import { refresh, refreshCursors, refreshOverview } from "./query";
 import { bumpDataGen, renderChrome, state } from "./state";
 import { clearError, setError } from "./status";
-import type { ProjectFile, ProjectOpen, Summary } from "./types";
+import type { ProjectOpen, ProjectView, Summary } from "./types";
 
 /** Forgets everything the deck holds for the old log: math, triggers, notes, cursors, compare drive, readings. */
 export function resetDeck(): void {
@@ -98,26 +98,18 @@ export function applyProject(opened: ProjectOpen, path: string | null): void {
   void refreshOverview();
 }
 
-export function currentProject(): ProjectFile {
+/** What the UI owns of the project. The engine fills in the deck it holds when it saves. */
+export function currentView(): ProjectView {
   return {
-    format: "signal-loom",
-    version: 1,
-    logPath: state.summary?.logPath ?? state.summary?.logLabel ?? "",
-    signalMapPath: state.summary?.mapPath ?? null,
     bookmarks: state.bookmarks,
     view: {
       playheadUs: Math.round(state.playhead),
       spanUs: Math.round(state.span),
       plotted: [...state.plotted],
     },
-    math: state.math,
-    triggers: state.triggers,
     notes: state.notes,
     cursorAUs: state.cursorA,
     cursorBUs: state.cursorB,
-    comparePath: state.comparePath,
-    compareOffsetUs: state.compareOffsetUs,
     cluster: state.cluster as Record<string, string>,
-    timeoutFactor: state.summary?.timeoutFactor,
   };
 }

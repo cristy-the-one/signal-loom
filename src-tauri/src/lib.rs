@@ -1,6 +1,5 @@
 use loom_core::{
-    write_as, Engine, Export, IndexStatus, MathChannel, ProjectFile, Query, StepDir,
-    ThresholdTrigger,
+    Engine, Export, IndexStatus, MathChannel, ProjectView, Query, StepDir, ThresholdTrigger,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -39,6 +38,16 @@ struct SaveReply {
     bytes: u64,
     rows: usize,
     truncated: bool,
+}
+
+impl From<Export> for SaveReply {
+    fn from(export: Export) -> Self {
+        Self {
+            bytes: export.text.len() as u64,
+            rows: export.rows,
+            truncated: export.truncated,
+        }
+    }
 }
 
 #[tauri::command(async)]
@@ -151,7 +160,7 @@ fn export_slog(state: State<'_, AppState>, t0_us: u64, t1_us: u64) -> Result<Exp
     }))
 }
 
-/// Writes the export to a `.csv` file; `write_as` refuses any other extension.
+/// Writes the export to a `.csv` file; the session refuses any other extension.
 #[tauri::command(async)]
 fn save_csv(
     state: State<'_, AppState>,
@@ -161,17 +170,13 @@ fn save_csv(
     t1_us: u64,
 ) -> Result<SaveReply, String> {
     lift(state.with_session(|session| {
-        let export = session.export_csv_report(&names, t0_us, t1_us)?;
-        write_as(PathBuf::from(path).as_path(), "csv", &export.text)?;
-        Ok(SaveReply {
-            bytes: export.text.len() as u64,
-            rows: export.rows,
-            truncated: export.truncated,
-        })
+        session
+            .save_csv(PathBuf::from(path).as_path(), &names, t0_us, t1_us)
+            .map(SaveReply::from)
     }))
 }
 
-/// Writes the trimmed log to a `.slog` file; `write_as` refuses any other extension.
+/// Writes the trimmed log to a `.slog` file; the session refuses any other extension.
 #[tauri::command(async)]
 fn save_slog(
     state: State<'_, AppState>,
@@ -180,13 +185,9 @@ fn save_slog(
     t1_us: u64,
 ) -> Result<SaveReply, String> {
     lift(state.with_session(|session| {
-        let export = session.export_slog_report(t0_us, t1_us)?;
-        write_as(PathBuf::from(path).as_path(), "slog", &export.text)?;
-        Ok(SaveReply {
-            bytes: export.text.len() as u64,
-            rows: export.rows,
-            truncated: export.truncated,
-        })
+        session
+            .save_slog(PathBuf::from(path).as_path(), t0_us, t1_us)
+            .map(SaveReply::from)
     }))
 }
 
@@ -256,16 +257,14 @@ fn clear_compare(state: State<'_, AppState>) -> Result<loom_core::Summary, Strin
     }))
 }
 
+/// Saves the open deck with the UI's `view` of it. The session fills in what it owns.
 #[tauri::command(async)]
 fn write_project(
     state: State<'_, AppState>,
     path: String,
-    project: ProjectFile,
+    view: ProjectView,
 ) -> Result<(), String> {
-    lift(
-        state
-            .with_session(|session| session.write_project(PathBuf::from(path).as_path(), &project)),
-    )
+    lift(state.with_session(|session| session.write_project(PathBuf::from(path).as_path(), &view)))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

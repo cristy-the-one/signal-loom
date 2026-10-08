@@ -2,8 +2,8 @@ import type {
   BusLoad,
   FrameHit,
   MathChannel,
-  ProjectFile,
   ProjectOpen,
+  ProjectView,
   Query,
   Series,
   IndexStatus,
@@ -318,7 +318,18 @@ export function saveSlog(path: string, t0Us: number, t1Us: number): Promise<Save
   return invoke<SaveResult>("save_slog", { path, t0Us: us(t0Us), t1Us: us(t1Us) });
 }
 
-export function writeProject(path: string, project: ProjectFile): Promise<void> {
+/** Desktop: the engine writes the project to `path`, composing the deck from its own state and `view`. */
+export function writeProject(path: string, view: ProjectView): Promise<void> {
   if (!inTauri()) return Promise.reject(new Error("Saving to a path needs the desktop app."));
-  return invoke<void>("write_project", { path, project });
+  return invoke<void>("write_project", { path, view });
+}
+
+/** Browser preview: the project as the engine would save it, as JSON text to download. */
+export async function projectJson(view: ProjectView): Promise<string> {
+  const reply = await http<{ json: string }>("/api/project-json", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(view),
+  });
+  return reply.json;
 }
