@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 const MAX_MAP_BYTES: u64 = 32 * 1024 * 1024;
 /// A `.loom` holds paths, bookmarks and notes: far below this.
 const MAX_PROJECT_BYTES: u64 = 4 * 1024 * 1024;
+/// `query` evaluates a math channel on raw samples only when the window replays
+/// at most this many frames, so a refresh stays quick on a huge log. The
+/// hypercar lap fixture (about 235,000 frames, 0.2 s to replay in a release
+/// build) is below it.
+const MATH_RAW_RECORDS: u64 = 500_000;
 const SAMPLE_SLOG: &str = include_str!("../../../fixtures/cluster_drive.slog");
 const SAMPLE_MAP: &str = include_str!("../../../fixtures/cluster.map.json");
 const SAMPLE_LOG_NAME: &str = "cluster_drive.slog";
@@ -306,8 +311,9 @@ impl Session {
     /// Physical series are bucketed by the index. A math channel is evaluated on
     /// the raw samples of its signals in the window, the same ones `stats` and
     /// the CSV export use, and the result is then bucketed the same way, so its
-    /// values do not depend on `max_points`. When the raw window is too large
-    /// to read (see `IndexedLog::samples`), the channel is evaluated on the
+    /// values do not depend on `max_points`. When replaying the window would
+    /// take more than `MATH_RAW_RECORDS` frames, or its raw samples cannot be
+    /// read (see `IndexedLog::samples`), the channel is evaluated on the
     /// bucketed series of its signals instead, as that is all the plot can
     /// afford; its values then depend on the zoom.
     pub fn query(&self, query: &Query) -> Result<Vec<SeriesDto>> {
@@ -343,16 +349,20 @@ impl Session {
                 )?);
             }
         }
+        let replay_is_cheap = log.records_in_window(query.t0_us, query.t1_us) <= MATH_RAW_RECORDS;
         for (channel, compiled) in &derived {
             let deps = compiled.dependencies();
-            let result = match log.samples(deps, query.t0_us, query.t1_us) {
-                Ok(raw) => {
+            let raw = replay_is_cheap
+                .then(|| log.samples(deps, query.t0_us, query.t1_us))
+                .and_then(Result::ok);
+            let result = match raw {
+                Some(raw) => {
                     let mut result = eval_channel(channel, compiled, &raw)?;
                     result.points =
                         decimate_points(result.points, query.t0_us, query.t1_us, query.max_points);
                     result
                 }
-                Err(_) => {
+                None => {
                     let bucketed = log.query(&QueryWindow {
                         t0_us: query.t0_us,
                         t1_us: query.t1_us,
