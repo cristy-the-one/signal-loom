@@ -78,26 +78,46 @@ pub fn inflate_container(object: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Next decodable object inside an inflated container. `at` advances past it.
+/// A malformed tail is dropped silently here; use `next_inner_checked` to see it.
 pub fn next_inner(data: &[u8], at: &mut usize, container_off: u64) -> Option<Rec> {
+    next_inner_checked(data, at, container_off).ok().flatten()
+}
+
+/// Like `next_inner`, but a container whose objects run out mid-object is an
+/// error that says where, so the caller can report the dropped bytes. `at` moves
+/// to the end of the container in that case.
+pub fn next_inner_checked(
+    data: &[u8],
+    at: &mut usize,
+    container_off: u64,
+) -> std::result::Result<Option<Rec>, String> {
     loop {
-        let rest = data.get(*at..)?;
-        let rel = rest.windows(4).position(|word| word == b"LOBJ")?;
+        let Some(rest) = data.get(*at..) else {
+            return Ok(None);
+        };
+        let Some(rel) = rest.windows(4).position(|word| word == b"LOBJ") else {
+            return Ok(None);
+        };
         let cursor = *at + rel;
         if cursor + 16 > data.len() {
             *at = data.len();
-            return None;
+            return Err(format!(
+                "object at container offset {cursor} is cut short; the rest of the container was dropped"
+            ));
         }
-        let size_bytes: [u8; 4] = data.get(cursor + 8..cursor + 12)?.try_into().ok()?;
-        let obj_size = u32::from_le_bytes(size_bytes) as usize;
+        let obj_size =
+            u32::from_le_bytes(copy4(data, cursor + 8).map_err(|err| err.to_string())?) as usize;
         if obj_size < 16 || cursor + obj_size > data.len() {
             *at = data.len();
-            return None;
+            return Err(format!(
+                "object at container offset {cursor} declares size {obj_size}, which is not usable; the rest of the container was dropped"
+            ));
         }
         let object = &data[cursor..cursor + obj_size];
         *at = cursor + obj_size;
         if let Some(mut rec) = decode_object(object) {
             rec.offset = container_off;
-            return Some(rec);
+            return Ok(Some(rec));
         }
     }
 }
@@ -150,21 +170,36 @@ pub fn decode_object(object: &[u8]) -> Option<Rec> {
             },
         }),
         CAN_FD_MESSAGE => {
-            if payload.len() < 16 {
+            if payload.len() < 20 {
                 return None;
             }
-            let id = u32::from_le_bytes(copy4(payload, 4).ok()?) & 0x1FFF_FFFF;
-            let valid = payload[15] as usize;
-            let data_at = 21.min(payload.len());
-            Some(frame_from(t_us, id, &payload[data_at..], valid))
+            let channel = u8::try_from(u16::from_le_bytes(copy2(payload, 0).ok()?)).ok()?;
+            let raw_id = u32::from_le_bytes(copy4(payload, 4).ok()?);
+            let valid = payload[14] as usize;
+            Some(frame_from_slice(
+                t_us,
+                raw_id & 0x1FFF_FFFF,
+                raw_id & 0x8000_0000 != 0,
+                channel,
+                &payload[20..],
+                valid,
+            ))
         }
         CAN_FD_MESSAGE_64 => {
             if payload.len() < 40 {
                 return None;
             }
+            let channel = payload[0];
             let valid = payload[2] as usize;
-            let id = u32::from_le_bytes(copy4(payload, 4).ok()?) & 0x1FFF_FFFF;
-            Some(frame_from(t_us, id, &payload[40..], valid))
+            let raw_id = u32::from_le_bytes(copy4(payload, 4).ok()?);
+            Some(frame_from_slice(
+                t_us,
+                raw_id & 0x1FFF_FFFF,
+                raw_id & 0x8000_0000 != 0,
+                channel,
+                &payload[40..],
+                valid,
+            ))
         }
         _ => None,
     }
@@ -187,11 +222,6 @@ fn decode_classic(t_us: u64, payload: &[u8]) -> Option<Rec> {
         &payload[8..],
         dlc as usize,
     ))
-}
-
-fn frame_from(t_us: u64, id: u32, raw: &[u8], valid: usize) -> Rec {
-    let extended = id > 0x7FF;
-    frame_from_slice(t_us, id, extended, 0, raw, valid)
 }
 
 fn frame_from_slice(
@@ -242,7 +272,9 @@ fn copy8(bytes: &[u8], at: usize) -> Result<[u8; 8]> {
 
 #[cfg(test)]
 mod tests {
+    use super::{next_inner_checked, CAN_MESSAGE};
     use crate::index::IndexedLog;
+    use crate::scan::{LogFormat, RecKind, Scanner};
 
     #[test]
     fn reads_uncompressed_and_zlib_containers() {
@@ -256,6 +288,108 @@ mod tests {
             assert_eq!(values.message_id, Some(0x1A0));
             assert!(log.events().iter().any(|(_, label)| label == "Error frame"));
         }
+    }
+
+    #[test]
+    fn fd_frame_keeps_its_channel_and_extended_flag() {
+        let mut payload = vec![0u8; 84];
+        payload[0..2].copy_from_slice(&2u16.to_le_bytes());
+        payload[3] = 8;
+        payload[4..8].copy_from_slice(&0x8123_4567u32.to_le_bytes());
+        payload[14] = 8;
+        payload[20..28].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        let frame = read_one_frame(&blf_file(&[lobj(100, &payload)]));
+        assert_eq!(
+            frame,
+            (
+                0x0123_4567,
+                true,
+                2,
+                8,
+                vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+            )
+        );
+    }
+
+    #[test]
+    fn fd_64_frame_keeps_its_channel_and_extended_flag() {
+        let mut payload = vec![0u8; 48];
+        payload[0] = 2;
+        payload[2] = 8;
+        payload[4..8].copy_from_slice(&0x8123_4567u32.to_le_bytes());
+        payload[40..48].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        let frame = read_one_frame(&blf_file(&[lobj(101, &payload)]));
+        assert_eq!(
+            frame,
+            (
+                0x0123_4567,
+                true,
+                2,
+                8,
+                vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+            )
+        );
+    }
+
+    #[test]
+    fn container_cut_short_is_reported_with_its_offset() {
+        let mut payload = vec![0u8; 16];
+        payload[0] = 1;
+        payload[3] = 8;
+        payload[4..8].copy_from_slice(&0x1A0u32.to_le_bytes());
+        payload[8..16].copy_from_slice(&[0x80, 0x0C, 0x88, 0x13, 0x78, 0x64, 0x00, 0x00]);
+        let mut container = lobj(CAN_MESSAGE, &payload);
+        container.extend_from_slice(b"LOBJ");
+        container.extend_from_slice(&[0u8; 8]);
+        let mut at = 0;
+        let first = next_inner_checked(&container, &mut at, 0).unwrap().unwrap();
+        assert!(matches!(first.kind, RecKind::Frame { id: 0x1A0, .. }));
+        let err = next_inner_checked(&container, &mut at, 0).unwrap_err();
+        assert_eq!(
+            err,
+            "object at container offset 48 is cut short; the rest of the container was dropped"
+        );
+        assert_eq!(at, container.len());
+    }
+
+    fn lobj(obj_type: u32, payload: &[u8]) -> Vec<u8> {
+        let size = 32 + payload.len();
+        let mut out = Vec::with_capacity(size);
+        out.extend_from_slice(b"LOBJ");
+        out.extend_from_slice(&32u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&(size as u32).to_le_bytes());
+        out.extend_from_slice(&obj_type.to_le_bytes());
+        out.extend_from_slice(&[0u8; 16]);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn blf_file(objects: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = b"LOGG".to_vec();
+        out.extend_from_slice(&144u32.to_le_bytes());
+        out.resize(144, 0);
+        for object in objects {
+            out.extend_from_slice(object);
+        }
+        out
+    }
+
+    fn read_one_frame(bytes: &[u8]) -> (u32, bool, u8, u8, Vec<u8>) {
+        let mut cursor = std::io::Cursor::new(bytes.to_vec());
+        let mut scanner = Scanner::open(&mut cursor, LogFormat::Blf).unwrap();
+        let rec = scanner.next_rec().unwrap().unwrap();
+        let RecKind::Frame {
+            id,
+            extended,
+            channel,
+            dlc,
+            data,
+        } = rec.kind
+        else {
+            panic!("expected a frame");
+        };
+        (id, extended, channel, dlc, data[..dlc as usize].to_vec())
     }
 
     fn fixture(name: &str) -> std::path::PathBuf {
