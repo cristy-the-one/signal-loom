@@ -46,12 +46,46 @@ pub struct MathChannel {
     pub expr: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// How a trigger compares a sample to its level. The wire form is the symbol;
+/// the word forms are older spellings that still load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerOp {
+    #[serde(rename = ">", alias = "gt")]
+    Gt,
+    #[serde(rename = "<", alias = "lt")]
+    Lt,
+    #[serde(rename = ">=", alias = "ge")]
+    Ge,
+    #[serde(rename = "<=", alias = "le")]
+    Le,
+}
+
+impl TriggerOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Gt => ">",
+            Self::Lt => "<",
+            Self::Ge => ">=",
+            Self::Le => "<=",
+        }
+    }
+
+    pub fn holds(self, value: f64, level: f64) -> bool {
+        match self {
+            Self::Gt => value > level,
+            Self::Lt => value < level,
+            Self::Ge => value >= level,
+            Self::Le => value <= level,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThresholdTrigger {
     pub id: String,
     pub signal: String,
-    pub op: String,
+    pub op: TriggerOp,
     pub value: f64,
 }
 
