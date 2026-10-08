@@ -46,23 +46,24 @@ impl Session {
         if let Some(path) = find_up("fixtures/hypercar_lap.slog") {
             return self.open_path(&path);
         }
-        self.reset_deck();
         let mut map = SignalMap::parse(SAMPLE_MAP)?;
         map.timeout_factor = self.timeout_factor();
-        self.map = Some(map);
-        self.map_path = find_up(&format!("fixtures/{SAMPLE_MAP_NAME}"))
+        let map_path = find_up(&format!("fixtures/{SAMPLE_MAP_NAME}"))
             .or_else(|| Some(PathBuf::from(format!("fixtures/{SAMPLE_MAP_NAME}"))));
-        self.log_label = SAMPLE_LOG_NAME.to_string();
-        if let Some(path) = find_up(&format!("fixtures/{SAMPLE_LOG_NAME}")) {
-            self.log_path = Some(path.clone());
-            self.log = Some(IndexedLog::open_path(&path, self.map.as_ref())?);
+        let (log, log_path) = if let Some(path) = find_up(&format!("fixtures/{SAMPLE_LOG_NAME}")) {
+            (IndexedLog::open_path(&path, Some(&map))?, path)
         } else {
-            self.log_path = Some(PathBuf::from(format!("fixtures/{SAMPLE_LOG_NAME}")));
-            self.log = Some(IndexedLog::open_bytes(
-                SAMPLE_SLOG.as_bytes().to_vec(),
-                self.map.as_ref(),
-            )?);
-        }
+            (
+                IndexedLog::open_bytes(SAMPLE_SLOG.as_bytes().to_vec(), Some(&map))?,
+                PathBuf::from(format!("fixtures/{SAMPLE_LOG_NAME}")),
+            )
+        };
+        self.reset_deck();
+        self.map = Some(map);
+        self.map_path = map_path;
+        self.log_label = SAMPLE_LOG_NAME.to_string();
+        self.log_path = Some(log_path);
+        self.log = Some(log);
         self.summary()
     }
 
@@ -153,19 +154,20 @@ impl Session {
             .and_then(|n| n.to_str())
             .unwrap_or("upload");
         let mut indexed = IndexedLog::open_bytes(bytes, self.map.as_ref())?;
+        let mut kept_notes = self.map_notes.clone();
         let set_aside = !self.carried_map_fits(&indexed);
         if set_aside {
-            let note = self.set_aside_note();
             if let Some(bytes) = indexed.shared_bytes() {
                 indexed = IndexedLog::open_shared(bytes, None)?;
             }
+            kept_notes = vec![self.set_aside_note()];
+        }
+        self.reset_deck();
+        if set_aside {
             self.map = None;
             self.map_path = None;
-            self.reset_deck();
-            self.map_notes = vec![note];
-        } else {
-            self.reset_deck();
         }
+        self.map_notes = kept_notes;
         self.log_label = label.to_string();
         self.log_path = None;
         self.log = Some(indexed);
@@ -745,28 +747,38 @@ impl Session {
             .ok_or_else(|| Error::msg("no log is open"))
     }
 
+    /// Rebuild every log that decodes through the map: the main log and the
+    /// compare log. Both are rebuilt before either is replaced, so a failed or
+    /// cancelled rebuild leaves both as they were.
     fn reindex_controlled(&mut self, control: Option<&IndexControl>) -> Result<()> {
-        let path = self
-            .log
-            .as_ref()
-            .and_then(|log| log.path().map(Path::to_path_buf));
-        let bytes = if path.is_none() {
-            self.log.as_ref().and_then(|log| log.shared_bytes())
-        } else {
-            None
-        };
-        if path.is_none() && bytes.is_none() {
-            return Ok(());
+        let main = rebuild(self.log.as_ref(), self.map.as_ref(), control)?;
+        let compare = rebuild(self.compare.as_ref(), self.map.as_ref(), control)?;
+        if main.is_some() {
+            self.log = main;
         }
-        let rebuilt = if let Some(path) = path {
-            IndexedLog::open_path_controlled(&path, self.map.as_ref(), control)?
-        } else if let Some(bytes) = bytes {
-            IndexedLog::open_shared(bytes, self.map.as_ref())?
-        } else {
-            return Ok(());
-        };
-        self.log = Some(rebuilt);
+        if compare.is_some() {
+            self.compare = compare;
+        }
         Ok(())
+    }
+}
+
+/// Index `log`'s source again with `map`. `None` when there is nothing to
+/// rebuild from.
+fn rebuild(
+    log: Option<&IndexedLog>,
+    map: Option<&SignalMap>,
+    control: Option<&IndexControl>,
+) -> Result<Option<IndexedLog>> {
+    let Some(log) = log else {
+        return Ok(None);
+    };
+    if let Some(path) = log.path() {
+        return IndexedLog::open_path_controlled(path, map, control).map(Some);
+    }
+    match log.shared_bytes() {
+        Some(bytes) => IndexedLog::open_shared(bytes, map).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -1032,4 +1044,144 @@ fn find_up(relative: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RPM_LOG: &str = "SLOGv1\nF 0 1A0 800C881378640000\nF 10000 1A0 800C881378640000\n";
+    const RPM_MAP: &str = r#"{"name":"rpm","version":1,"messages":[{"id":"0x1A0","name":"Powertrain",
+        "signals":[{"name":"EngineRPM","startBit":0,"bitLength":16,"factor":0.25,"unit":"rpm"}]}]}"#;
+
+    fn fixtures() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
+    }
+
+    fn rpm_query() -> Query {
+        Query {
+            t0_us: 0,
+            t1_us: 20_000,
+            signals: vec!["EngineRPM".to_string()],
+            max_points: 100,
+            include_compare: true,
+        }
+    }
+
+    fn compare_values(session: &Session, query: &Query) -> Vec<f64> {
+        session
+            .query(query)
+            .unwrap()
+            .into_iter()
+            .filter(|series| series.name.ends_with(" · B"))
+            .flat_map(|series| series.points.into_iter().map(|point| point.v))
+            .collect()
+    }
+
+    #[test]
+    fn a_map_applied_later_decodes_the_compare_log_too() {
+        let mut session = Session::new();
+        session
+            .open_bytes("main.slog", RPM_LOG.as_bytes().to_vec())
+            .unwrap();
+        session
+            .open_compare_bytes(RPM_LOG.as_bytes().to_vec())
+            .unwrap();
+        session.open_map_json(RPM_MAP).unwrap();
+        assert_eq!(compare_values(&session, &rpm_query()), [800.0, 800.0]);
+    }
+
+    #[test]
+    fn a_timeout_change_rebuilds_the_compare_log_with_the_same_map() {
+        let mut session = Session::new();
+        session
+            .open_bytes("main.slog", RPM_LOG.as_bytes().to_vec())
+            .unwrap();
+        session.open_map_json(RPM_MAP).unwrap();
+        session
+            .open_compare_bytes(RPM_LOG.as_bytes().to_vec())
+            .unwrap();
+        session.set_timeout_factor(4.0).unwrap();
+        assert_eq!(compare_values(&session, &rpm_query()), [800.0, 800.0]);
+        assert_eq!(
+            session.compare.as_ref().unwrap().frame_count(),
+            session.log.as_ref().unwrap().frame_count()
+        );
+    }
+
+    #[test]
+    fn a_cancelled_map_change_leaves_both_logs_and_the_map_as_they_were() {
+        let root = fixtures();
+        let log = root.join("cluster_drive.slog");
+        let mut session = Session::new();
+        session.open_path(&log).unwrap();
+        session
+            .open_map_path(&root.join("cluster.map.json"))
+            .unwrap();
+        session.open_compare_path(&log).unwrap();
+        let query = Query {
+            t0_us: 12_000_000,
+            t1_us: 12_500_000,
+            signals: vec!["VehicleSpeed".to_string()],
+            max_points: 50,
+            include_compare: true,
+        };
+        let before = compare_values(&session, &query);
+        assert!(!before.is_empty());
+        let label = session.summary().unwrap().map_label;
+
+        let cancelled = IndexControl::default();
+        cancelled.request_cancel();
+        assert!(session
+            .add_map_path_controlled(&root.join("hypercar_lap.dbc"), 0, Some(&cancelled))
+            .is_err());
+        assert_eq!(compare_values(&session, &query), before);
+        assert_eq!(session.summary().unwrap().map_label, label);
+    }
+
+    #[test]
+    fn a_failed_open_bytes_keeps_the_open_deck() {
+        let root = fixtures();
+        let mut session = Session::new();
+        session.open_path(&root.join("cluster_drive.slog")).unwrap();
+        session
+            .open_map_path(&root.join("cluster.map.json"))
+            .unwrap();
+        session.map_notes = vec!["kept note".to_string()];
+        session
+            .set_math(vec![MathChannel {
+                name: "double".to_string(),
+                expr: "VehicleSpeed * 2".to_string(),
+                unit: String::new(),
+            }])
+            .unwrap();
+        let frames = session.log.as_ref().unwrap().frame_count();
+
+        assert!(session
+            .open_bytes("junk.bin", b"\x00\x01 not a log".to_vec())
+            .is_err());
+
+        assert_eq!(session.log_label, "cluster_drive.slog");
+        assert_eq!(session.log_path, Some(root.join("cluster_drive.slog")));
+        assert_eq!(session.map_path, Some(root.join("cluster.map.json")));
+        assert_eq!(session.map.as_ref().unwrap().name, "Instrument cluster");
+        assert_eq!(session.map_notes, ["kept note"]);
+        assert_eq!(session.math.len(), 1);
+        assert_eq!(session.log.as_ref().unwrap().frame_count(), frames);
+    }
+
+    #[test]
+    fn open_bytes_keeps_the_notes_of_the_map_it_carries() {
+        let mut session = Session::new();
+        session
+            .open_bytes("first.slog", RPM_LOG.as_bytes().to_vec())
+            .unwrap();
+        session.open_map_json(RPM_MAP).unwrap();
+        session.map_notes = vec!["kept note".to_string()];
+        let summary = session
+            .open_bytes("second.slog", RPM_LOG.as_bytes().to_vec())
+            .unwrap();
+        assert!(summary.warnings.iter().any(|note| note == "kept note"));
+        assert_eq!(session.map_notes, ["kept note"]);
+    }
 }
