@@ -23,10 +23,10 @@ const PROJECT_FILTERS: FileFilter[] = [{ name: "Signal Loom project", extensions
 export async function pickPath(
   input: HTMLInputElement,
   filters: FileFilter[],
-  mode?: "add",
+  mode?: "add" | "open",
 ): Promise<string | null> {
   if (!api.inTauri()) {
-    if (mode) input.dataset.mode = mode;
+    input.dataset.mode = mode ?? "open";
     input.click();
     return null;
   }
