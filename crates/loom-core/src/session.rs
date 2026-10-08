@@ -1,16 +1,16 @@
-use crate::analyze::compile;
+use crate::analyze::{compile, Compiled};
 use crate::dto::{
     EventDto, FrameDto, MapMatch, PointDto, ProjectOpen, Query, SeriesDto, SignalDto, StepDir,
     Summary, ValueDto, WindowStats,
 };
 use crate::error::{Error, Result};
-use crate::index::{IndexControl, IndexedLog, QueryWindow, Series};
+use crate::index::{decimate_points, IndexControl, IndexedLog, QueryWindow, Series};
 use crate::map::SignalMap;
 use crate::project::{self, MathChannel, ProjectFile, ThresholdTrigger};
 use crate::scan::LogFormat;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 const MAX_MAP_BYTES: u64 = 32 * 1024 * 1024;
 /// A `.loom` holds paths, bookmarks and notes: far below this.
 const MAX_PROJECT_BYTES: u64 = 4 * 1024 * 1024;
+/// `query` evaluates a math channel on raw samples only when the window replays
+/// at most this many frames, so a refresh stays quick on a huge log. The
+/// hypercar lap fixture (about 235,000 frames, 0.2 s to replay in a release
+/// build) is below it.
+const MATH_RAW_RECORDS: u64 = 500_000;
 const SAMPLE_SLOG: &str = include_str!("../../../fixtures/cluster_drive.slog");
 const SAMPLE_MAP: &str = include_str!("../../../fixtures/cluster.map.json");
 const SAMPLE_LOG_NAME: &str = "cluster_drive.slog";
@@ -303,17 +308,22 @@ impl Session {
         }
     }
 
+    /// Physical series are bucketed by the index. A math channel is evaluated on
+    /// the raw samples of its signals in the window, the same ones `stats` and
+    /// the CSV export use, and the result is then bucketed the same way, so its
+    /// values do not depend on `max_points`. When replaying the window would
+    /// take more than `MATH_RAW_RECORDS` frames, or its raw samples cannot be
+    /// read (see `IndexedLog::samples`), the channel is evaluated on the
+    /// bucketed series of its signals instead, as that is all the plot can
+    /// afford; its values then depend on the zoom.
     pub fn query(&self, query: &Query) -> Result<Vec<SeriesDto>> {
         let log = self.log()?;
         let mut physical = Vec::new();
-        let mut derived = Vec::new();
+        let mut derived: Vec<(&MathChannel, Compiled)> = Vec::new();
         for name in &query.signals {
-            if let Some(channel) = self.math.iter().find(|channel| &channel.name == name) {
-                derived.push(channel.clone());
-                for dep in compile(&channel.expr)?.dependencies() {
-                    if !physical.contains(&dep) && self.math.iter().all(|item| item.name != dep) {
-                        physical.push(dep);
-                    }
+            if let Some(channel) = self.math_channel(name) {
+                if derived.iter().all(|(item, _)| item.name != *name) {
+                    derived.push((channel, compile_math(&self.math, channel)?));
                 }
             } else if !physical.contains(name) {
                 physical.push(name.clone());
@@ -339,8 +349,30 @@ impl Session {
                 )?);
             }
         }
-        for channel in &derived {
-            series.push(eval_channel(channel, &series)?);
+        let replay_is_cheap = log.records_in_window(query.t0_us, query.t1_us) <= MATH_RAW_RECORDS;
+        for (channel, compiled) in &derived {
+            let deps = compiled.dependencies();
+            let raw = replay_is_cheap
+                .then(|| log.samples(deps, query.t0_us, query.t1_us))
+                .and_then(Result::ok);
+            let result = match raw {
+                Some(raw) => {
+                    let mut result = eval_channel(channel, compiled, &raw)?;
+                    result.points =
+                        decimate_points(result.points, query.t0_us, query.t1_us, query.max_points);
+                    result
+                }
+                None => {
+                    let bucketed = log.query(&QueryWindow {
+                        t0_us: query.t0_us,
+                        t1_us: query.t1_us,
+                        signals: deps.to_vec(),
+                        max_points: query.max_points,
+                    })?;
+                    eval_channel(channel, compiled, &bucketed)?
+                }
+            };
+            series.push(result);
         }
         let wanted: Vec<&str> = query.signals.iter().map(String::as_str).collect();
         Ok(series
@@ -351,6 +383,17 @@ impl Session {
             })
             .map(series_dto)
             .collect())
+    }
+
+    fn math_channel(&self, name: &str) -> Option<&MathChannel> {
+        self.math.iter().find(|channel| channel.name == name)
+    }
+
+    /// A math channel over the raw samples of its signals in the window.
+    fn math_series(&self, channel: &MathChannel, t0_us: u64, t1_us: u64) -> Result<Series> {
+        let compiled = compile_math(&self.math, channel)?;
+        let raw = self.log()?.samples(compiled.dependencies(), t0_us, t1_us)?;
+        eval_channel(channel, &compiled, &raw)
     }
 
     pub fn set_math(&mut self, channels: Vec<MathChannel>) -> Result<Summary> {
@@ -364,7 +407,7 @@ impl Session {
                     "math channel names cannot end with the compare suffix",
                 ));
             }
-            compile(&channel.expr)?;
+            compile_math(&channels, channel)?;
         }
         self.math = channels;
         self.summary()
@@ -441,10 +484,8 @@ impl Session {
     }
 
     pub fn stats(&self, name: &str, t0_us: u64, t1_us: u64) -> Result<WindowStats> {
-        if let Some(channel) = self.math.iter().find(|channel| channel.name == name) {
-            let deps = compile(&channel.expr)?.dependencies();
-            let series = eval_channel(channel, &self.log()?.samples(&deps, t0_us, t1_us)?)?;
-            return stats_of_points(name, &series);
+        if let Some(channel) = self.math_channel(name) {
+            return stats_of_points(name, &self.math_series(channel, t0_us, t1_us)?);
         }
         self.log()?.stats(name, t0_us, t1_us)
     }
@@ -994,52 +1035,41 @@ fn compare_series(
         .collect())
 }
 
-fn eval_channel(channel: &MathChannel, base: &[Series]) -> Result<Series> {
+/// Compile a math channel. A math channel can use only signals from the log:
+/// naming another math channel is an error here, wherever it is evaluated, not
+/// a dependency that is quietly dropped on one path and fails on another.
+fn compile_math(channels: &[MathChannel], channel: &MathChannel) -> Result<Compiled> {
     let compiled = compile(&channel.expr)?;
-    let deps = compiled.dependencies();
-    let mut times = BTreeSet::new();
-    for dep in &deps {
-        let series = base
-            .iter()
-            .find(|series| series.name == *dep)
-            .ok_or_else(|| Error::msg(format!("math channel {} needs {dep}", channel.name)))?;
-        for (t, _) in &series.points {
-            times.insert(*t);
-        }
+    if let Some(dep) = compiled
+        .dependencies()
+        .iter()
+        .find(|dep| channels.iter().any(|other| other.name == **dep))
+    {
+        return Err(Error::msg(format!(
+            "math channel {} uses math channel {dep}. A math channel can only use signals from the log, so write the expression of {dep} into it",
+            channel.name
+        )));
     }
-    let mut cursors = HashMap::<String, usize>::new();
-    let mut last = HashMap::<String, f64>::new();
-    let mut vars = HashMap::<String, f64>::new();
-    let mut lp_state = Vec::new();
-    let mut points = Vec::new();
-    for t in times {
-        vars.clear();
-        let mut ready = true;
-        for dep in &deps {
-            let series = base.iter().find(|series| series.name == *dep).unwrap();
-            let mut cursor = cursors.get(dep).copied().unwrap_or(0);
-            while cursor < series.points.len() && series.points[cursor].0 <= t {
-                last.insert(dep.clone(), series.points[cursor].1);
-                cursor += 1;
-            }
-            cursors.insert(dep.clone(), cursor);
-            match last.get(dep).copied() {
-                Some(value) => {
-                    vars.insert(dep.clone(), value);
-                }
-                None => ready = false,
-            }
-        }
-        if ready {
-            if let Some(value) = compiled.eval(&vars, &mut lp_state)? {
-                points.push((t, value));
-            }
-        }
-    }
+    Ok(compiled)
+}
+
+/// Evaluate a compiled channel over `base`, which holds a series for each of
+/// its signals. Names are matched to the plan's variables once.
+fn eval_channel(channel: &MathChannel, compiled: &Compiled, base: &[Series]) -> Result<Series> {
+    let inputs = compiled
+        .dependencies()
+        .iter()
+        .map(|dep| {
+            base.iter()
+                .find(|series| series.name == *dep)
+                .map(|series| series.points.as_slice())
+                .ok_or_else(|| Error::msg(format!("math channel {} needs {dep}", channel.name)))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(Series {
         name: channel.name.clone(),
         unit: channel.unit.clone(),
-        points,
+        points: compiled.eval_series(&inputs),
     })
 }
 
@@ -1071,12 +1101,9 @@ fn export_math_csv(session: &Session, names: &[String], t0_us: u64, t1_us: u64) 
     let mut columns = Vec::new();
     for name in names {
         let channel = session
-            .math
-            .iter()
-            .find(|channel| &channel.name == name)
+            .math_channel(name)
             .ok_or_else(|| Error::msg(format!("no math channel named {name}")))?;
-        let deps = compile(&channel.expr)?.dependencies();
-        let series = eval_channel(channel, &session.log()?.samples(&deps, t0_us, t1_us)?)?;
+        let series = session.math_series(channel, t0_us, t1_us)?;
         header.push(',');
         header.push_str(name);
         columns.push(series);
@@ -1297,6 +1324,174 @@ mod tests {
             .unwrap();
         assert!(summary.warnings.iter().any(|note| note == "kept note"));
         assert_eq!(session.map_notes, ["kept note"]);
+    }
+
+    /// A rises 10, 12, 11, 30, 13, 12, 14, 11, 12, 13 at every 1000 µs from 0.
+    /// B is 1, 2, 3, 4, 40, 6, 7, 8, 9, 10 at every 1000 µs from 500.
+    fn math_session(channels: &[(&str, &str)]) -> Session {
+        let a = [10, 12, 11, 30, 13, 12, 14, 11, 12, 13];
+        let b = [1, 2, 3, 4, 40, 6, 7, 8, 9, 10];
+        let mut text = String::from(
+            "t_us,signal,value,unit
+",
+        );
+        for i in 0..10 {
+            text.push_str(&format!(
+                "{},A,{},
+",
+                i * 1000,
+                a[i]
+            ));
+            text.push_str(&format!(
+                "{},B,{},
+",
+                i * 1000 + 500,
+                b[i]
+            ));
+        }
+        let mut session = Session::new();
+        session.open_bytes("math.csv", text.into_bytes()).unwrap();
+        session
+            .set_math(
+                channels
+                    .iter()
+                    .map(|(name, expr)| MathChannel {
+                        name: name.to_string(),
+                        expr: expr.to_string(),
+                        unit: String::new(),
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        session
+    }
+
+    fn math_points(
+        session: &Session,
+        name: &str,
+        t0_us: u64,
+        max_points: usize,
+    ) -> Vec<(u64, f64)> {
+        let series = session
+            .query(&Query {
+                t0_us,
+                t1_us: 9_000,
+                signals: vec![name.to_string()],
+                max_points,
+                include_compare: false,
+            })
+            .unwrap();
+        assert_eq!(series.len(), 1);
+        series[0].points.iter().map(|p| (p.t, p.v)).collect()
+    }
+
+    #[test]
+    fn a_plotted_difference_has_the_stats_extremes_at_any_zoom() {
+        let session = math_session(&[("Diff", "A - B")]);
+        let stats = session.stats("Diff", 0, 9_000).unwrap();
+        assert_eq!((stats.count, stats.min, stats.max), (18, -28.0, 27.0));
+
+        let zoomed_out = math_points(&session, "Diff", 0, 4);
+        assert_eq!(
+            zoomed_out,
+            [(2500, 8.0), (3000, 27.0), (5000, -28.0), (6000, 8.0)]
+        );
+        let detailed = math_points(&session, "Diff", 0, 1000);
+        assert_eq!(detailed.len(), 18);
+        for points in [zoomed_out, detailed] {
+            let min = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+            let max = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+            assert_eq!((min, max), (stats.min, stats.max));
+        }
+    }
+
+    #[test]
+    fn a_low_pass_channel_has_the_same_value_at_every_zoom() {
+        let session = math_session(&[("Smooth", "lp(A, 0.5)")]);
+        let zoomed_out = math_points(&session, "Smooth", 0, 6);
+        assert_eq!(
+            zoomed_out,
+            [
+                (0, 10.0),
+                (1000, 11.0),
+                (3000, 20.5),
+                (5000, 14.375),
+                (8000, 12.296875)
+            ]
+        );
+        let detailed = math_points(&session, "Smooth", 0, 1000);
+        assert_eq!(detailed.len(), 10);
+        assert_eq!(detailed[3], (3000, 20.5));
+        assert_eq!(detailed[8], (8000, 12.296875));
+        let stats = session.stats("Smooth", 0, 9_000).unwrap();
+        assert_eq!((stats.min, stats.max), (10.0, 20.5));
+    }
+
+    #[test]
+    fn a_math_channel_is_bucketed_like_a_physical_one_from_a_mid_log_start() {
+        let session = math_session(&[("SameA", "A + 0")]);
+        let physical = math_points(&session, "A", 2250, 4);
+        assert_eq!(physical, [(2250, 11.0), (3000, 30.0), (7000, 11.0)]);
+        assert_eq!(math_points(&session, "SameA", 2250, 4), physical);
+    }
+
+    #[test]
+    fn exported_math_values_are_the_plotted_values() {
+        let session = math_session(&[("Diff", "A - B"), ("Smooth", "lp(A, 0.5)")]);
+        let csv = session.export_csv(&["Diff".to_string()], 0, 9_000).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 19);
+        assert_eq!(&lines[..3], ["t_us,Diff", "500,9.000000", "1000,11.000000"]);
+        assert_eq!(lines[9], "4500,-27.000000");
+        for (t, v) in math_points(&session, "Diff", 0, 1000) {
+            assert!(
+                csv.contains(&format!(
+                    "
+{t},{v:.6}
+"
+                )),
+                "{t}"
+            );
+        }
+
+        let csv = session
+            .export_csv(&["Smooth".to_string()], 0, 9_000)
+            .unwrap();
+        assert!(csv.contains(
+            "
+3000,20.500000
+"
+        ));
+        assert!(csv.contains(
+            "
+8000,12.296875
+"
+        ));
+    }
+
+    #[test]
+    fn a_math_channel_cannot_use_another_math_channel() {
+        let mut session = math_session(&[("Diff", "A - B")]);
+        let err = session
+            .set_math(vec![
+                MathChannel {
+                    name: "Diff".to_string(),
+                    expr: "A - B".to_string(),
+                    unit: String::new(),
+                },
+                MathChannel {
+                    name: "Twice".to_string(),
+                    expr: "Diff * 2".to_string(),
+                    unit: String::new(),
+                },
+            ])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("math channel Twice uses math channel Diff."),
+            "{err}"
+        );
+        assert_eq!(session.math.len(), 1);
     }
 
     const SWING_LOG: &str = "SLOGv1

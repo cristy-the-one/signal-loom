@@ -2,17 +2,19 @@
 //! `abs(x)`, and a one-pole `lp(x, alpha)`.
 
 use crate::error::{Error, Result};
-use std::collections::{HashMap, HashSet};
 
+/// An expression with its signal names resolved to indices: variable `i` is
+/// `dependencies()[i]`.
 #[derive(Debug, Clone)]
 pub struct Compiled {
     root: Node,
+    names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 enum Node {
     Num(f64),
-    Var(String),
+    Var(usize),
     Neg(Box<Node>),
     Abs(Box<Node>),
     Lp(Box<Node>, f64),
@@ -31,93 +33,103 @@ pub fn compile(expr: &str) -> Result<Compiled> {
     let mut parser = Parser {
         bytes: expr.as_bytes(),
         pos: 0,
+        names: Vec::new(),
     };
     let root = parser.parse_expr()?;
     parser.skip();
     if parser.pos != parser.bytes.len() {
         return Err(Error::msg(format!("could not parse the rest of '{expr}'")));
     }
-    Ok(Compiled { root })
+    Ok(Compiled {
+        root,
+        names: parser.names,
+    })
 }
 
 impl Compiled {
-    pub fn dependencies(&self) -> Vec<String> {
-        let mut names = Vec::new();
-        let mut seen = HashSet::new();
-        self.root.deps(&mut names, &mut seen);
-        names
+    /// Signal names in order of first use.
+    pub fn dependencies(&self) -> &[String] {
+        &self.names
     }
 
-    /// Evaluate one sample. `lp_state` keeps one-pole memory in walk order.
-    /// A non-finite result, such as a division by zero, is `None`: that sample
-    /// is a gap in the channel, not an error for the whole query.
-    pub fn eval(
-        &self,
-        vars: &HashMap<String, f64>,
-        lp_state: &mut Vec<f64>,
-    ) -> Result<Option<f64>> {
+    /// Evaluate one sample. `vars[i]` is the value of `dependencies()[i]`.
+    /// `lp_state` keeps one-pole memory in walk order. A non-finite result,
+    /// such as a division by zero, is `None`: that sample is a gap in the
+    /// channel, not an error for the whole query.
+    pub fn eval(&self, vars: &[f64], lp_state: &mut Vec<f64>) -> Option<f64> {
         let mut slot = 0usize;
-        let value = self.root.eval(vars, lp_state, &mut slot)?;
-        Ok(value.is_finite().then_some(value))
+        let value = self.root.eval(vars, lp_state, &mut slot);
+        value.is_finite().then_some(value)
+    }
+
+    /// Evaluate over time-sorted dependency series, `inputs[i]` being the
+    /// points of `dependencies()[i]`. Each series holds its last value, and a
+    /// sample is produced at every timestamp of any input once all of them
+    /// have a value.
+    pub fn eval_series(&self, inputs: &[&[(u64, f64)]]) -> Vec<(u64, f64)> {
+        debug_assert_eq!(inputs.len(), self.names.len());
+        let mut cursors = vec![0usize; inputs.len()];
+        let mut vars = vec![0.0; inputs.len()];
+        let mut held = 0usize;
+        let mut lp_state = Vec::new();
+        let mut points = Vec::new();
+        while let Some(t) = inputs
+            .iter()
+            .zip(&cursors)
+            .filter_map(|(points, cursor)| points.get(*cursor).map(|(t, _)| *t))
+            .min()
+        {
+            for ((points, cursor), var) in inputs.iter().zip(&mut cursors).zip(&mut vars) {
+                while let Some(&(_, value)) = points.get(*cursor).filter(|(stamp, _)| *stamp <= t) {
+                    if *cursor == 0 {
+                        held += 1;
+                    }
+                    *var = value;
+                    *cursor += 1;
+                }
+            }
+            if held == inputs.len() {
+                if let Some(value) = self.eval(&vars, &mut lp_state) {
+                    points.push((t, value));
+                }
+            }
+        }
+        points
     }
 }
 
 impl Node {
-    fn deps(&self, names: &mut Vec<String>, seen: &mut HashSet<String>) {
+    fn eval(&self, vars: &[f64], lp_state: &mut Vec<f64>, slot: &mut usize) -> f64 {
         match self {
-            Node::Num(_) => {}
-            Node::Var(name) => {
-                if seen.insert(name.clone()) {
-                    names.push(name.clone());
-                }
-            }
-            Node::Neg(inner) | Node::Abs(inner) | Node::Lp(inner, _) => inner.deps(names, seen),
-            Node::Bin(_, left, right) => {
-                left.deps(names, seen);
-                right.deps(names, seen);
-            }
-        }
-    }
-
-    fn eval(
-        &self,
-        vars: &HashMap<String, f64>,
-        lp_state: &mut Vec<f64>,
-        slot: &mut usize,
-    ) -> Result<f64> {
-        match self {
-            Node::Num(value) => Ok(*value),
-            Node::Var(name) => vars
-                .get(name)
-                .copied()
-                .ok_or_else(|| Error::msg(format!("math channel has no value for {name} yet"))),
-            Node::Neg(inner) => Ok(-inner.eval(vars, lp_state, slot)?),
-            Node::Abs(inner) => Ok(inner.eval(vars, lp_state, slot)?.abs()),
+            Node::Num(value) => *value,
+            Node::Var(index) => vars[*index],
+            Node::Neg(inner) => -inner.eval(vars, lp_state, slot),
+            Node::Abs(inner) => inner.eval(vars, lp_state, slot).abs(),
             Node::Lp(inner, alpha) => {
-                let sample = inner.eval(vars, lp_state, slot)?;
+                let sample = inner.eval(vars, lp_state, slot);
                 let index = *slot;
                 *slot += 1;
                 if !sample.is_finite() {
                     // Keep the filter's memory clean; this sample is a gap.
-                    return Ok(sample);
+                    return sample;
                 }
                 if lp_state.len() <= index {
                     lp_state.resize(index + 1, sample);
-                    return Ok(sample);
+                    return sample;
                 }
                 let next = lp_state[index] + alpha * (sample - lp_state[index]);
                 lp_state[index] = next;
-                Ok(next)
+                next
             }
             Node::Bin(op, left, right) => {
-                let a = left.eval(vars, lp_state, slot)?;
-                let b = right.eval(vars, lp_state, slot)?;
-                Ok(match op {
+                let a = left.eval(vars, lp_state, slot);
+                let b = right.eval(vars, lp_state, slot);
+                match op {
                     BinOp::Add => a + b,
                     BinOp::Sub => a - b,
                     BinOp::Mul => a * b,
                     BinOp::Div => a / b,
-                })
+                }
             }
         }
     }
@@ -126,6 +138,7 @@ impl Node {
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
+    names: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -218,7 +231,14 @@ impl<'a> Parser<'a> {
                 "unknown function {name}. Use abs or lp."
             )));
         }
-        Ok(Node::Var(name))
+        let index = match self.names.iter().position(|seen| *seen == name) {
+            Some(index) => index,
+            None => {
+                self.names.push(name);
+                self.names.len() - 1
+            }
+        };
+        Ok(Node::Var(index))
     }
 
     fn parse_number(&mut self) -> Result<Node> {
@@ -286,38 +306,45 @@ mod tests {
     #[test]
     fn subtracts_wheel_speeds_and_filters() {
         let compiled = compile("abs(WheelFL - WheelFR)").unwrap();
-        assert_eq!(
-            compiled.dependencies(),
-            vec!["WheelFL".to_string(), "WheelFR".to_string()]
-        );
-        let mut vars = HashMap::from([
-            ("WheelFL".to_string(), 100.0),
-            ("WheelFR".to_string(), 98.5),
-        ]);
+        assert_eq!(compiled.dependencies(), ["WheelFL", "WheelFR"]);
         let mut state = Vec::new();
-        let value = compiled.eval(&vars, &mut state).unwrap().unwrap();
+        let value = compiled.eval(&[100.0, 98.5], &mut state).unwrap();
         assert!((value - 1.5).abs() < 1e-9);
 
         let filtered = compile("lp(EngineRPM, 0.5)").unwrap();
-        vars.insert("EngineRPM".to_string(), 0.0);
         let mut state = Vec::new();
-        assert!((filtered.eval(&vars, &mut state).unwrap().unwrap() - 0.0).abs() < 1e-9);
-        vars.insert("EngineRPM".to_string(), 100.0);
-        let mid = filtered.eval(&vars, &mut state).unwrap().unwrap();
+        assert!((filtered.eval(&[0.0], &mut state).unwrap() - 0.0).abs() < 1e-9);
+        let mid = filtered.eval(&[100.0], &mut state).unwrap();
         assert!((mid - 50.0).abs() < 1e-6, "{mid}");
     }
 
     #[test]
     fn a_zero_divisor_is_a_gap_and_keeps_the_filter_clean() {
         let ratio = compile("lp(Torque / Speed, 0.5)").unwrap();
+        assert_eq!(ratio.dependencies(), ["Torque", "Speed"]);
         let mut state = Vec::new();
-        let mut vars = HashMap::from([("Torque".to_string(), 10.0), ("Speed".to_string(), 5.0)]);
-        assert_eq!(ratio.eval(&vars, &mut state).unwrap(), Some(2.0));
-        vars.insert("Speed".to_string(), 0.0);
-        assert_eq!(ratio.eval(&vars, &mut state).unwrap(), None);
-        vars.insert("Speed".to_string(), 2.5);
+        assert_eq!(ratio.eval(&[10.0, 5.0], &mut state), Some(2.0));
+        assert_eq!(ratio.eval(&[10.0, 0.0], &mut state), None);
         // 2 + 0.5 * (4 - 2): the gap did not reach the filter.
-        assert_eq!(ratio.eval(&vars, &mut state).unwrap(), Some(3.0));
+        assert_eq!(ratio.eval(&[10.0, 2.5], &mut state), Some(3.0));
+    }
+
+    #[test]
+    fn a_repeated_name_is_one_variable() {
+        let squared = compile("A * A + B").unwrap();
+        assert_eq!(squared.dependencies(), ["A", "B"]);
+        assert_eq!(squared.eval(&[3.0, 1.0], &mut Vec::new()), Some(10.0));
+    }
+
+    #[test]
+    fn series_evaluate_once_every_input_has_a_value() {
+        let diff = compile("A - B").unwrap();
+        let a = [(0, 1.0), (10, 5.0), (30, 2.0)];
+        let b = [(5, 1.0), (20, 4.0)];
+        assert_eq!(
+            diff.eval_series(&[&a[..], &b[..]]),
+            [(5, 0.0), (10, 4.0), (20, 1.0), (30, -2.0)]
+        );
     }
 
     #[test]
