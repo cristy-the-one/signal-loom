@@ -8,6 +8,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -73,9 +74,36 @@ fn assert_unchanged(dir: &Path, before: &[Vec<u8>]) {
     }
 }
 
-fn run_generator(script: &Path) {
+/// A directory this test owns. The generator writes here and nowhere under
+/// `fixtures/judge`.
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("loom-judge-fixture-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap_or_else(|err| panic!("temp dir: {err}"));
+        Self { path }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn run_generator(script: &Path, out: &Path) {
     let output = Command::new("python3")
         .arg(script)
+        .arg("--out")
+        .arg(out)
         .output()
         .unwrap_or_else(|err| panic!("could not run {}: {err}", script.display()));
     assert!(
@@ -85,6 +113,35 @@ fn run_generator(script: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn generated_matches_committed(generated: &Path, committed: &Path) {
+    let mut names: Vec<String> = std::fs::read_dir(generated)
+        .unwrap_or_else(|err| panic!("read {}: {err}", generated.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|err| panic!("read {}: {err}", generated.display()))
+                .file_name()
+                .into_string()
+                .unwrap_or_else(|name| panic!("file name {name:?} is not utf-8"))
+        })
+        .collect();
+    names.sort();
+    let expected: Vec<String> = NAMES.iter().map(|name| (*name).to_string()).collect();
+    assert_eq!(
+        names, expected,
+        "the generator wrote a different set of files than the committed fixture"
+    );
+    for name in &names {
+        let left = read(&generated.join(name));
+        let right = read(&committed.join(name));
+        assert!(
+            left == right,
+            "{name} from the generator differs from the committed fixture ({} bytes, committed {})",
+            left.len(),
+            right.len()
+        );
+    }
 }
 
 /// Pedal holds the value set at the last §4.4 edge at or before `t_us`.
@@ -199,9 +256,19 @@ fn judge_contract_fixture_matches_its_generator_and_sums() {
     }
 
     let before = snapshot(&dir);
-    run_generator(&script);
-    assert_unchanged(&dir, &before);
-    run_generator(&script);
+    // The hand-written verdict is not produced by the generator. Copy it into
+    // the temp directory so SHA256SUMS can cover it. Nothing is written back
+    // to fixtures/judge.
+    let temp = TempDir::new();
+    std::fs::copy(
+        dir.join("expected-verdict.json"),
+        temp.path.join("expected-verdict.json"),
+    )
+    .unwrap_or_else(|err| panic!("copy expected-verdict.json: {err}"));
+    run_generator(&script, &temp.path);
+    generated_matches_committed(&temp.path, &dir);
+    run_generator(&script, &temp.path);
+    generated_matches_committed(&temp.path, &dir);
     assert_unchanged(&dir, &before);
 
     let sums = Command::new("sha256sum")
