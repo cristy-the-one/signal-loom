@@ -2,6 +2,7 @@ mod decode;
 mod formats;
 mod fuzz;
 mod index;
+mod judge;
 mod lap;
 mod lookup;
 mod maps;
