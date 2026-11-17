@@ -81,7 +81,7 @@ python3 scripts/gen_fixture.py
 - A math channel cannot use another math channel. The app refuses it and asks you to write the expression in full.
 - SocketCAN never sends a frame. There is no transmit path.
 - The browser preview upload is capped at 32MB. Multi-gigabyte logs are opened by path.
-- The checksum watch is an XOR of the other payload bytes, matched by signal name. It is not an AUTOSAR CRC.
+- The checksum watch picks signals by name: only an 8-bit, byte-aligned signal whose name contains `Checksum` is checked, and only one containing `Counter` is treated as a counter. A signal named `CRC` or `Alive` is not watched.
 - BLF objects other than classic CAN, CAN FD, error frames, and zlib containers are skipped.
 - The 10-minute lap is read from disk. A packaged build without the fixture falls back to the short cluster sample.
 
