@@ -3,6 +3,7 @@ mod formats;
 mod fuzz;
 mod index;
 mod lap;
+mod lookup;
 mod maps;
 mod math;
 mod projects;
