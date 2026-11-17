@@ -1,8 +1,8 @@
 //! SL-14: the `loom-verdict/1` writer.
 //!
 //! The committed `fixtures/judge/expected-verdict.json` is the byte contract.
-//! A mismatch prints the differing lines. The other tests cover the two rules
-//! that file cannot show: the 50-occurrence cap, and counts that stay complete.
+//! A mismatch prints the differing lines. The other tests cover the 50-occurrence
+//! cap, counts that stay complete, and the JSON spelling of names and odd values.
 
 use std::path::PathBuf;
 
@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 
 use crate::index::IndexedLog;
 use crate::judge::{
-    self, CaseOutcome, CheckOutcome, Evaluation, Evidence, Occurrence, Verdict, VerdictDbc,
-    VerdictLog,
+    self, CaseOutcome, CheckOutcome, Evaluation, EventKind, Evidence, Occurrence, Reason, Verdict,
+    VerdictDbc, VerdictLog,
 };
 use crate::map::TimeoutFactor;
 
@@ -278,4 +278,106 @@ fn counts_sum_to_cases() {
     assert_eq!(counts["inconclusive"], 1);
     assert_eq!(counts["not_exercised"], 2);
     assert_eq!(counts["not_judgeable"], 1);
+}
+
+#[test]
+fn every_name_and_odd_value_round_trips_as_json() {
+    let samples = [12.5, -0.25, 0.1, 1e-7, 3.0];
+    let mut occurrences = Vec::new();
+    let mut anchor = 0u64;
+    for value in samples {
+        occurrences.push(Occurrence {
+            anchor_us: anchor,
+            verdict: Verdict::Pass,
+            evidence: Evidence::Sample {
+                t_us: anchor,
+                value,
+            },
+        });
+        anchor += 1;
+    }
+    for reason in [
+        Reason::GivenUnknown,
+        Reason::WindowPastEnd,
+        Reason::NoValue,
+        Reason::Integrity,
+        Reason::IntegrityUnknown,
+    ] {
+        occurrences.push(Occurrence {
+            anchor_us: anchor,
+            verdict: Verdict::Inconclusive,
+            evidence: Evidence::Reason {
+                reason,
+                event: None,
+            },
+        });
+        anchor += 1;
+    }
+    for kind in [EventKind::Timeout, EventKind::Checksum, EventKind::Counter] {
+        occurrences.push(Occurrence {
+            anchor_us: anchor,
+            verdict: Verdict::Inconclusive,
+            evidence: Evidence::Reason {
+                reason: Reason::Integrity,
+                event: Some((anchor, kind)),
+            },
+        });
+        anchor += 1;
+    }
+    let mut evaluation = one_check(CheckOutcome {
+        id: "c\"1".to_string(),
+        verdict: Verdict::Inconclusive,
+        anchors: occurrences.len() as u64,
+        skipped: 0,
+        pass: samples.len() as u64,
+        fail: 0,
+        inconclusive: (occurrences.len() - samples.len()) as u64,
+        occurrences,
+    });
+    evaluation.cases[0].case_id = "TC-\"q\"\\x".to_string();
+
+    let text = judge::render_verdict(&evaluation, "request", &bare_log(), &[]);
+    let value: Value = serde_json::from_str(&text).expect("verdict json");
+    assert_eq!(value["cases"][0]["case_id"], "TC-\"q\"\\x");
+    assert_eq!(value["cases"][0]["checks"][0]["id"], "c\"1");
+
+    let listed = value["cases"][0]["checks"][0]["occurrences"]
+        .as_array()
+        .expect("occurrences");
+    let values: Vec<f64> = listed
+        .iter()
+        .filter_map(|item| item["value"].as_f64())
+        .collect();
+    assert_eq!(values, vec![12.5, -0.25, 0.1, 1e-7, 3.0]);
+    assert!(
+        text.contains("\"value\": 3}") || text.contains("\"value\": 3,"),
+        "3.0 is written as 3 in the raw text\n{text}"
+    );
+    assert!(
+        !text.contains("\"value\": 3.0"),
+        "3.0 must not be written with a fraction\n{text}"
+    );
+
+    let reasons: Vec<&str> = listed
+        .iter()
+        .filter_map(|item| item["reason"].as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "given_unknown",
+            "window_past_end",
+            "no_value",
+            "integrity",
+            "integrity_unknown",
+            "integrity",
+            "integrity",
+            "integrity",
+        ]
+    );
+    let kinds: Vec<&str> = listed
+        .iter()
+        .filter_map(|item| item.get("event").and_then(|event| event["kind"].as_str()))
+        .collect();
+    assert_eq!(kinds, ["timeout", "checksum", "counter"]);
 }
