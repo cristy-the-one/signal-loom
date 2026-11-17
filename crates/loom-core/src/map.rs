@@ -59,7 +59,12 @@ pub struct MapMessage {
 
 #[derive(Debug, Clone)]
 pub struct MappedSignal {
+    /// Display name. Unique in the map. A repeated name is shown as `Name@<id>`,
+    /// as `Name@<channel>` when appended on a channel, or as `Name@<tag>_<id>`
+    /// when that tag is already used.
     pub name: String,
+    /// Name in the DBC (`SG_`) or map, before that renaming.
+    pub defined_name: String,
     pub unit: String,
     pub message_name: String,
     pub message_id: u32,
@@ -121,7 +126,8 @@ impl SignalMap {
                     Error::invalid(format!("signal {signal_name}: {message}"))
                 })?;
                 signals.push(MappedSignal {
-                    name: signal_name,
+                    name: signal_name.clone(),
+                    defined_name: signal_name,
                     unit: signal.unit.clone(),
                     message_name: message_name.clone(),
                     message_id,
@@ -195,6 +201,24 @@ impl SignalMap {
         }
         if !other.name.is_empty() && self.name != other.name && !self.name.contains(&other.name) {
             self.name = format!("{} + {}", self.name, other.name);
+        }
+    }
+
+    /// Resolve `(message, signal)` using the names in the DBC: the `BO_` name
+    /// and the `SG_` name. A signal shown as `Name@<id>` is still found by
+    /// `Name`. An unknown pair is an error naming that pair.
+    pub fn lookup(&self, message: &str, signal: &str) -> Result<&MappedSignal> {
+        let mut matches = self.signals.iter().filter(|candidate| {
+            candidate.message_name == message && candidate.defined_name == signal
+        });
+        match (matches.next(), matches.next()) {
+            (Some(found), None) => Ok(found),
+            (None, _) => Err(Error::not_found(format!(
+                "unknown signal pair ({message}, {signal})"
+            ))),
+            (Some(_), Some(_)) => Err(Error::invalid(format!(
+                "signal pair ({message}, {signal}) is not unique"
+            ))),
         }
     }
 }

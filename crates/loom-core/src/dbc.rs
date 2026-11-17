@@ -97,13 +97,15 @@ pub fn parse(text: &str) -> Result<SignalMap> {
             }
             // `Counter` or `CRC` in several messages is normal. Later ones
             // take the same `Name@<id>` form a second DBC uses.
-            let name = unique_name(&seen, &signal.name, 0, message.id);
-            if name != signal.name {
+            let defined_name = signal.name.clone();
+            let name = unique_name(&seen, &defined_name, 0, message.id);
+            if name != defined_name {
                 renamed.push(name.clone());
             }
             seen.insert(name.clone());
             signals.push(MappedSignal {
                 name,
+                defined_name,
                 unit: signal.unit.clone(),
                 message_name: message.name.clone(),
                 message_id: message.id,
