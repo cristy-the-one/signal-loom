@@ -10,6 +10,11 @@ mod bus_load;
 mod checkpoint;
 mod checksum;
 mod control;
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the loom-judge command (SL-15) is the caller")
+)]
+pub(crate) mod evaluate;
 mod export;
 pub(crate) mod integrity;
 mod navigate;

@@ -279,6 +279,21 @@ fn a_channel_uses_a_signal_loaded_on_channel_zero() {
 }
 
 #[test]
+fn a_channel_must_be_a_can_channel_number() {
+    let json = one(
+        &cond_on("BrakeCmd", "BrakePedal", 256, "==", "1"),
+        &cond_on("Lamps", "BrakeLamp", -1, "==", "1"),
+    );
+    assert_eq!(
+        problems(&json, &cluster()),
+        vec![
+            "channel 256 is not between 0 and 255".to_string(),
+            "channel -1 is not between 0 and 255".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn a_kind_must_be_in_the_list() {
     let json = request(&case("TC-1", "")).replace(r#""kind":"positive""#, r#""kind":"bogus""#);
     assert_eq!(

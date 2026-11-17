@@ -10,6 +10,17 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorKind;
+#[cfg_attr(
+    not(test),
+    allow(
+        unused_imports,
+        reason = "the loom-judge command (SL-15) is the caller"
+    )
+)]
+pub(crate) use crate::index::evaluate::evaluate;
+pub use crate::index::evaluate::{
+    CaseOutcome, CheckOutcome, Evaluation, EventKind, Evidence, Occurrence, Reason, Verdict,
+};
 use crate::map::{MappedSignal, SignalMap};
 
 const FORMAT: &str = "loom-judge/1";
@@ -414,7 +425,11 @@ fn read_channel(
     match map.get("channel") {
         None | Some(serde_json::Value::Null) => Some(None),
         Some(value) => match as_int(value) {
-            Some(channel) => Some(Some(channel)),
+            Some(channel) if (0..=255).contains(&channel) => Some(Some(channel)),
+            Some(channel) => {
+                problems.push(format!("channel {channel} is not between 0 and 255"));
+                None
+            }
             None => {
                 problems.push("channel must be an integer".to_string());
                 None
