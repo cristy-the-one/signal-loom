@@ -67,6 +67,7 @@ impl Integrity {
 pub(super) struct IntegrityFrame<'a> {
     pub(super) t_us: u64,
     pub(super) id: u32,
+    pub(super) channel: u8,
     pub(super) dlc: u8,
     pub(super) data: &'a [u8],
     /// Signals decoded from this frame.
@@ -79,7 +80,9 @@ pub(super) struct IntegrityWatch {
     cycles: HashMap<u32, u64>,
     timeout_factor: f64,
     checksums: HashMap<usize, ChecksumAlgo>,
-    last_seen: HashMap<u32, u64>,
+    /// Previous frame time of one message on one channel. The cycle time stays
+    /// keyed by id: two channels of the same message share it.
+    last_seen: HashMap<(u8, u32), u64>,
     last_counter: HashMap<usize, u64>,
 }
 
@@ -108,7 +111,8 @@ impl IntegrityWatch {
 
     pub(super) fn note(&mut self, built: &mut Built, frame: IntegrityFrame<'_>) {
         if let Some(cycle) = self.cycles.get(&frame.id).copied() {
-            if let Some(prev) = self.last_seen.get(&frame.id).copied() {
+            let key = (frame.channel, frame.id);
+            if let Some(prev) = self.last_seen.get(&key).copied() {
                 let gap = frame.t_us.saturating_sub(prev);
                 if cycle > 0 && gap as f64 > cycle as f64 * self.timeout_factor {
                     let name = built
@@ -119,7 +123,7 @@ impl IntegrityWatch {
                     note_event(built, frame.t_us, &format!("Timeout {name}"));
                 }
             }
-            self.last_seen.insert(frame.id, frame.t_us);
+            self.last_seen.insert(key, frame.t_us);
         }
         let Some(indices) = built.msg_index.get(&frame.id) else {
             return;
@@ -130,6 +134,13 @@ impl IntegrityWatch {
         let mut raised: Vec<IntegrityEvent> = Vec::new();
         for &idx in indices {
             let signal = &built.signals[idx];
+            // Same channel rule as `decode_frame`: a channel-0 signal or frame
+            // meets every channel, and otherwise the channels must match.
+            let on_channel =
+                signal.channel == 0 || frame.channel == 0 || signal.channel == frame.channel;
+            if !on_channel {
+                continue;
+            }
             let Integrity::Checksum { byte } = signal.integrity else {
                 continue;
             };
