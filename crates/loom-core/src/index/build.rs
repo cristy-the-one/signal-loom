@@ -255,6 +255,7 @@ fn scan_framed(
                     IntegrityFrame {
                         t_us: rec.t_us,
                         id: *id,
+                        channel: *channel,
                         dlc: *dlc,
                         data,
                         decoded: &pending,
