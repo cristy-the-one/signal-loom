@@ -156,6 +156,8 @@ fixtures             sample log, map, project, CSV snippet
 
 ## Checks
 
+`npm test` runs the frontend tests.
+
 ```bash
 python3 scripts/gen_fixture.py
 npm run typecheck
