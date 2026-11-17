@@ -30,8 +30,12 @@ jobs:
       - run: cargo fmt --check
       - name: Generate the synthetic hypercar lap
         run: python3 scripts/gen_fixture.py
-      - run: cargo test -p loom-core -p loom-serve
-      - run: cargo clippy -p loom-core -p loom-serve --all-targets -- -D warnings
+      - run: cargo test -p loom-core -p loom-serve -p loom-judge
+      - run: cargo clippy -p loom-core -p loom-serve -p loom-judge --all-targets -- -D warnings
+      - name: Judge the contract fixture
+        run: |
+          cargo run -p loom-judge --release -- --log fixtures/judge/brake.asc --dbc fixtures/judge/brake.dbc --request fixtures/judge/request.json --out "$RUNNER_TEMP/verdict.json"
+          cmp "$RUNNER_TEMP/verdict.json" fixtures/judge/expected-verdict.json
 
   tauri-smoke:
     name: tauri-smoke

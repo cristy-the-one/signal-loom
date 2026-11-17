@@ -6,12 +6,19 @@ The recording is Vector ASC because loom-core already reads that format
 Times are absolute seconds with six decimals.
 
 `expected-verdict.json` is hand-written from §4.4 and §5. This script does
-not compute a verdict, and it does not write that file.
+not compute a verdict, and it does not write that file. It must already be
+in the output directory so SHA256SUMS can cover it.
+
+Usage: gen_judge_fixture.py [--out DIR]
+
+With no argument the files are written to fixtures/judge, which is how a
+person regenerates the fixture. `--out DIR` receives the same files.
 """
 
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,30 +200,44 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
-def write_sums() -> None:
+def write_sums(out: Path) -> None:
     lines = []
     for name in SUMMED:
-        path = OUT / name
+        path = out / name
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         lines.append(f"{digest}  {name}")
-    write_text(OUT / "SHA256SUMS", "\n".join(lines) + "\n")
+    write_text(out / "SHA256SUMS", "\n".join(lines) + "\n")
+
+
+def output_dir() -> Path:
+    args = sys.argv[1:]
+    if not args:
+        return OUT
+    if len(args) == 2 and args[0] == "--out" and args[1]:
+        return Path(args[1])
+    raise SystemExit("usage: gen_judge_fixture.py [--out DIR]")
 
 
 def main() -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
+    out = output_dir()
+    out.mkdir(parents=True, exist_ok=True)
     text, frames, brake, lamps = recording()
-    write_text(OUT / "brake.asc", text)
-    write_text(OUT / "brake.dbc", DBC)
-    write_text(OUT / "request.json", REQUEST)
+    write_text(out / "brake.asc", text)
+    write_text(out / "brake.dbc", DBC)
+    write_text(out / "request.json", REQUEST)
     print(f"brake.asc frames={frames} brake={brake} lamps={lamps}")
-    expected = OUT / "expected-verdict.json"
+    expected = out / "expected-verdict.json"
     if not expected.is_file():
         raise SystemExit(
             "expected-verdict.json is hand-written from plan §4.4 and §5; "
             "this script does not compute a verdict"
         )
-    write_sums()
-    print(f"wrote {OUT.relative_to(ROOT)}")
+    write_sums(out)
+    try:
+        shown = out.resolve().relative_to(ROOT)
+    except ValueError:
+        shown = out
+    print(f"wrote {shown}")
 
 
 if __name__ == "__main__":
