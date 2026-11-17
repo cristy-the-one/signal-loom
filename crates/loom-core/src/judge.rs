@@ -6,30 +6,18 @@
 //! that channel; without it, more than one loaded signal is ambiguous.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::ErrorKind;
-#[cfg_attr(
-    not(test),
-    allow(
-        unused_imports,
-        reason = "the loom-judge command (SL-15) is the caller"
-    )
-)]
+use crate::error::{ErrorKind, Result};
 pub(crate) use crate::index::evaluate::evaluate;
 pub use crate::index::evaluate::{
     CaseOutcome, CheckOutcome, Evaluation, EventKind, Evidence, Occurrence, Reason, Verdict,
 };
-use crate::map::{MappedSignal, SignalMap};
-#[cfg_attr(
-    not(test),
-    allow(
-        unused_imports,
-        reason = "the loom-judge command (SL-15) is the caller"
-    )
-)]
-pub(crate) use crate::verdict::{render_verdict, VerdictDbc, VerdictLog};
+use crate::index::IndexedLog;
+use crate::map::{MappedSignal, SignalMap, TimeoutFactor};
+pub use crate::verdict::{render_verdict, VerdictDbc, VerdictLog};
 
 const FORMAT: &str = "loom-judge/1";
 const MAX_WITHIN_MS: i64 = 3_600_000;
@@ -168,6 +156,48 @@ pub fn check(text: &str, dbc: &SignalMap) -> std::result::Result<Request, Refusa
             problems: vec![format!("request does not match {FORMAT}: {err}")],
         }),
     }
+}
+
+/// Parse one Vector DBC. The loom-judge command hashes the file bytes, then
+/// passes the text here.
+pub fn parse_dbc(text: &str) -> Result<SignalMap> {
+    crate::dbc::parse(text)
+}
+
+/// Recording statistics the verdict's `log` object records.
+pub struct LogStats {
+    pub t_start_us: u64,
+    pub t_end_us: u64,
+    pub frames: u64,
+    pub skipped: u64,
+    pub events_truncated: bool,
+}
+
+/// [`evaluate`] on one recording, plus the statistics the verdict file records.
+pub struct Judgement {
+    pub evaluation: Evaluation,
+    pub log: LogStats,
+}
+
+/// Index `path` with `map` and judge `request`.
+///
+/// `request` must already have been accepted by [`check`] against `map`. The
+/// recording is opened here, not while the request is being checked. The
+/// timeout factor is the default, 2.5 cycle times.
+pub fn evaluate_log(path: &Path, map: &SignalMap, request: &Request) -> Result<Judgement> {
+    let timeout = TimeoutFactor::default();
+    let log = IndexedLog::open_path_timed(path, Some(map), timeout, None)?;
+    let evaluation = evaluate(&log, map, timeout, request)?;
+    Ok(Judgement {
+        evaluation,
+        log: LogStats {
+            t_start_us: log.t_start_us(),
+            t_end_us: log.t_end_us(),
+            frames: log.frame_count(),
+            skipped: log.skipped(),
+            events_truncated: log.events_truncated(),
+        },
+    })
 }
 
 fn walk_request(

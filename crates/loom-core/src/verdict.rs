@@ -14,7 +14,7 @@ const TOOL: &str = "loom-judge 0.1.0";
 const OCCURRENCE_CAP: usize = 50;
 
 /// The recording, as §5 records it. `file` is a base name.
-pub(crate) struct VerdictLog {
+pub struct VerdictLog {
     pub file: String,
     pub sha256: String,
     pub t_start_us: u64,
@@ -25,7 +25,7 @@ pub(crate) struct VerdictLog {
 }
 
 /// One DBC named in the verdict. `file` is a base name.
-pub(crate) struct VerdictDbc {
+pub struct VerdictDbc {
     pub file: String,
     pub sha256: String,
     pub channel: u8,
@@ -44,7 +44,7 @@ pub(crate) struct VerdictDbc {
 /// lists are `[]`. That is the layout of the hand-written contract fixture.
 /// One width limit cannot produce it: the 61-character TC-4 case is expanded,
 /// while a 78-character occurrence line is not.
-pub(crate) fn render_verdict(
+pub fn render_verdict(
     evaluation: &Evaluation,
     request_sha256: &str,
     log: &VerdictLog,

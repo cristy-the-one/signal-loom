@@ -1757,6 +1757,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom-judge"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "loom-serve"
 version = "0.1.0"
 dependencies = [
