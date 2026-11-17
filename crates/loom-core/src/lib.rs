@@ -17,6 +17,11 @@ mod project;
 mod scan;
 mod session;
 mod socketcan;
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the loom-judge command (SL-15) is the caller")
+)]
+mod verdict;
 
 #[cfg(test)]
 mod tests;

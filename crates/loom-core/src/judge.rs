@@ -1,5 +1,5 @@
-//! A `loom-judge/1` request, and the refusal check that lists every problem
-//! before a recording is read.
+//! A `loom-judge/1` request, the refusal check that lists every problem
+//! before a recording is read, and the `loom-verdict/1` writer.
 //!
 //! Signal pairs are the DBC `BO_` name and `SG_` name. [`SignalMap::lookup`]
 //! resolves that pair. An optional `channel` filters to the copy loaded on
@@ -22,6 +22,14 @@ pub use crate::index::evaluate::{
     CaseOutcome, CheckOutcome, Evaluation, EventKind, Evidence, Occurrence, Reason, Verdict,
 };
 use crate::map::{MappedSignal, SignalMap};
+#[cfg_attr(
+    not(test),
+    allow(
+        unused_imports,
+        reason = "the loom-judge command (SL-15) is the caller"
+    )
+)]
+pub(crate) use crate::verdict::{render_verdict, VerdictDbc, VerdictLog};
 
 const FORMAT: &str = "loom-judge/1";
 const MAX_WITHIN_MS: i64 = 3_600_000;
