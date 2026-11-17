@@ -60,6 +60,56 @@ REQUEST = """\
           "within_ms": [0, 100]
         }
       ]
+    },
+    {
+      "case_id": "TC-2",
+      "verifies": ["REQ-BRK-001"],
+      "kind": "negative",
+      "checks": [
+        {
+          "id": "c1",
+          "when": {
+            "signal": {"message": "BrakeCmd", "signal": "BrakePedal"},
+            "op": "==",
+            "value": 1
+          },
+          "expect": {
+            "signal": {"message": "Lamps", "signal": "BrakeLamp"},
+            "op": "==",
+            "value": 1
+          },
+          "mode": "never",
+          "within_ms": [0, 100]
+        }
+      ]
+    },
+    {
+      "case_id": "TC-3",
+      "verifies": ["REQ-BRK-001"],
+      "kind": "positive",
+      "checks": [
+        {
+          "id": "c1",
+          "when": {
+            "signal": {"message": "BrakeCmd", "signal": "BrakePedal"},
+            "op": "==",
+            "value": 7
+          },
+          "expect": {
+            "signal": {"message": "Lamps", "signal": "BrakeLamp"},
+            "op": "==",
+            "value": 1
+          },
+          "mode": "eventually",
+          "within_ms": [0, 100]
+        }
+      ]
+    },
+    {
+      "case_id": "TC-4",
+      "verifies": ["REQ-BRK-001"],
+      "kind": "positive",
+      "checks": []
     }
   ]
 }
