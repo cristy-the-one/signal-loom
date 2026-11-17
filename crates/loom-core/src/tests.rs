@@ -6,6 +6,7 @@ mod judge;
 mod judge_eval;
 mod judge_expected;
 mod judge_fixture;
+mod judge_verdict;
 mod lap;
 mod lookup;
 mod maps;
