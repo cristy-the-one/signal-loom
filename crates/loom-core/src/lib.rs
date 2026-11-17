@@ -11,6 +11,7 @@ mod dto;
 mod error;
 mod index;
 mod jobs;
+pub mod judge;
 mod map;
 mod project;
 mod scan;
