@@ -59,7 +59,9 @@ pub struct MapMessage {
 
 #[derive(Debug, Clone)]
 pub struct MappedSignal {
-    /// Display name. Unique in the map; a repeated name is shown as `Name@<id>`.
+    /// Display name. Unique in the map. A repeated name is shown as `Name@<id>`,
+    /// as `Name@<channel>` when appended on a channel, or as `Name@<tag>_<id>`
+    /// when that tag is already used.
     pub name: String,
     /// Name in the DBC (`SG_`) or map, before that renaming.
     pub defined_name: String,

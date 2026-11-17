@@ -27,7 +27,7 @@ fn the_same_signal_name_in_two_messages_resolves_by_the_dbc_name() {
 BO_ 1 Brake: 8 ESC
  SG_ Pressure : 0|8@1+ (1,0) [0|255] "bar" IC
  SG_ Checksum : 56|8@1+ (1,0) [0|255] "" IC
-BO_ 2 Steer: 8 SWM
+BO_ 416 Steer: 8 SWM
  SG_ Angle : 0|8@1+ (1,0) [0|255] "deg" IC
  SG_ Checksum : 56|8@1+ (1,0) [0|255] "" IC
 "#,
@@ -40,17 +40,18 @@ BO_ 2 Steer: 8 SWM
 
     let steer = map.lookup("Steer", "Checksum").unwrap();
     assert_eq!(steer.message_name, "Steer");
-    assert_eq!(steer.message_id, 2);
-    // The second copy is shown as `Checksum@2`. The key is still `Checksum`.
-    assert_eq!(steer.name, "Checksum@2");
+    assert_eq!(steer.message_id, 416);
+    // The second copy is shown as `Checksum@1A0`. The key is still `Checksum`.
+    assert_eq!(steer.name, "Checksum@1A0");
     assert_eq!(map.lookup("Brake", "Pressure").unwrap().message_id, 1);
     assert_eq!(map.lookup("Steer", "Angle").unwrap().name, "Angle");
 
     // The display form is not a DBC name, so it is not a key.
-    let err = map.lookup("Steer", "Checksum@2").unwrap_err();
+    let err = map.lookup("Steer", "Checksum@1A0").unwrap_err();
     let text = err.to_string();
     assert!(text.contains("Steer"), "{text}");
-    assert!(text.contains("Checksum@2"), "{text}");
+    assert!(text.contains("Checksum@1A0"), "{text}");
+    assert_eq!(err.kind(), ErrorKind::NotFound);
 }
 
 #[test]
