@@ -11,7 +11,7 @@ mod checkpoint;
 mod checksum;
 mod control;
 mod export;
-mod integrity;
+pub(crate) mod integrity;
 mod navigate;
 mod query;
 mod replay;
@@ -27,6 +27,7 @@ use crate::error::Result;
 use crate::map::{SignalMap, TimeoutFactor};
 use crate::scan::{sniff, LogFormat};
 use checkpoint::Checkpoint;
+use integrity::IntegrityEvent;
 use signal::SignalMeta;
 use source::{sniff_path, Source};
 use std::collections::{HashMap, HashSet};
@@ -57,6 +58,17 @@ pub struct IndexedLog {
     t_end_us: u64,
     byte_len: u64,
     events: Vec<(u64, String)>,
+    /// Checksum and counter events, beside the labels in `events`. A timeout
+    /// is not recorded here. Crate-visible only; the labelled list is unchanged.
+    /// Read by `integrity_events`, which the judge calls. Nothing else does yet.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the judge reads this; no other loom-core caller yet"
+        )
+    )]
+    integrity_events: Vec<IntegrityEvent>,
     skipped: u64,
     warnings: Vec<String>,
     signals: Vec<SignalMeta>,

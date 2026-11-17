@@ -1,8 +1,31 @@
 use super::build::{note_event, Built};
 use super::checksum::{covered_bytes, ChecksumAlgo};
+use super::signal::SignalMeta;
 use crate::decode::{DecodeSpec, Endian};
 use crate::map::{SignalMap, TimeoutFactor};
 use std::collections::HashMap;
+
+/// Checksum or counter. A timeout is not one of these: the judge recomputes
+/// silence from the frames, so a timeout stays a label and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntegrityKind {
+    Checksum,
+    Counter,
+}
+
+/// A checksum or counter event, kept beside its label. A later judge asks, for
+/// one signal (its message id and its name), which of these happened and when.
+/// This is not part of the labelled event list the UI reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IntegrityEvent {
+    pub(crate) t_us: u64,
+    pub(crate) kind: IntegrityKind,
+    pub(crate) message_id: u32,
+    /// The signal's name on this index, the same name the label carries.
+    /// A repeated DBC name is stored as `Name@<id>`, which is how the index
+    /// knows the signal.
+    pub(crate) signal: String,
+}
 
 /// What a signal does for frame integrity, decided once from its name and layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +127,7 @@ impl IntegrityWatch {
         // Checksums first, as an ECU checks them: a frame that fails its checksum
         // is rejected, so its counter neither raises an event nor moves the reference.
         let width = (frame.dlc as usize).min(frame.data.len());
-        let mut labels: Vec<String> = Vec::new();
+        let mut raised: Vec<IntegrityEvent> = Vec::new();
         for &idx in indices {
             let signal = &built.signals[idx];
             let Integrity::Checksum { byte } = signal.integrity else {
@@ -115,11 +138,11 @@ impl IntegrityWatch {
             }
             if let Some(algo) = self.checksums.get(&idx) {
                 if algo.compute_iter(covered_bytes(frame.data, width, byte)) != frame.data[byte] {
-                    labels.push(format!("Checksum {}", signal.name));
+                    raised.push(integrity_event(&frame, IntegrityKind::Checksum, signal));
                 }
             }
         }
-        if labels.is_empty() {
+        if raised.is_empty() {
             for &(idx, _) in frame.decoded {
                 let signal = &built.signals[idx];
                 let (Integrity::Counter { bits }, Some(spec)) = (signal.integrity, signal.spec)
@@ -134,21 +157,82 @@ impl IntegrityWatch {
                 let raw = spec.raw(frame.data);
                 if let Some(prev) = self.last_counter.get(&idx).copied() {
                     if raw != prev.wrapping_add(1) & mask {
-                        labels.push(format!("Counter {}", signal.name));
+                        raised.push(integrity_event(&frame, IntegrityKind::Counter, signal));
                     }
                 }
                 self.last_counter.insert(idx, raw);
             }
         }
-        for label in labels {
-            note_event(built, frame.t_us, &label);
+        for event in raised {
+            let label = match event.kind {
+                IntegrityKind::Checksum => format!("Checksum {}", event.signal),
+                IntegrityKind::Counter => format!("Counter {}", event.signal),
+            };
+            note_integrity(built, &label, event);
         }
+    }
+}
+
+fn integrity_event(
+    frame: &IntegrityFrame<'_>,
+    kind: IntegrityKind,
+    signal: &SignalMeta,
+) -> IntegrityEvent {
+    IntegrityEvent {
+        t_us: frame.t_us,
+        kind,
+        message_id: signal.message_id.unwrap_or(frame.id),
+        signal: signal.name.clone(),
+    }
+}
+
+/// Store the label every event has, and, beside it, the kind a judge looks up.
+/// Past the label cap there is no event to put this beside, so it is not stored.
+fn note_integrity(built: &mut Built, label: &str, event: IntegrityEvent) {
+    let before = built.events.len();
+    note_event(built, event.t_us, label);
+    if built.events.len() > before {
+        built.integrity_events.push(event);
+    }
+}
+
+impl super::IndexedLog {
+    /// Checksum and counter events, in the order they were recorded.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the judge reads this; no other loom-core caller yet"
+        )
+    )]
+    pub(crate) fn integrity_events(&self) -> &[IntegrityEvent] {
+        &self.integrity_events
+    }
+
+    /// Checksum and counter events for the signal `signal` on `message_id`,
+    /// in the order they were recorded.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the judge reads this; no other loom-core caller yet"
+        )
+    )]
+    pub(crate) fn integrity_events_for<'a>(
+        &'a self,
+        message_id: u32,
+        signal: &'a str,
+    ) -> impl Iterator<Item = &'a IntegrityEvent> + 'a {
+        self.integrity_events
+            .iter()
+            .filter(move |event| event.message_id == message_id && event.signal == signal)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::IndexedLog;
+    use super::IntegrityKind;
 
     fn bytes_hex(data: &[u8]) -> String {
         data.iter().map(|byte| format!("{byte:02X}")).collect()
@@ -233,5 +317,98 @@ mod tests {
             assert_eq!(events, Vec::<String>::new(), "{dbc}");
             assert_eq!(warnings, Vec::<String>::new(), "{dbc}");
         }
+    }
+
+    /// Each kind carries its message id and signal, and a lookup by that pair
+    /// returns it. The labels stay the text they have always been. A timeout
+    /// on the same log is still only that label.
+    #[test]
+    fn checksum_and_counter_events_record_kind_message_and_signal() {
+        let dbc = r#"
+BO_ 256 Body: 8 ECU
+ SG_ FastCounter : 0|4@1+ (1,0) [0|15] "" ECU
+ SG_ FastChecksum : 56|8@1+ (1,0) [0|255] "" ECU
+BO_ 512 Other: 1 ECU
+ SG_ OtherCounter : 0|8@1+ (1,0) [0|255] "" ECU
+BA_ "GenMsgCycleTime" BO_ 256 10;
+"#;
+        let map = crate::dbc::parse(dbc).unwrap();
+        let body = |counter: u8, corrupt: bool| {
+            let mut data = [0u8; 8];
+            data[0] = counter;
+            data[7] = data[..7].iter().fold(0, |acc, byte| acc ^ byte);
+            if corrupt {
+                data[7] ^= 0xFF;
+            }
+            bytes_hex(&data)
+        };
+        let text = format!(
+            "F 0 100 {}\nF 1000 200 00\nF 11000 200 01\nF 80000 100 {}\nF 81000 200 03\nF 90000 100 {}\n",
+            body(1, false),
+            body(4, false),
+            body(9, true)
+        );
+        let log = IndexedLog::open_bytes(text.into_bytes(), Some(&map)).unwrap();
+
+        let labels: Vec<(u64, &str)> = log
+            .events()
+            .iter()
+            .map(|(t_us, label)| (*t_us, label.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                (80_000, "Timeout Body"),
+                (80_000, "Counter FastCounter"),
+                (81_000, "Counter OtherCounter"),
+                (90_000, "Checksum FastChecksum"),
+            ]
+        );
+
+        let stored = log.integrity_events();
+        assert_eq!(stored.len(), 3, "{stored:?}");
+        assert_eq!(
+            stored
+                .iter()
+                .map(|event| (
+                    event.t_us,
+                    event.kind,
+                    event.message_id,
+                    event.signal.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (80_000, IntegrityKind::Counter, 0x100, "FastCounter"),
+                (81_000, IntegrityKind::Counter, 0x200, "OtherCounter"),
+                (90_000, IntegrityKind::Checksum, 0x100, "FastChecksum"),
+            ]
+        );
+
+        let of = |message_id, signal: &str| {
+            log.integrity_events_for(message_id, signal)
+                .map(|event| (event.t_us, event.kind))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            of(0x100, "FastCounter"),
+            vec![(80_000, IntegrityKind::Counter)]
+        );
+        assert_eq!(
+            of(0x100, "FastChecksum"),
+            vec![(90_000, IntegrityKind::Checksum)]
+        );
+        assert_eq!(
+            of(0x200, "OtherCounter"),
+            vec![(81_000, IntegrityKind::Counter)]
+        );
+        assert_eq!(
+            of(0x100, "OtherCounter"),
+            Vec::<(u64, IntegrityKind)>::new()
+        );
+        assert_eq!(
+            of(0x200, "FastChecksum"),
+            Vec::<(u64, IntegrityKind)>::new()
+        );
+        assert_eq!(of(0x100, "Body"), Vec::<(u64, IntegrityKind)>::new());
     }
 }

@@ -1,7 +1,7 @@
 use super::checkpoint::{pad_snapshots, push_checkpoint, Checkpoint, CHECKPOINT_EVERY};
 use super::checksum::probe_checksums;
 use super::control::{pulse, IndexControl};
-use super::integrity::{Integrity, IntegrityFrame, IntegrityWatch};
+use super::integrity::{Integrity, IntegrityEvent, IntegrityFrame, IntegrityWatch};
 use super::signal::{decode_frame, SignalMeta};
 use super::source::Source;
 use super::time::{accept_time, REORDER_TOLERANCE_US};
@@ -23,6 +23,7 @@ pub(super) struct Built {
     pub(super) t_start_us: u64,
     pub(super) t_end_us: u64,
     pub(super) events: Vec<(u64, String)>,
+    pub(super) integrity_events: Vec<IntegrityEvent>,
     pub(super) skipped: u64,
     /// Records kept at the previous time after a small step back.
     pub(super) reordered: u64,
@@ -50,6 +51,7 @@ impl Built {
             t_start_us: 0,
             t_end_us: 0,
             events: Vec::new(),
+            integrity_events: Vec::new(),
             skipped: 0,
             reordered: 0,
             warnings: Vec::new(),
@@ -130,6 +132,7 @@ impl IndexedLog {
             t_end_us: built.t_end_us,
             byte_len,
             events: built.events,
+            integrity_events: built.integrity_events,
             skipped: built.skipped,
             warnings: built.warnings,
             signals: built.signals,
