@@ -78,10 +78,13 @@ One JSON object. Every key below is required unless marked optional. Unknown key
 
 ### 3.1 A condition
 
-`{"signal": {"message": M, "signal": S}, "op": OP, "value": V, "tolerance": T}`
+`{"signal": {"message": M, "signal": S, "channel": C}, "op": OP, "value": V, "tolerance": T}`
 
 - `message` and `signal` are the **names in the DBC**: the `BO_` name and the `SG_` name. Not a
   CAN id, not an ARXML path, not signal-loom's display name `Name@<id>`.
+- `channel` (optional, integer) picks one channel when the same DBC is loaded on several. Without
+  it, a reference that matches more than one loaded signal is refused as ambiguous, naming the
+  channels it matched. A `channel` that matches nothing is refused like an unknown signal.
 - `op` is one of `==`, `!=`, `>`, `>=`, `<`, `<=`.
 - `value` is a number (the physical value, after factor and offset), or a string. A string must be
   a `VAL_` label of that signal; it stands for the physical value that label has.
@@ -109,7 +112,7 @@ The request is checked completely before any recording is read, and refused — 
 problem listed — if: `format` is not `loom-judge/1`; a key is unknown or missing; two cases share a
 `case_id`, or two checks in a case share an `id`; an `op`, `mode` or `kind` is not in its list;
 `within_ms` breaks its rule; a `tolerance` is negative or on the wrong op; a signal is not in the
-loaded DBC files; a string `value` is not a label of that signal.
+loaded DBC files, or matches more than one loaded signal and names no `channel`; a string `value` is not a label of that signal.
 
 A refusal is exit code 2 and writes no verdict file.
 
