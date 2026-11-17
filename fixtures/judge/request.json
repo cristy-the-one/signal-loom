@@ -1,0 +1,28 @@
+{
+  "format": "loom-judge/1",
+  "spec_id": "default@REQ-BRK-001",
+  "cases": [
+    {
+      "case_id": "TC-1",
+      "verifies": ["REQ-BRK-001"],
+      "kind": "positive",
+      "checks": [
+        {
+          "id": "c1",
+          "when": {
+            "signal": {"message": "BrakeCmd", "signal": "BrakePedal"},
+            "op": "==",
+            "value": 1
+          },
+          "expect": {
+            "signal": {"message": "Lamps", "signal": "BrakeLamp"},
+            "op": "==",
+            "value": 1
+          },
+          "mode": "eventually",
+          "within_ms": [0, 100]
+        }
+      ]
+    }
+  ]
+}

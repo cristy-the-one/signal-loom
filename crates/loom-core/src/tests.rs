@@ -4,6 +4,7 @@ mod fuzz;
 mod index;
 mod judge;
 mod judge_eval;
+mod judge_fixture;
 mod lap;
 mod lookup;
 mod maps;

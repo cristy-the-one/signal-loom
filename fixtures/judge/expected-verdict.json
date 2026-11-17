@@ -1,0 +1,57 @@
+{
+  "format": "loom-verdict/1",
+  "tool": "loom-judge 0.1.0",
+  "request_sha256": "f7f330053586cfe5773335082065f29c554f0042331a9a10893d7ea9c2f29dca",
+  "log": {
+    "file": "brake.asc",
+    "sha256": "5b5f05a6b2b15bb5621c0589f99738c2529d1e0f0721cfad7df0ce7bbed0984b",
+    "t_start_us": 0,
+    "t_end_us": 10000000,
+    "frames": 1980,
+    "skipped": 0,
+    "events_truncated": false
+  },
+  "dbc": [
+    {
+      "file": "brake.dbc",
+      "sha256": "087c0f4fc2ea4d2158cff1be68a7e7684045e12ff2906326f4bacecb035c36d3",
+      "channel": 0
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "TC-1",
+      "verdict": "fail",
+      "checks": [
+        {
+          "id": "c1",
+          "verdict": "fail",
+          "anchors": 4,
+          "skipped": 0,
+          "pass": 1,
+          "fail": 1,
+          "inconclusive": 2,
+          "occurrences": [
+            {"anchor_us": 1000000, "verdict": "pass", "t_us": 1040000, "value": 1},
+            {"anchor_us": 3000000, "verdict": "fail", "t_us": 3100000, "value": 0},
+            {
+              "anchor_us": 5000000,
+              "verdict": "inconclusive",
+              "reason": "integrity",
+              "event": {"t_us": 5005000, "kind": "timeout"}
+            },
+            {"anchor_us": 9990000, "verdict": "inconclusive", "reason": "window_past_end"}
+          ]
+        }
+      ]
+    }
+  ],
+  "counts": {
+    "cases": 1,
+    "pass": 0,
+    "fail": 1,
+    "inconclusive": 0,
+    "not_exercised": 0,
+    "not_judgeable": 0
+  }
+}

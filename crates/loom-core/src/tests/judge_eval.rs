@@ -875,3 +875,37 @@ fn a_sample_on_the_window_start_replaces_the_value_held_from_before() {
         vec![(1000, Verdict::Fail, sample(1050, 0.0))]
     );
 }
+
+#[test]
+fn a_frame_on_channel_0_keeps_a_channel_1_signal_alive() {
+    // Signals loaded on channel 1. Lamps arrives on channel 1 until 980 ms and
+    // on channel 0 throughout; decode_frame applies a channel-0 frame to every
+    // signal, so the lamp never goes silent: a plain fail, not a timeout.
+    let mut map = dbc();
+    for signal in &mut map.signals {
+        signal.channel = 1;
+    }
+    let mut text = String::from(
+        "date Mon Nov 17 00:00:00.000 2026
+base hex timestamps absolute
+",
+    );
+    for t in (0..=2000u64).step_by(10) {
+        text.push_str(&asc_line(t * 1000, 1, 0x100, (t >= 1000) as u8));
+        if t <= 980 {
+            text.push_str(&asc_line(t * 1000, 1, 0x200, 0));
+        }
+        text.push_str(&asc_line(t * 1000, 0, 0x200, 0));
+    }
+    let log = IndexedLog::open_bytes(text.into_bytes(), Some(&map)).unwrap();
+    let text = request(
+        "positive",
+        &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 100], ""),
+    );
+    let request = judge::check(&text, &map).unwrap();
+    let evaluation = judge::evaluate(&log, &map, TimeoutFactor::default(), &request).unwrap();
+    assert_eq!(
+        rows(only_check(&evaluation)),
+        vec![(1000, Verdict::Fail, sample(1100, 0.0))]
+    );
+}
