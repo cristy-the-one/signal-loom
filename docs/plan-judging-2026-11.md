@@ -50,6 +50,10 @@ does not transmit (README); the judge adds no network code.
 
 One JSON object. Every key below is required unless marked optional. Unknown keys are refused.
 
+An optional key may also be present as `null` (or, for `given`, as `[]`); that means the same as
+leaving it out. This lets a producer whose model server requires every schema key — as strict
+JSON-schema modes do — always write every key.
+
 ```json
 {
   "format": "loom-judge/1",
