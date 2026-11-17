@@ -248,11 +248,42 @@ fn a_mode_must_be_in_the_list() {
 }
 
 #[test]
+fn a_negative_case_with_a_never_check_is_accepted() {
+    let json = request(&case(
+        "TC-neg",
+        &check_json(
+            "c1",
+            &pedal("==", "1"),
+            &pedal("==", "0"),
+            "never",
+            "[0, 100]",
+        ),
+    ))
+    .replace(r#""kind":"positive""#, r#""kind":"negative""#);
+    let accepted = judge::check(&json, &cluster()).expect("a negative case");
+    assert_eq!(accepted.cases[0].kind, judge::Kind::Negative);
+    assert_eq!(accepted.cases[0].checks[0].mode, judge::Mode::Never);
+}
+
+#[test]
+fn a_channel_uses_a_signal_loaded_on_channel_zero() {
+    let map = cluster();
+    assert!(map.signals.iter().all(|signal| signal.channel == 0));
+    let json = one(
+        &cond_on("BrakeCmd", "BrakePedal", 2, "==", "1"),
+        &cond_on("Lamps", "BrakeLamp", 2, "==", "1"),
+    );
+    let accepted = judge::check(&json, &map).expect("channel 0 applies on channel 2");
+    assert_eq!(accepted.cases[0].checks[0].when.signal.channel, Some(2));
+    assert_eq!(accepted.cases[0].checks[0].expect.signal.channel, Some(2));
+}
+
+#[test]
 fn a_kind_must_be_in_the_list() {
-    let json = request(&case("TC-1", "")).replace(r#""kind":"positive""#, r#""kind":"negative""#);
+    let json = request(&case("TC-1", "")).replace(r#""kind":"positive""#, r#""kind":"bogus""#);
     assert_eq!(
         problems(&json, &cluster()),
-        vec!["kind \"negative\" is not one of positive".to_string()]
+        vec!["kind \"bogus\" is not one of positive, negative".to_string()]
     );
 }
 

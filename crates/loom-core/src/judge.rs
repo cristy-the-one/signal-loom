@@ -16,7 +16,7 @@ const FORMAT: &str = "loom-judge/1";
 const MAX_WITHIN_MS: i64 = 3_600_000;
 const OPS: &[&str] = &["==", "!=", ">", ">=", "<", "<="];
 const MODES: &[&str] = &["eventually", "always", "never"];
-const KINDS: &[&str] = &["positive"];
+const KINDS: &[&str] = &["positive", "negative"];
 
 /// One judge request. Unknown keys are refused.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,11 +37,12 @@ pub struct Case {
     pub checks: Vec<Check>,
 }
 
-/// `positive` is the only kind in `loom-judge/1`.
+/// `positive` or `negative`, the two kinds in `loom-judge/1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Positive,
+    Negative,
 }
 
 /// A check against one anchor signal and one expected signal.
@@ -431,10 +432,21 @@ fn resolve(
     problems: &mut Vec<String>,
 ) {
     if let Some(channel) = channel {
-        // lookup has no channel argument. The view is the signals loaded on
-        // this channel, so the pair rule stays the one in SignalMap::lookup.
-        let view = on_channel(dbc, channel);
-        decide(&view, message, signal, Some(channel), compared, problems);
+        // lookup has no channel argument. The view is one channel's signals,
+        // so the pair rule stays the one in SignalMap::lookup. A signal left
+        // on channel 0 applies on every channel, and is used only when the
+        // named channel has no copy of this pair.
+        let named = on_channel(dbc, channel);
+        let missed = matches!(
+            named.lookup(message, signal),
+            Err(err) if err.kind() == ErrorKind::NotFound
+        );
+        if missed && channel != 0 {
+            let every = on_channel(dbc, 0);
+            decide(&every, message, signal, Some(channel), compared, problems);
+        } else {
+            decide(&named, message, signal, Some(channel), compared, problems);
+        }
         return;
     }
     decide(dbc, message, signal, None, compared, problems);
