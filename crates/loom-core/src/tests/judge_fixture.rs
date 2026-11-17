@@ -11,7 +11,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use crate::judge::{self, Mode, Value};
+use crate::judge::{self, Kind, Mode, Value};
 use crate::scan::{LogFormat, RecKind, Scanner};
 use crate::session::Session;
 
@@ -333,8 +333,9 @@ fn judge_contract_fixture_matches_its_generator_and_sums() {
         .unwrap_or_else(|refusal| panic!("request refused: {}", refusal.problems.join("; ")));
     assert_eq!(request.format, "loom-judge/1");
     assert_eq!(request.spec_id, "default@REQ-BRK-001");
-    assert_eq!(request.cases.len(), 1);
+    assert_eq!(request.cases.len(), 4);
     assert_eq!(request.cases[0].case_id, "TC-1");
+    assert_eq!(request.cases[0].kind, Kind::Positive);
     assert_eq!(request.cases[0].verifies, vec!["REQ-BRK-001".to_string()]);
     assert_eq!(request.cases[0].checks.len(), 1);
     let check = &request.cases[0].checks[0];
@@ -349,6 +350,31 @@ fn judge_contract_fixture_matches_its_generator_and_sums() {
     assert_eq!(check.expect.signal.message, "Lamps");
     assert_eq!(check.expect.signal.signal, "BrakeLamp");
     assert_eq!(check.expect.value, Value::Number(1.0));
+
+    let negative = &request.cases[1];
+    assert_eq!(negative.case_id, "TC-2");
+    assert_eq!(negative.kind, Kind::Negative);
+    assert_eq!(negative.checks.len(), 1);
+    assert_eq!(negative.checks[0].id, "c1");
+    assert_eq!(negative.checks[0].mode, Mode::Never);
+    assert_eq!(negative.checks[0].within_ms, [0, 100]);
+    assert_eq!(negative.checks[0].when.value, Value::Number(1.0));
+    assert_eq!(negative.checks[0].expect.signal.signal, "BrakeLamp");
+    assert_eq!(negative.checks[0].expect.value, Value::Number(1.0));
+
+    let absent = &request.cases[2];
+    assert_eq!(absent.case_id, "TC-3");
+    assert_eq!(absent.kind, Kind::Positive);
+    assert_eq!(absent.checks.len(), 1);
+    assert_eq!(absent.checks[0].mode, Mode::Eventually);
+    assert_eq!(absent.checks[0].within_ms, [0, 100]);
+    assert_eq!(absent.checks[0].when.signal.signal, "BrakePedal");
+    assert_eq!(absent.checks[0].when.value, Value::Number(7.0));
+
+    let empty = &request.cases[3];
+    assert_eq!(empty.case_id, "TC-4");
+    assert_eq!(empty.kind, Kind::Positive);
+    assert!(empty.checks.is_empty());
 
     let mut session = Session::new();
     let summary = session.open_path(&asc).expect("open brake.asc");
@@ -414,6 +440,7 @@ fn judge_contract_fixture_matches_its_generator_and_sums() {
     assert_eq!(verdict["dbc"][0]["file"], "brake.dbc");
     assert_eq!(verdict["dbc"][0]["sha256"], sha256(&read(&dbc_path)));
     assert_eq!(verdict["dbc"][0]["channel"], 0);
+    assert_eq!(verdict["cases"].as_array().map(Vec::len), Some(4));
     assert_eq!(verdict["cases"][0]["case_id"], "TC-1");
     assert_eq!(verdict["cases"][0]["verdict"], "fail");
     let check_verdict = &verdict["cases"][0]["checks"][0];
@@ -437,6 +464,6 @@ fn judge_contract_fixture_matches_its_generator_and_sums() {
     );
     assert_eq!(
         verdict["counts"],
-        serde_json::json!({"cases": 1, "pass": 0, "fail": 1, "inconclusive": 0, "not_exercised": 0, "not_judgeable": 0})
+        serde_json::json!({"cases": 4, "pass": 0, "fail": 2, "inconclusive": 0, "not_exercised": 1, "not_judgeable": 1})
     );
 }
