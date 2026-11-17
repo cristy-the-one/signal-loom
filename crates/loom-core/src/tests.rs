@@ -1,3 +1,4 @@
+mod dbc_dump;
 mod decode;
 mod formats;
 mod fuzz;

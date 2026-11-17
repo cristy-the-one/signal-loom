@@ -7,6 +7,7 @@
 use crate::index::evaluate::{
     CaseOutcome, CheckOutcome, Evaluation, EventKind, Evidence, Occurrence, Reason, Verdict,
 };
+use crate::json_number::json_number;
 
 const FORMAT: &str = "loom-verdict/1";
 const TOOL: &str = "loom-judge 0.1.0";
@@ -365,23 +366,6 @@ fn indent_to(out: &mut String, levels: usize) {
 
 fn json_string(text: &str) -> String {
     serde_json::to_string(text).expect("a string has a JSON encoding")
-}
-
-/// Whole numbers inside the exact integer range of `f64` are written without
-/// a fraction, as the contract fixture writes `1` and `0`. Anything else uses
-/// serde_json's number format. A non-finite value has no JSON number, so it
-/// is `null`.
-fn json_number(value: f64) -> String {
-    const EXACT: f64 = (1_i64 << 53) as f64;
-    if value.is_finite() && (-EXACT..=EXACT).contains(&value) {
-        let int = value as i64;
-        if int as f64 == value {
-            return int.to_string();
-        }
-    }
-    serde_json::Number::from_f64(value)
-        .map(|number| number.to_string())
-        .unwrap_or_else(|| "null".to_string())
 }
 
 fn verdict_name(verdict: Verdict) -> &'static str {
