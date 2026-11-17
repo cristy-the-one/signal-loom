@@ -425,7 +425,11 @@ fn read_channel(
     match map.get("channel") {
         None | Some(serde_json::Value::Null) => Some(None),
         Some(value) => match as_int(value) {
-            Some(channel) => Some(Some(channel)),
+            Some(channel) if (0..=255).contains(&channel) => Some(Some(channel)),
+            Some(channel) => {
+                problems.push(format!("channel {channel} is not between 0 and 255"));
+                None
+            }
             None => {
                 problems.push("channel must be an integer".to_string());
                 None

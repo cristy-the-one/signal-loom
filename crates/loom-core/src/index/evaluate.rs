@@ -1,17 +1,26 @@
 //! The judge's evaluator: plan `docs/plan-judging-2026-11.md` §4.
 //!
 //! One replay over the whole log collects every sample of the signals a
-//! request names, and the frame times of the messages its `expect` conditions
-//! live on. Everything after that is in memory. The windowed `query` path is
-//! not used: it decimates to a point budget, and a judgement needs every sample.
+//! request names, and the frame times and channels of the messages its
+//! `expect` conditions live on. Everything after that is in memory, and each
+//! anchor finds its window by binary search. The windowed `query` path is not
+//! used: it decimates to a point budget, and a judgement needs every sample.
 //!
 //! Interpretations the plan leaves open, fixed here and covered by tests:
 //!
-//! - The evaluation at the window start uses the value held at that instant,
-//!   samples at exactly the start included. Its time is the window start.
+//! - The window start is evaluated on the value held there. When samples sit
+//!   exactly on the start, each of them is evaluated, as every sample inside
+//!   the window is; the value held from before is not, since they replace it.
+//!   An evaluation of the held value is reported at the window start.
 //! - Silence counts while it lasts. A message that went silent before the
 //!   window opened and is still silent inside it is an integrity problem at
-//!   the window start, not only when the silence began inside the window.
+//!   the window start. The stretch after a message's last frame, up to the end
+//!   of the recording, is silence too.
+//! - Silence is a gap longer than the timeout threshold, compared exactly as
+//!   the indexer's timeout check compares it; its moment is the last frame
+//!   plus the threshold, rounded up to a whole microsecond.
+//! - A frame counts for a signal's silence only on a channel the signal is
+//!   decoded on: the same rule as `decode_frame`.
 //! - `always` and `never` cannot pass with an unknown start: an unseen stretch
 //!   at the head of the window could hold the very value they rule out. That
 //!   is `no_value`, as for a start with no sample at all.
@@ -170,11 +179,20 @@ struct Target {
     idx: usize,
     name: String,
     message_id: u32,
+    /// 0 is decoded on every channel.
+    channel: u8,
     /// Half the factor: the default `==` tolerance (plan §3.1).
     half_step: f64,
     factor: f64,
     offset: f64,
     table: Vec<(i64, String)>,
+}
+
+impl Target {
+    /// `decode_frame`'s rule: a frame on `channel` carries this signal.
+    fn on_channel(&self, channel: u8) -> bool {
+        self.channel == 0 || channel == 0 || self.channel == channel
+    }
 }
 
 struct Plan {
@@ -223,6 +241,7 @@ impl Plan {
                             idx,
                             name: mapped.name.clone(),
                             message_id: mapped.message_id,
+                            channel: mapped.channel,
                             half_step: mapped.spec.factor.abs() / 2.0,
                             factor: mapped.spec.factor,
                             offset: mapped.spec.offset,
@@ -258,15 +277,15 @@ impl Plan {
         let wanted: BTreeSet<usize> = self.targets.values().map(|target| target.idx).collect();
         let mut series: BTreeMap<usize, Vec<(u64, f64)>> =
             wanted.iter().map(|idx| (*idx, Vec::new())).collect();
-        let mut frames: BTreeMap<u32, Vec<u64>> =
+        let mut frames: BTreeMap<u32, Vec<(u64, u8)>> =
             self.thresholds.keys().map(|id| (*id, Vec::new())).collect();
         log.replay(log.t_start_us(), log.t_end_us(), |step, held| {
             let Step::Record(rec) = step else {
                 return true;
             };
-            if let RecKind::Frame { id, .. } = &rec.kind {
+            if let RecKind::Frame { id, channel, .. } = &rec.kind {
                 if let Some(times) = frames.get_mut(id) {
-                    times.push(rec.t_us);
+                    times.push((rec.t_us, *channel));
                 }
             }
             log.touch(rec, held, |idx, value| {
@@ -323,7 +342,8 @@ fn resolve<'a>(map: &'a SignalMap, signal: &SignalRef) -> Result<&'a MappedSigna
 
 struct Data {
     series: BTreeMap<usize, Vec<(u64, f64)>>,
-    frames: BTreeMap<u32, Vec<u64>>,
+    /// Frame time and channel, per `expect` message id.
+    frames: BTreeMap<u32, Vec<(u64, u8)>>,
 }
 
 struct Ctx<'a> {
@@ -359,11 +379,45 @@ impl Bound<'_> {
         after.checked_sub(1).map(|i| self.points[i].1)
     }
 
-    /// Samples with `from < t <= to`.
-    fn between(&self, from: u64, to: u64) -> &[(u64, f64)] {
-        let lo = self.points.partition_point(|(ts, _)| *ts <= from);
+    /// The last sample strictly before `t`.
+    fn held_before(&self, t: u64) -> Option<f64> {
+        let after = self.points.partition_point(|(ts, _)| *ts < t);
+        after.checked_sub(1).map(|i| self.points[i].1)
+    }
+
+    /// Samples with `from <= t <= to`.
+    fn within(&self, from: u64, to: u64) -> &[(u64, f64)] {
+        let lo = self.points.partition_point(|(ts, _)| *ts < from);
         let hi = self.points.partition_point(|(ts, _)| *ts <= to);
         &self.points[lo..hi.max(lo)]
+    }
+}
+
+/// Integrity problems on one `expect` signal, each list in time order.
+struct Problems {
+    /// `(from, until)`: silent from `from`, until the next frame or the end.
+    silences: Vec<(u64, u64)>,
+    /// Checksum and counter events on the signal.
+    events: Vec<(u64, EventKind)>,
+}
+
+impl Problems {
+    /// The first problem inside `[start, end]`, with the time it applies from.
+    fn first_in(&self, start: u64, end: u64) -> Option<(u64, EventKind)> {
+        let open = self.silences.partition_point(|(_, until)| *until <= start);
+        let silence = self.silences[open..]
+            .first()
+            .filter(|(from, _)| *from <= end)
+            .map(|(from, _)| ((*from).max(start), EventKind::Timeout));
+        let next = self.events.partition_point(|(t, _)| *t < start);
+        let event = self.events[next..]
+            .first()
+            .filter(|(t, _)| *t <= end)
+            .copied();
+        match (silence, event) {
+            (Some(a), Some(b)) => Some(if b.0 < a.0 { b } else { a }),
+            (a, b) => a.or(b),
+        }
     }
 }
 
@@ -395,6 +449,38 @@ impl Ctx<'_> {
         })
     }
 
+    /// Silences and events of `target`, computed once per check.
+    fn problems(&self, target: &Target, threshold: Option<f64>) -> Problems {
+        let mut silences = Vec::new();
+        if let Some(threshold) = threshold {
+            let times: Vec<u64> = self.data.frames[&target.message_id]
+                .iter()
+                .filter(|(_, channel)| target.on_channel(*channel))
+                .map(|(t, _)| *t)
+                .collect();
+            let step = threshold.ceil() as u64;
+            let ends = times.iter().copied().skip(1).chain([self.t_end_us]);
+            for (last, next) in times.iter().copied().zip(ends) {
+                // The indexer's comparison: a gap longer than the threshold.
+                if next.saturating_sub(last) as f64 > threshold {
+                    silences.push((last.saturating_add(step), next));
+                }
+            }
+        }
+        let events = self
+            .log
+            .integrity_events_for(target.message_id, &target.name)
+            .map(|event| {
+                let kind = match event.kind {
+                    IntegrityKind::Checksum => EventKind::Checksum,
+                    IntegrityKind::Counter => EventKind::Counter,
+                };
+                (event.t_us, kind)
+            })
+            .collect();
+        Problems { silences, events }
+    }
+
     fn check(&self, check: &Check, plan: &Plan) -> Result<CheckOutcome> {
         let when = self.bind(plan, &check.when)?;
         let expect = self.bind(plan, &check.expect)?;
@@ -404,8 +490,7 @@ impl Ctx<'_> {
             .map(|condition| self.bind(plan, condition))
             .collect::<Result<Vec<_>>>()?;
         let target = plan.target(&check.expect.signal);
-        let threshold = plan.thresholds[&target.message_id];
-        let frames = &self.data.frames[&target.message_id];
+        let problems = self.problems(target, plan.thresholds[&target.message_id]);
 
         let mut outcome = CheckOutcome {
             id: check.id.clone(),
@@ -433,9 +518,9 @@ impl Ctx<'_> {
                 continue;
             }
             let (verdict, evidence) = if known {
-                let problem = self.first_problem(target, threshold, frames, anchor, check);
-                let window = window(anchor, check.within_ms);
-                self.occurrence(&expect, check.mode, window, problem)
+                let (start, end) = window(anchor, check.within_ms);
+                let problem = problems.first_in(start, end);
+                self.occurrence(&expect, check.mode, (start, end), problem)
             } else {
                 (Verdict::Inconclusive, reason(Reason::GivenUnknown))
             };
@@ -467,41 +552,6 @@ impl Ctx<'_> {
         Ok(outcome)
     }
 
-    /// The earliest integrity problem on the `expect` signal inside the window,
-    /// with the time it applies from.
-    fn first_problem(
-        &self,
-        target: &Target,
-        threshold: Option<f64>,
-        frames: &[u64],
-        anchor: u64,
-        check: &Check,
-    ) -> Option<(u64, EventKind)> {
-        let (start, end) = window(anchor, check.within_ms);
-        let mut found: Option<(u64, EventKind)> = None;
-        let mut keep = |t: u64, kind: EventKind| {
-            if (start..=end).contains(&t) && found.is_none_or(|(at, _)| t < at) {
-                found = Some((t, kind));
-            }
-        };
-        if let Some(threshold) = threshold {
-            if let Some((t, kind)) = silence(frames, threshold, start, end, self.t_end_us) {
-                keep(t, kind);
-            }
-        }
-        for event in self
-            .log
-            .integrity_events_for(target.message_id, &target.name)
-        {
-            let kind = match event.kind {
-                IntegrityKind::Checksum => EventKind::Checksum,
-                IntegrityKind::Counter => EventKind::Counter,
-            };
-            keep(event.t_us, kind);
-        }
-        found
-    }
-
     /// Plan §4.2 for one anchor. `problem` is the first integrity problem in
     /// the window. A decision made at a time strictly before it stands.
     fn occurrence(
@@ -511,18 +561,22 @@ impl Ctx<'_> {
         (start, end): (u64, u64),
         problem: Option<(u64, EventKind)>,
     ) -> (Verdict, Evidence) {
-        // Evaluations, in time order: the held value at the window start, then
-        // every sample after it up to the window end. None after the log ends.
-        let seen_to = end.min(self.t_end_us);
-        let first = (start <= self.t_end_us)
-            .then(|| expect.held_at(start).map(|x| (start, x)))
-            .flatten();
-        let later = if start <= self.t_end_us {
-            expect.between(start, seen_to)
+        // Evaluations, in time order, never after the log ends: the value held
+        // from before the window (unless samples sit exactly on its start),
+        // then every sample from the start to the end.
+        let seen = if start <= self.t_end_us {
+            expect.within(start, end.min(self.t_end_us))
         } else {
             &[]
         };
-        let evaluations = first.iter().chain(later.iter()).copied();
+        let on_start = seen.first().is_some_and(|(t, _)| *t == start);
+        let before = if start <= self.t_end_us && !on_start {
+            expect.held_before(start).map(|x| (start, x))
+        } else {
+            None
+        };
+        let known_start = on_start || before.is_some();
+        let evaluations = before.iter().chain(seen.iter()).copied();
 
         // The value a decision is looking for: true for eventually and never,
         // false for always.
@@ -548,7 +602,7 @@ impl Ctx<'_> {
         if end > self.t_end_us {
             return (Verdict::Inconclusive, reason(Reason::WindowPastEnd));
         }
-        if first.is_none() && (mode != Mode::Eventually || later.is_empty()) {
+        if !known_start && (mode != Mode::Eventually || seen.is_empty()) {
             return (Verdict::Inconclusive, reason(Reason::NoValue));
         }
         if let Some((at, kind)) = problem {
@@ -591,34 +645,6 @@ fn window(anchor: u64, within_ms: [i64; 2]) -> (u64, u64) {
         anchor.saturating_add(ms(within_ms[0])),
         anchor.saturating_add(ms(within_ms[1])),
     )
-}
-
-/// The first moment in `[start, end]` at which the message has been silent for
-/// longer than `threshold`: a gap between frames, or the stretch after the
-/// last frame up to the end of the log. A silence that began before `start`
-/// and lasts into the window applies from `start`.
-fn silence(
-    frames: &[u64],
-    threshold: f64,
-    start: u64,
-    end: u64,
-    t_end_us: u64,
-) -> Option<(u64, EventKind)> {
-    let threshold = threshold.ceil() as u64;
-    let next_after = frames.iter().copied().skip(1).map(Some).chain([None]);
-    for (last, next) in frames.iter().copied().zip(next_after) {
-        let next = next.unwrap_or(t_end_us);
-        if next.saturating_sub(last) <= threshold {
-            continue;
-        }
-        // Silent on (last + threshold, next).
-        let from = last + threshold;
-        if from > end || next <= start {
-            continue;
-        }
-        return Some((from.max(start), EventKind::Timeout));
-    }
-    None
 }
 
 fn reason(reason: Reason) -> Evidence {

@@ -149,7 +149,9 @@ the window start (held value) and at every sample of its signal inside the windo
 inconclusive, with the first reason that applies, when none of the above is reached and:
 
 1. `window_past_end` — the window ends after the recording ends;
-2. `no_value` — `expect` is unknown at the window start and no sample arrives in the window;
+2. `no_value` — `expect` is unknown at the window start and, for `eventually`, no sample arrives
+   in the window. For `always` and `never` an unknown start is enough (see the points below): the
+   table's "whole window is seen" then never holds;
 3. `integrity` — inside the window, before the decision, either the `expect` message goes silent
    for longer than its timeout, or the `expect` signal has a checksum or counter event.
    *Silent* uses the same cycle time and factor as signal-loom's timeout check, but is computed by
@@ -162,10 +164,15 @@ that decided it (for an `eventually` fail and for `always`/`never` passes, which
 decides: the window end and the value held there); for an
 inconclusive one, the reason and, for `integrity`, the event's `t_us` and kind.
 
-**Four points §4.2 left open, fixed by SL-13 and covered by its tests:**
+**Points §4.2 left open, fixed by SL-13 and covered by its tests:**
 
-- The evaluation at the window start uses the value held at that instant, a sample at exactly the
-  start included, and its evidence time is the window start.
+- The window start is evaluated on the value held there, reported at the window start. When
+  samples sit exactly on the start, each of them is evaluated, as every sample inside the window
+  is, and the value held from before is not: they replace it.
+- Silence is a gap longer than the threshold, compared as the indexer's timeout check compares it
+  (a gap exactly equal is not silence); its moment is the last frame plus the threshold, rounded up
+  to a whole microsecond. A frame counts only on a channel the signal is decoded on, the rule
+  `decode_frame` uses, so another channel's frames do not hide a silent one.
 - Silence counts while it lasts. A message that went silent before the window opened and is still
   silent inside it is an `integrity` problem from the window start. The stretch after a message's
   last frame, up to the end of the recording, is silence too.

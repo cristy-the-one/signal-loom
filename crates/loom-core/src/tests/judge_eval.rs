@@ -553,3 +553,325 @@ fn a_message_that_stops_before_the_log_ends_is_silent_after_its_last_frame() {
         vec![(1000, Verdict::Inconclusive, timeout_at(1000))]
     );
 }
+
+// ---- added in the rework, from the two Grok reviews ------------------------
+
+fn frame_us(t_us: u64, id: u32, first: u8) -> String {
+    format!("F {t_us} {id:X} {first:02X}00000000000000\n")
+}
+
+/// One Vector ASC line: SLOG has no channel column.
+fn asc_line(t_us: u64, channel: u8, id: u32, first: u8) -> String {
+    format!(
+        "{}.{:06} {channel} {id:X} Rx d 8 {first:02X} 00 00 00 00 00 00 00\n",
+        t_us / 1_000_000,
+        t_us % 1_000_000
+    )
+}
+
+#[test]
+fn a_decision_strictly_before_a_problem_in_the_same_window_stands() {
+    // The lamp comes on at 1020 ms; Lamps then goes silent after 1030 ms, a
+    // timeout at 1055 ms, inside the window. The pass at 1020 came first.
+    let mut text = String::new();
+    for t in (0..=2000).step_by(10) {
+        text.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        if t <= 1030 || t >= 1200 {
+            text.push_str(&frame(t, 0x200, (t >= 1020) as u8));
+        }
+    }
+    let log = open(text);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 100], ""),
+        ),
+    );
+    assert_eq!(
+        rows(only_check(&evaluation)),
+        vec![(1000, Verdict::Pass, sample(1020, 1.0))]
+    );
+}
+
+#[test]
+fn a_window_ending_exactly_at_the_recording_end_is_judged() {
+    // The log ends at 1100 ms; the window [1000, 1100] ends there too.
+    let mut text = String::new();
+    for t in (0..=1100).step_by(10) {
+        text.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        text.push_str(&frame(t, 0x200, 0));
+    }
+    let log = open(text);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 100], ""),
+        ),
+    );
+    assert_eq!(
+        rows(only_check(&evaluation)),
+        vec![(1000, Verdict::Fail, sample(1100, 0.0))]
+    );
+}
+
+#[test]
+fn a_gap_of_exactly_the_threshold_is_not_silence_and_one_microsecond_more_is() {
+    // Lamps every 10 ms, with one gap of 25 000 µs (2.5 cycles) and, later,
+    // one of 25 001 µs. Each gap opens just after the pedal rises.
+    let mut lines: Vec<(u64, String)> = Vec::new();
+    for t in (0..=3_000_000u64).step_by(10_000) {
+        let pedal = (1_000_000..1_500_000).contains(&t) || t >= 2_000_000;
+        lines.push((t, frame_us(t, 0x100, pedal as u8)));
+        let dropped = (1_020_000..1_031_000).contains(&t) || (2_020_000..2_031_000).contains(&t);
+        if !dropped {
+            lines.push((t, frame_us(t, 0x200, 0)));
+        }
+    }
+    lines.push((1_035_000, frame_us(1_035_000, 0x200, 0)));
+    lines.push((2_035_001, frame_us(2_035_001, 0x200, 0)));
+    lines.sort_by_key(|(t, _)| *t);
+    let log = open(lines.into_iter().map(|(_, line)| line).collect());
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 100], ""),
+        ),
+    );
+    let got = rows(only_check(&evaluation));
+    // 1 010 000 -> 1 035 000 is exactly 25 000 µs: not silent, so a plain fail.
+    assert_eq!(got[0], (1000, Verdict::Fail, sample(1100, 0.0)));
+    // 2 010 000 -> 2 035 001 is 25 001 µs: silent from 2 035 000.
+    assert_eq!(
+        got[1],
+        (
+            2000,
+            Verdict::Inconclusive,
+            Evidence::Reason {
+                reason: Reason::Integrity,
+                event: Some((2_035_000, judge::EventKind::Timeout)),
+            }
+        )
+    );
+}
+
+#[test]
+fn silence_follows_the_channel_the_signal_is_decoded_on() {
+    // The same DBC on channels 1 and 2. On channel 1 Lamps stops at 980 ms;
+    // on channel 2 it keeps going. A channel-1 check must see the silence.
+    let mut map = crate::dbc::parse(BRAKE_DBC).unwrap();
+    let mut copy = crate::dbc::parse(BRAKE_DBC).unwrap();
+    for signal in &mut map.signals {
+        signal.channel = 1;
+    }
+    for signal in &mut copy.signals {
+        signal.channel = 2;
+        signal.name = format!("{}@2", signal.name);
+    }
+    map.signals.extend(copy.signals);
+    let mut text =
+        String::from("date Mon Nov 17 00:00:00.000 2026\nbase hex timestamps absolute\n");
+    for t in (0..=2000u64).step_by(10) {
+        for channel in [1u8, 2] {
+            text.push_str(&asc_line(t * 1000, channel, 0x100, (t >= 1000) as u8));
+            if channel == 2 || t <= 980 {
+                text.push_str(&asc_line(t * 1000, channel, 0x200, 0));
+            }
+        }
+    }
+    let log = IndexedLog::open_bytes(text.into_bytes(), Some(&map)).unwrap();
+    let on = |channel: u8, message: &str, signal: &str, value: u8| {
+        format!(
+            r#"{{"signal":{{"message":"{message}","signal":"{signal}","channel":{channel}}},"op":"==","value":{value}}}"#
+        )
+    };
+    let judge_on = |channel: u8| {
+        let text = request(
+            "positive",
+            &check(
+                &on(channel, "BrakeCmd", "BrakePedal", 1),
+                &on(channel, "Lamps", "BrakeLamp", 1),
+                "eventually",
+                [0, 100],
+                "",
+            ),
+        );
+        let request = judge::check(&text, &map).unwrap();
+        let evaluation = judge::evaluate(&log, &map, TimeoutFactor::default(), &request).unwrap();
+        rows(only_check(&evaluation))
+    };
+    // Last channel-1 frame at 980 ms: silent from 980 + 25 = 1005 ms, inside the window.
+    assert_eq!(
+        judge_on(1),
+        vec![(1000, Verdict::Inconclusive, timeout_at(1005))]
+    );
+    assert_eq!(judge_on(2), vec![(1000, Verdict::Fail, sample(1100, 0.0))]);
+}
+
+#[test]
+fn a_reference_on_channel_2_finds_a_signal_loaded_on_channel_0() {
+    let log = open(brake_log());
+    let on2 = |message: &str, signal: &str, value: u8| {
+        format!(
+            r#"{{"signal":{{"message":"{message}","signal":"{signal}","channel":2}},"op":"==","value":{value}}}"#
+        )
+    };
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(
+                &on2("BrakeCmd", "BrakePedal", 1),
+                &on2("Lamps", "BrakeLamp", 1),
+                "eventually",
+                [0, 100],
+                "",
+            ),
+        ),
+    );
+    assert_eq!(
+        rows(only_check(&evaluation))[0],
+        (1000, Verdict::Pass, sample(1040, 1.0))
+    );
+}
+
+#[test]
+fn the_default_tolerance_applies_to_equality_only() {
+    // Ghost is 1.5 after 150 ms. 1.5 > 1.6 is false even though |1.5 - 1.6| is
+    // inside the default tolerance of 0.25; 1.5 >= 1.5 holds.
+    let mut text = String::new();
+    for t in (0..=1000).step_by(10) {
+        text.push_str(&frame(t, 0x100, (t >= 100) as u8));
+        text.push_str(&frame(t, 0x400, if t >= 150 { 3 } else { 0 }));
+    }
+    let log = open(text);
+    let run = |op: &str, value: &str| {
+        let evaluation = evaluate(
+            &log,
+            &request(
+                "positive",
+                &check(
+                    &pedal_is(1),
+                    &cond("Absent", "Ghost", op, value),
+                    "eventually",
+                    [0, 100],
+                    "",
+                ),
+            ),
+        );
+        only_check(&evaluation).verdict
+    };
+    assert_eq!(run(">", "1.6"), Verdict::Fail);
+    // Ghost is 0 before 150 ms and 1.5 after: never below -0.1, though 0 is
+    // within 0.25 of it.
+    assert_eq!(run("<", "-0.1"), Verdict::Fail);
+    assert_eq!(run(">=", "1.5"), Verdict::Pass);
+}
+
+#[test]
+fn a_counter_event_on_another_signal_of_the_same_message_is_not_this_ones() {
+    // LampStatus carries LampCounter and, here, a second counter that skips.
+    let dbc_text = BRAKE_DBC.replace(
+        " SG_ LampCounter : 0|4@1+ (1,0) [0|15] \"\" BCM\n",
+        " SG_ LampCounter : 0|4@1+ (1,0) [0|15] \"\" BCM\n SG_ AuxCounter : 8|4@1+ (1,0) [0|15] \"\" BCM\n",
+    );
+    let map = crate::dbc::parse(&dbc_text).unwrap();
+    let mut lamp: u8 = 0;
+    let mut aux: u8 = 0;
+    let text = brake_log_with(10_000, |t| {
+        let line = format!(
+            "F {} 300 {:02X}{:02X}000000000000\n",
+            t * 1000,
+            lamp & 0x0F,
+            aux & 0x0F
+        );
+        lamp = lamp.wrapping_add(1);
+        aux = aux.wrapping_add(if t == 1040 { 2 } else { 1 });
+        line
+    });
+    let log = IndexedLog::open_bytes(text.into_bytes(), Some(&map)).unwrap();
+    let any = cond("LampStatus", "LampCounter", ">=", "0");
+    let text = request(
+        "positive",
+        &check(&pedal_is(1), &any, "always", [0, 100], ""),
+    );
+    let request = judge::check(&text, &map).unwrap();
+    let evaluation = judge::evaluate(&log, &map, TimeoutFactor::default(), &request).unwrap();
+    assert_eq!(
+        rows(only_check(&evaluation))[0],
+        (1000, Verdict::Pass, sample(1100, 14.0))
+    );
+}
+
+#[test]
+fn a_label_written_twice_stands_for_its_first_value() {
+    // "ON" is listed for raw 1 and raw 3; the first, 1, is the one meant.
+    let dbc_text = BRAKE_DBC.replace(
+        "VAL_ 512 BrakeLamp 0 \"OFF\" 1 \"ON\" ;",
+        "VAL_ 512 BrakeLamp 0 \"OFF\" 1 \"ON\" 3 \"ON\" ;",
+    );
+    let map = crate::dbc::parse(&dbc_text).unwrap();
+    let log = IndexedLog::open_bytes(brake_log().into_bytes(), Some(&map)).unwrap();
+    let on = cond("Lamps", "BrakeLamp", "==", r#""ON""#);
+    let text = request(
+        "positive",
+        &check(&pedal_is(1), &on, "eventually", [0, 100], ""),
+    );
+    let request = judge::check(&text, &map).unwrap();
+    let evaluation = judge::evaluate(&log, &map, TimeoutFactor::default(), &request).unwrap();
+    assert_eq!(
+        rows(only_check(&evaluation))[0],
+        (1000, Verdict::Pass, sample(1040, 1.0))
+    );
+}
+
+#[test]
+fn every_sample_sitting_on_the_window_start_is_evaluated() {
+    // At exactly 1000 ms the lamp is sent twice: on, then off. The window
+    // [0, 50] starts there. The "on" sample counts, though "off" is held after.
+    let mut text = String::new();
+    for t in (0..=2000).step_by(10) {
+        text.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        if t == 1000 {
+            text.push_str(&frame(t, 0x200, 1));
+        }
+        text.push_str(&frame(t, 0x200, 0));
+    }
+    let log = open(text);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 50], ""),
+        ),
+    );
+    assert_eq!(
+        rows(only_check(&evaluation)),
+        vec![(1000, Verdict::Pass, sample(1000, 1.0))]
+    );
+}
+
+#[test]
+fn a_sample_on_the_window_start_replaces_the_value_held_from_before() {
+    // The lamp is on until 990 ms and turns off at exactly 1000 ms, the window
+    // start. The "on" held from before must not count at the start.
+    let mut text = String::new();
+    for t in (0..=2000).step_by(10) {
+        text.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        text.push_str(&frame(t, 0x200, (t < 1000) as u8));
+    }
+    let log = open(text);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 50], ""),
+        ),
+    );
+    assert_eq!(
+        rows(only_check(&evaluation)),
+        vec![(1000, Verdict::Fail, sample(1050, 0.0))]
+    );
+}

@@ -3,6 +3,7 @@ mod formats;
 mod fuzz;
 mod index;
 mod judge;
+mod judge_eval;
 mod lap;
 mod lookup;
 mod maps;
