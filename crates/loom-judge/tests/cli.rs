@@ -310,10 +310,10 @@ fn dump_of_hypercar_lap_matches_the_committed_file_byte_for_byte() {
 }
 
 #[test]
-fn dump_of_brake_dbc_matches_the_committed_file_byte_for_byte() {
+fn dump_of_parity_dbc_matches_the_committed_file_byte_for_byte() {
     assert_dump_matches(
-        &repo_root().join("fixtures/judge/brake.dbc"),
-        &repo_root().join("fixtures/dbc-dump/brake.json"),
+        &repo_root().join("fixtures/dbc-dump/parity.dbc"),
+        &repo_root().join("fixtures/dbc-dump/parity.json"),
     );
 }
 

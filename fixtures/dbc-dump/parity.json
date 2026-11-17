@@ -1,0 +1,12 @@
+{
+  "format": "loom-dbc-dump/1",
+  "signals": [
+    {"message": "Plain", "id": 256, "signal": "Mode", "start_bit": 0, "length": 3, "byte_order": "little_endian", "signed": false, "factor": 1, "offset": 0, "unit": "", "multiplexer": false, "multiplexed_by": null, "labels": [[0, "Off"], [1, "Eco"], [2, "Sport"]]},
+    {"message": "Plain", "id": 256, "signal": "Temp", "start_bit": 8, "length": 8, "byte_order": "little_endian", "signed": true, "factor": 0.5, "offset": -40, "unit": "degC", "multiplexer": false, "multiplexed_by": null, "labels": [[-1, "Invalid"], [0, "Zero"]]},
+    {"message": "Plain", "id": 256, "signal": "Word", "start_bit": 23, "length": 16, "byte_order": "big_endian", "signed": false, "factor": 0.01, "offset": 0, "unit": "V", "multiplexer": false, "multiplexed_by": null, "labels": []},
+    {"message": "Muxed", "id": 512, "signal": "Sel", "start_bit": 0, "length": 8, "byte_order": "little_endian", "signed": false, "factor": 1, "offset": 0, "unit": "", "multiplexer": true, "multiplexed_by": null, "labels": []},
+    {"message": "Muxed", "id": 512, "signal": "A", "start_bit": 8, "length": 8, "byte_order": "little_endian", "signed": false, "factor": 1, "offset": 0, "unit": "", "multiplexer": false, "multiplexed_by": 0, "labels": []},
+    {"message": "Muxed", "id": 512, "signal": "B", "start_bit": 8, "length": 16, "byte_order": "little_endian", "signed": false, "factor": 1, "offset": 0, "unit": "", "multiplexer": false, "multiplexed_by": 1, "labels": []},
+    {"message": "Ext", "id": 419364880, "signal": "Gear", "start_bit": 0, "length": 4, "byte_order": "little_endian", "signed": false, "factor": 1, "offset": 0, "unit": "", "multiplexer": false, "multiplexed_by": null, "labels": [[0, "P"], [1, "R"], [2, "N"], [3, "D"]]}
+  ]
+}

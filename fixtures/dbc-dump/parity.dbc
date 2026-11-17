@@ -1,0 +1,24 @@
+VERSION "synthetic-parity"
+
+NS_ :
+
+BS_:
+
+BU_: ECU1 ECU2
+
+BO_ 256 Plain: 8 ECU1
+ SG_ Mode : 0|3@1+ (1,0) [0|7] "" ECU2
+ SG_ Temp : 8|8@1- (0.5,-40) [-104|23.5] "degC" ECU2
+ SG_ Word : 23|16@0+ (0.01,0) [0|655.35] "V" ECU2
+
+BO_ 512 Muxed: 8 ECU1
+ SG_ Sel M : 0|8@1+ (1,0) [0|255] "" ECU2
+ SG_ A m0 : 8|8@1+ (1,0) [0|255] "" ECU2
+ SG_ B m1 : 8|16@1+ (1,0) [0|65535] "" ECU2
+
+BO_ 2566848528 Ext: 8 ECU2
+ SG_ Gear : 0|4@1+ (1,0) [0|15] "" ECU1
+
+VAL_ 256 Mode 2 "Sport" 0 "Off" 1 "Eco" ;
+VAL_ 256 Temp -1 "Invalid" 0 "Zero" ;
+VAL_ 2566848528 Gear 0 "P" 1 "R" 2 "N" 3 "D" ;

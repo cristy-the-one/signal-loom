@@ -1,7 +1,0 @@
-{
-  "format": "loom-dbc-dump/1",
-  "signals": [
-    {"message": "BrakeCmd", "id": 256, "signal": "BrakePedal", "start_bit": 0, "length": 8, "byte_order": "little_endian", "signed": false, "factor": 1, "offset": 0, "unit": "", "multiplexer": false, "multiplexed_by": null, "labels": []},
-    {"message": "Lamps", "id": 512, "signal": "BrakeLamp", "start_bit": 0, "length": 1, "byte_order": "little_endian", "signed": false, "factor": 1, "offset": 0, "unit": "", "multiplexer": false, "multiplexed_by": null, "labels": []}
-  ]
-}
