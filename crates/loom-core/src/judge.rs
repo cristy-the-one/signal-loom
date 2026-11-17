@@ -17,7 +17,7 @@ pub use crate::index::evaluate::{
 };
 use crate::index::IndexedLog;
 use crate::map::{MappedSignal, SignalMap, TimeoutFactor};
-pub use crate::verdict::{render_verdict, VerdictDbc, VerdictLog};
+pub use crate::verdict::{count_cases, render_verdict, Counts, VerdictDbc, VerdictLog};
 
 const FORMAT: &str = "loom-judge/1";
 const MAX_WITHIN_MS: i64 = 3_600_000;

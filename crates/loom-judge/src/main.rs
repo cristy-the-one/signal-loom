@@ -10,7 +10,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use loom_core::judge::{self, Evaluation, Verdict, VerdictDbc, VerdictLog};
+use loom_core::judge::{self, Evaluation, VerdictDbc, VerdictLog};
 use loom_core::SignalMap;
 use sha2::{Digest, Sha256};
 
@@ -218,23 +218,15 @@ fn apply_channel(map: &mut SignalMap, channel: u8) {
 }
 
 fn summary(evaluation: &Evaluation) -> String {
-    let mut pass = 0u64;
-    let mut fail = 0u64;
-    let mut inconclusive = 0u64;
-    let mut not_exercised = 0u64;
-    let mut not_judgeable = 0u64;
-    for case in &evaluation.cases {
-        match case.verdict {
-            Verdict::Pass => pass += 1,
-            Verdict::Fail => fail += 1,
-            Verdict::Inconclusive => inconclusive += 1,
-            Verdict::NotExercised => not_exercised += 1,
-            Verdict::NotJudgeable => not_judgeable += 1,
-        }
-    }
+    let counts = judge::count_cases(&evaluation.cases);
     format!(
-        "cases={} pass={pass} fail={fail} inconclusive={inconclusive} not_exercised={not_exercised} not_judgeable={not_judgeable}",
-        evaluation.cases.len()
+        "cases={} pass={} fail={} inconclusive={} not_exercised={} not_judgeable={}",
+        counts.cases,
+        counts.pass,
+        counts.fail,
+        counts.inconclusive,
+        counts.not_exercised,
+        counts.not_judgeable
     )
 }
 

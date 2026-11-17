@@ -31,6 +31,40 @@ pub struct VerdictDbc {
     pub channel: u8,
 }
 
+/// How the case verdicts split. The verdict file and the summary line both
+/// print these numbers, from [`count_cases`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counts {
+    pub cases: u64,
+    pub pass: u64,
+    pub fail: u64,
+    pub inconclusive: u64,
+    pub not_exercised: u64,
+    pub not_judgeable: u64,
+}
+
+/// Count each case verdict once. `cases` is the number of cases.
+pub fn count_cases(cases: &[CaseOutcome]) -> Counts {
+    let mut counts = Counts {
+        cases: cases.len() as u64,
+        pass: 0,
+        fail: 0,
+        inconclusive: 0,
+        not_exercised: 0,
+        not_judgeable: 0,
+    };
+    for case in cases {
+        match case.verdict {
+            Verdict::Pass => counts.pass += 1,
+            Verdict::Fail => counts.fail += 1,
+            Verdict::Inconclusive => counts.inconclusive += 1,
+            Verdict::NotExercised => counts.not_exercised += 1,
+            Verdict::NotJudgeable => counts.not_judgeable += 1,
+        }
+    }
+    counts
+}
+
 /// The `loom-verdict/1` document, with its trailing newline.
 ///
 /// Each check writes the first 50 occurrences, in the order `evaluate`
@@ -241,27 +275,32 @@ fn render_occurrence(indent: usize, occurrence: &Occurrence) -> String {
 }
 
 fn render_counts(indent: usize, cases: &[CaseOutcome]) -> String {
-    let mut pass = 0u64;
-    let mut fail = 0u64;
-    let mut inconclusive = 0u64;
-    let mut not_exercised = 0u64;
-    let mut not_judgeable = 0u64;
-    for case in cases {
-        match case.verdict {
-            Verdict::Pass => pass += 1,
-            Verdict::Fail => fail += 1,
-            Verdict::Inconclusive => inconclusive += 1,
-            Verdict::NotExercised => not_exercised += 1,
-            Verdict::NotJudgeable => not_judgeable += 1,
-        }
-    }
+    let counts = count_cases(cases);
     let mut out = String::from("{\n");
-    kv_u64(&mut out, indent + 1, "cases", cases.len() as u64, true);
-    kv_u64(&mut out, indent + 1, "pass", pass, true);
-    kv_u64(&mut out, indent + 1, "fail", fail, true);
-    kv_u64(&mut out, indent + 1, "inconclusive", inconclusive, true);
-    kv_u64(&mut out, indent + 1, "not_exercised", not_exercised, true);
-    kv_u64(&mut out, indent + 1, "not_judgeable", not_judgeable, false);
+    kv_u64(&mut out, indent + 1, "cases", counts.cases, true);
+    kv_u64(&mut out, indent + 1, "pass", counts.pass, true);
+    kv_u64(&mut out, indent + 1, "fail", counts.fail, true);
+    kv_u64(
+        &mut out,
+        indent + 1,
+        "inconclusive",
+        counts.inconclusive,
+        true,
+    );
+    kv_u64(
+        &mut out,
+        indent + 1,
+        "not_exercised",
+        counts.not_exercised,
+        true,
+    );
+    kv_u64(
+        &mut out,
+        indent + 1,
+        "not_judgeable",
+        counts.not_judgeable,
+        false,
+    );
     close(out, indent)
 }
 
