@@ -10,6 +10,17 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorKind;
+#[cfg_attr(
+    not(test),
+    allow(
+        unused_imports,
+        reason = "the loom-judge command (SL-15) is the caller"
+    )
+)]
+pub(crate) use crate::index::evaluate::evaluate;
+pub use crate::index::evaluate::{
+    CaseOutcome, CheckOutcome, Evaluation, EventKind, Evidence, Occurrence, Reason, Verdict,
+};
 use crate::map::{MappedSignal, SignalMap};
 
 const FORMAT: &str = "loom-judge/1";

@@ -162,6 +162,18 @@ that decided it (for an `eventually` fail and for `always`/`never` passes, which
 decides: the window end and the value held there); for an
 inconclusive one, the reason and, for `integrity`, the event's `t_us` and kind.
 
+**Four points §4.2 left open, fixed by SL-13 and covered by its tests:**
+
+- The evaluation at the window start uses the value held at that instant, a sample at exactly the
+  start included, and its evidence time is the window start.
+- Silence counts while it lasts. A message that went silent before the window opened and is still
+  silent inside it is an `integrity` problem from the window start. The stretch after a message's
+  last frame, up to the end of the recording, is silence too.
+- `always` and `never` cannot pass from an unknown start: the unseen head of the window could hold
+  the value they rule out. That is `no_value`, as is an unknown start with no sample at all.
+- Nothing is evaluated after the recording ends; a window that opens after the end is
+  `window_past_end`.
+
 ### 4.3 Verdicts up the chain
 
 - **Check:** `fail` if any occurrence failed; else `inconclusive` if any was inconclusive; else
