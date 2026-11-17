@@ -1,8 +1,13 @@
 //! `loom-judge --log FILE --dbc FILE [--dbc FILE@CHANNEL] --request FILE --out FILE`
+//! `loom-judge --dump-dbc FILE`
 //!
 //! Exit 0 after a verdict is written, whatever the verdicts were. Exit 2 when
 //! the request is refused, and write no verdict file. Exit 1 when a file
 //! could not be read or written, or the command line could not be used.
+//!
+//! `--dump-dbc FILE` writes the `loom-dbc-dump/1` text to stdout and exits 0.
+//! A file it cannot read exits 1. The binary does not format the dump; that
+//! is [`loom_core::dump_dbc`].
 //!
 //! The verdict names each file by the text after its last `/` or `\`.
 //! `Path::file_name` is not used: on Linux it does not split on `\`.
@@ -15,11 +20,13 @@ use loom_core::SignalMap;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-usage: loom-judge --log FILE --dbc FILE [--dbc FILE@CHANNEL] --request FILE --out FILE";
+usage: loom-judge --log FILE --dbc FILE [--dbc FILE@CHANNEL] --request FILE --out FILE
+       loom-judge --dump-dbc FILE";
 
 fn main() {
     match run() {
-        Ok(line) => println!("{line}"),
+        Ok(Output::Summary(line)) => println!("{line}"),
+        Ok(Output::Dump(text)) => print!("{text}"),
         Err(err) => {
             match &err {
                 Fail::Usage(message) | Fail::File(message) => eprintln!("{message}"),
@@ -35,13 +42,29 @@ fn main() {
     }
 }
 
-fn run() -> Result<String, Fail> {
-    let args = parse_args(std::env::args().skip(1))?;
-    let request_bytes = read_file(&args.request)?;
-    let request_text = as_text(&request_bytes, &args.request)?;
+fn run() -> Result<Output, Fail> {
+    match parse_args(std::env::args().skip(1))? {
+        Args::Dump(path) => Ok(Output::Dump(dump_file(&path)?)),
+        Args::Judge {
+            log,
+            dbcs,
+            request,
+            out,
+        } => judge_files(&log, &dbcs, &request, &out),
+    }
+}
 
-    let mut opened = Vec::with_capacity(args.dbcs.len());
-    for (path, channel) in &args.dbcs {
+fn judge_files(
+    log_path: &str,
+    dbc_args: &[(String, u8)],
+    request_path: &str,
+    out_path: &str,
+) -> Result<Output, Fail> {
+    let request_bytes = read_file(request_path)?;
+    let request_text = as_text(&request_bytes, request_path)?;
+
+    let mut opened = Vec::with_capacity(dbc_args.len());
+    for (path, channel) in dbc_args {
         opened.push(read_dbc(path, *channel)?);
     }
     let mut opened = opened.into_iter();
@@ -64,14 +87,14 @@ fn run() -> Result<String, Fail> {
         Err(refusal) => return Err(Fail::Refused(refusal.problems)),
     };
 
-    let log_sha256 = sha256_file(&args.log)?;
-    let judgement = judge::evaluate_log(Path::new(&args.log), &map, &request)
+    let log_sha256 = sha256_file(log_path)?;
+    let judgement = judge::evaluate_log(Path::new(log_path), &map, &request)
         .map_err(|err| Fail::File(err.to_string()))?;
     let verdict = judge::render_verdict(
         &judgement.evaluation,
         &sha256_bytes(&request_bytes),
         &VerdictLog {
-            file: base_name(&args.log).to_string(),
+            file: base_name(log_path).to_string(),
             sha256: log_sha256,
             t_start_us: judgement.log.t_start_us,
             t_end_us: judgement.log.t_end_us,
@@ -81,17 +104,25 @@ fn run() -> Result<String, Fail> {
         },
         &dbcs,
     );
-    std::fs::write(&args.out, verdict.as_bytes())
-        .map_err(|err| Fail::File(format!("could not write {}: {err}", args.out)))?;
-    Ok(summary(&judgement.evaluation))
+    std::fs::write(out_path, verdict.as_bytes())
+        .map_err(|err| Fail::File(format!("could not write {out_path}: {err}")))?;
+    Ok(Output::Summary(summary(&judgement.evaluation)))
 }
 
 #[derive(Debug)]
-struct Args {
-    log: String,
-    dbcs: Vec<(String, u8)>,
-    request: String,
-    out: String,
+enum Args {
+    Judge {
+        log: String,
+        dbcs: Vec<(String, u8)>,
+        request: String,
+        out: String,
+    },
+    Dump(String),
+}
+
+enum Output {
+    Summary(String),
+    Dump(String),
 }
 
 struct OpenDbc {
@@ -122,6 +153,7 @@ where
     let mut log = None;
     let mut request = None;
     let mut out = None;
+    let mut dump_dbc = None;
     let mut dbcs = Vec::new();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -129,6 +161,7 @@ where
             "--log" => set_once(&mut log, "--log", need(&mut args, "--log")?)?,
             "--request" => set_once(&mut request, "--request", need(&mut args, "--request")?)?,
             "--out" => set_once(&mut out, "--out", need(&mut args, "--out")?)?,
+            "--dump-dbc" => set_once(&mut dump_dbc, "--dump-dbc", need(&mut args, "--dump-dbc")?)?,
             "--dbc" => dbcs.push(split_dbc(&need(&mut args, "--dbc")?)?),
             "--help" | "-h" => return Err(Fail::Usage(USAGE.to_string())),
             other => {
@@ -136,10 +169,18 @@ where
             }
         }
     }
+    if let Some(path) = dump_dbc {
+        if log.is_some() || request.is_some() || out.is_some() || !dbcs.is_empty() {
+            return Err(Fail::Usage(format!(
+                "--dump-dbc does not take other arguments\n{USAGE}"
+            )));
+        }
+        return Ok(Args::Dump(path));
+    }
     if dbcs.is_empty() {
         return Err(Fail::Usage(format!("missing --dbc\n{USAGE}")));
     }
-    Ok(Args {
+    Ok(Args::Judge {
         log: log.ok_or_else(|| Fail::Usage(format!("missing --log\n{USAGE}")))?,
         dbcs,
         request: request.ok_or_else(|| Fail::Usage(format!("missing --request\n{USAGE}")))?,
@@ -230,6 +271,14 @@ fn summary(evaluation: &Evaluation) -> String {
     )
 }
 
+fn dump_file(path: &str) -> Result<String, Fail> {
+    let bytes = read_file(path)?;
+    let text = as_text(&bytes, path)?;
+    let map = judge::parse_dbc(text)
+        .map_err(|err| Fail::File(format!("could not read {path} as a DBC: {err}")))?;
+    Ok(loom_core::dump_dbc(&map))
+}
+
 fn read_dbc(path: &str, channel: u8) -> Result<OpenDbc, Fail> {
     let bytes = read_file(path)?;
     let text = as_text(&bytes, path)?;
@@ -286,7 +335,7 @@ fn hex_digest(digest: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base_name, parse_args, split_dbc};
+    use super::{base_name, parse_args, split_dbc, Args};
 
     #[test]
     fn base_name_splits_on_slash_and_backslash() {
@@ -344,10 +393,19 @@ mod tests {
             .map(str::to_string),
         )
         .unwrap();
-        assert_eq!(args.log, "brake.asc");
-        assert_eq!(args.dbcs, vec![("brake.dbc".to_string(), 1)]);
-        assert_eq!(args.request, "request.json");
-        assert_eq!(args.out, "verdict.json");
+        let Args::Judge {
+            log,
+            dbcs,
+            request,
+            out,
+        } = args
+        else {
+            panic!("judge command");
+        };
+        assert_eq!(log, "brake.asc");
+        assert_eq!(dbcs, vec![("brake.dbc".to_string(), 1)]);
+        assert_eq!(request, "request.json");
+        assert_eq!(out, "verdict.json");
 
         let two = parse_args(
             [
@@ -366,10 +424,35 @@ mod tests {
             .map(str::to_string),
         )
         .unwrap();
+        let Args::Judge { dbcs, .. } = two else {
+            panic!("judge command");
+        };
         assert_eq!(
-            two.dbcs,
+            dbcs,
             vec![("a.dbc".to_string(), 0), (r"C:\data\b.dbc".to_string(), 3),]
         );
         assert_eq!(base_name(r"C:\data\b.dbc"), "b.dbc");
+    }
+
+    #[test]
+    fn dump_dbc_is_its_own_command() {
+        let args = parse_args(
+            ["--dump-dbc", "fixtures/hypercar_lap.dbc"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        let Args::Dump(path) = args else {
+            panic!("dump command");
+        };
+        assert_eq!(path, "fixtures/hypercar_lap.dbc");
+
+        let err = parse_args(
+            ["--dump-dbc", "a.dbc", "--log", "a.asc"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 1);
     }
 }

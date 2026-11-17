@@ -6,11 +6,13 @@
 mod analyze;
 mod blf;
 mod dbc;
+mod dbc_dump;
 mod decode;
 mod dto;
 mod error;
 mod index;
 mod jobs;
+mod json_number;
 pub mod judge;
 mod map;
 mod project;
@@ -22,6 +24,7 @@ mod verdict;
 #[cfg(test)]
 mod tests;
 
+pub use dbc_dump::dump_dbc;
 pub use dto::{
     deserialize_us, BusLoad, EventDto, FrameDto, IndexStatus, MapMatch, OpenedProject, PointDto,
     ProjectOpen, Query, SeriesDto, SignalDto, StepDir, Summary, ValueDto, WindowStats,

@@ -300,3 +300,58 @@ fn the_ci_comparison_fails_when_the_expected_file_differs_by_one_byte() {
         "cmp must fail when the expected verdict differs by one byte"
     );
 }
+
+#[test]
+fn dump_of_hypercar_lap_matches_the_committed_file_byte_for_byte() {
+    let dbc = repo_root().join("fixtures/hypercar_lap.dbc");
+    let expected_path = repo_root().join("fixtures/dbc-dump/hypercar_lap.json");
+    let output = judge(&["--dump-dbc", dbc.to_str().unwrap()]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = fs::read(&expected_path).expect("read committed dump");
+    if output.stdout != expected {
+        let at = output
+            .stdout
+            .iter()
+            .zip(expected.iter())
+            .position(|(left, right)| left != right);
+        panic!(
+            "dump differs at byte {at:?}; command wrote {} bytes, expected {}",
+            output.stdout.len(),
+            expected.len()
+        );
+    }
+}
+
+#[test]
+fn dump_dbc_of_a_file_that_cannot_be_read_exits_1() {
+    let missing = judge(&["--dump-dbc", "/tmp/loom-judge-no-such-dbc.dbc"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(missing.stdout.is_empty());
+    let stderr = String::from_utf8(missing.stderr).unwrap();
+    assert!(stderr.contains("could not read"), "{stderr}");
+
+    let temp = TempDir::new("dump-bad");
+    let bad = temp.path.join("notes.txt");
+    fs::write(&bad, "this is not a dbc\n").unwrap();
+    let output = judge(&["--dump-dbc", bad.to_str().unwrap()]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("could not read"));
+}
