@@ -303,8 +303,21 @@ fn the_ci_comparison_fails_when_the_expected_file_differs_by_one_byte() {
 
 #[test]
 fn dump_of_hypercar_lap_matches_the_committed_file_byte_for_byte() {
-    let dbc = repo_root().join("fixtures/hypercar_lap.dbc");
-    let expected_path = repo_root().join("fixtures/dbc-dump/hypercar_lap.json");
+    assert_dump_matches(
+        &repo_root().join("fixtures/hypercar_lap.dbc"),
+        &repo_root().join("fixtures/dbc-dump/hypercar_lap.json"),
+    );
+}
+
+#[test]
+fn dump_of_brake_dbc_matches_the_committed_file_byte_for_byte() {
+    assert_dump_matches(
+        &repo_root().join("fixtures/judge/brake.dbc"),
+        &repo_root().join("fixtures/dbc-dump/brake.json"),
+    );
+}
+
+fn assert_dump_matches(dbc: &Path, expected_path: &Path) {
     let output = judge(&["--dump-dbc", dbc.to_str().unwrap()]);
     assert_eq!(
         output.status.code(),
@@ -317,7 +330,7 @@ fn dump_of_hypercar_lap_matches_the_committed_file_byte_for_byte() {
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let expected = fs::read(&expected_path).expect("read committed dump");
+    let expected = fs::read(expected_path).expect("read committed dump");
     if output.stdout != expected {
         let at = output
             .stdout
