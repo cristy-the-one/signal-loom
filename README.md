@@ -30,7 +30,7 @@ A short extract of the lap with malformed lines. The amber strip counts the skip
 
 ## Run it
 
-Requirements: Node.js 22+, a current stable Rust toolchain, and the [Tauri Linux prerequisites](https://tauri.app/start/prerequisites/) (`webkit2gtk`, `gtk`, `librsvg`, `patchelf`) when you are on Linux.
+Requirements: Node.js 22+, Rust 1.96.0 (pinned in `rust-toolchain.toml`), and the [Tauri Linux prerequisites](https://tauri.app/start/prerequisites/) (`webkit2gtk`, `gtk`, `librsvg`, `patchelf`) when you are on Linux.
 
 ```bash
 npm install
@@ -70,7 +70,7 @@ python3 scripts/gen_fixture.py
 - Scrub, frame step, event step, playback, and overlay plots call that indexer. The plot keeps a hover crosshair, measurement cursors, and wheel zoom anchored on the cursor.
 - A cluster strip (two dials, a digit, three bars and six lamps) and a one-second bus-load strip follow the playhead. Click a gauge or lamp to put any signal in it; an assigned signal scales to its own range, and the assignments are saved with the project. Without assignments the cluster shows the sample's speed, rpm, gear, temperatures, SoC or fuel, and telltales. The timeline is a minimap of the whole drive, with an event lane coloured by severity.
 - Math channels (`WheelFL - WheelFR`, `abs`, `lp`), threshold triggers, cursor statistics, CSV and trimmed SLOGv1 export (a Save dialog on the desktop, a download in the browser preview), and a second log aligned by a time offset. An export that reaches the 500,000-row cap ends with a `#` note line, and the UI shows a notice.
-- With a DBC or map loaded, a message late by more than 2.5 cycle times (set on the Alerts tab and saved with the project), a broken counter, or a bad checksum is marked on the event lane. The checksum scheme is recognised from the first 16 frames: XOR, byte sum, CRC-8/SAE-J1850 or CRC-8H2F over the other bytes. A frame with a bad checksum is rejected before its counter is checked, as an ECU does.
+- With a DBC or map loaded, a message late by more than 2.5 cycle times (set on the Alerts tab and saved with the project), a broken counter, or a bad checksum is marked on the event lane. The checksum scheme is recognised from up to the first 16 frames: XOR, byte sum, CRC-8/SAE-J1850 or CRC-8H2F over the other bytes. A frame with a bad checksum is rejected before its counter is checked, as an ECU does.
 - SocketCAN capture is opt-in and Linux-only. The socket is opened read-only. Signal Loom does not transmit.
 - While a log is indexing, the viewport blurs and dims and the veil shows progress. The signal list stays put.
 
@@ -171,6 +171,6 @@ cargo check -p signal-loom
 
 ## Installers
 
-`.github/workflows/release.yml` builds unsigned installers on `workflow_dispatch` and on `v*` tags. Windows is an NSIS setup (`Signal Loom_0.1.0_x64-setup.exe` at the current version). Linux builds a `.deb` and an AppImage. macOS builds two dmgs, Apple silicon and Intel, after installing that job's Rust target on the stable toolchain pinned in `rust-toolchain.toml`. The installer name and wizard use the product name **Signal Loom**, with `src-tauri/icons/icon.ico` (Windows) and `icon.icns` (macOS).
+`.github/workflows/release.yml` builds unsigned installers on `workflow_dispatch` and on `v*` tags. Windows is an NSIS setup (`Signal Loom_0.1.0_x64-setup.exe` at the current version). Linux builds a `.deb` and an AppImage. macOS builds two dmgs, Apple silicon and Intel, after installing that job's Rust target on the Rust 1.96.0 toolchain pinned in `rust-toolchain.toml`. The installer name and wizard use the product name **Signal Loom**, with `src-tauri/icons/icon.ico` (Windows) and `icon.icns` (macOS).
 
 This repository (`cristy-the-one/signal-loom`) is the main copy of Signal Loom. GitHub Actions runs CI and attaches the unsigned installers, including the Windows `x64-setup.exe`, to a draft GitHub Release. The Origin repository `marius-cristian/signal-loom` is the archived original and is no longer updated.
