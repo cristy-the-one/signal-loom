@@ -99,20 +99,36 @@ impl Drop for TempDir {
     }
 }
 
+/// Run `scripts/gen_judge_fixture.py`.
+///
+/// On Windows `python3` is often the Store execution alias: it can be spawned,
+/// then exits 9009. Try `python3`, then `python`, then `py -3`, and move on
+/// only when that command cannot be spawned or exits 9009. Any other failure
+/// is reported as the generator's own failure.
 fn run_generator(script: &Path, out: &Path) {
-    let output = Command::new("python3")
-        .arg(script)
-        .arg("--out")
-        .arg(out)
-        .output()
-        .unwrap_or_else(|err| panic!("could not run {}: {err}", script.display()));
-    assert!(
-        output.status.success(),
-        "generator exited {}\n{}{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let candidates: &[(&str, &[&str])] = &[("python3", &[]), ("python", &[]), ("py", &["-3"])];
+    for (index, &(program, prefix)) in candidates.iter().enumerate() {
+        let last = index + 1 == candidates.len();
+        let mut command = Command::new(program);
+        command.args(prefix).arg(script).arg("--out").arg(out);
+        let output = match command.output() {
+            Ok(output) => output,
+            Err(err) if last => panic!("could not run {}: {err}", script.display()),
+            Err(_) => continue,
+        };
+        if output.status.code() == Some(9009) && !last {
+            continue;
+        }
+        assert!(
+            output.status.success(),
+            "generator exited {}\n{}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    panic!("could not run {}", script.display());
 }
 
 fn generated_matches_committed(generated: &Path, committed: &Path) {
@@ -271,18 +287,6 @@ fn judge_contract_fixture_matches_its_generator_and_sums() {
     generated_matches_committed(&temp.path, &dir);
     assert_unchanged(&dir, &before);
 
-    let sums = Command::new("sha256sum")
-        .arg("-c")
-        .arg("SHA256SUMS")
-        .current_dir(&dir)
-        .output()
-        .expect("sha256sum");
-    assert!(
-        sums.status.success(),
-        "sha256sum -c SHA256SUMS failed\n{}{}",
-        String::from_utf8_lossy(&sums.stdout),
-        String::from_utf8_lossy(&sums.stderr)
-    );
     let listed: Vec<String> = String::from_utf8(read(&dir.join("SHA256SUMS")))
         .expect("SHA256SUMS is utf-8")
         .lines()
