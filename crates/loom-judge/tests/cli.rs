@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_loom-judge")
 }
@@ -47,32 +49,21 @@ fn judge(args: &[&str]) -> std::process::Output {
         .expect("run loom-judge")
 }
 
-/// The comparison the rust CI job runs after `loom-judge` writes its verdict.
-fn cmp_verdicts(actual: &Path, expected: &Path) -> std::process::ExitStatus {
-    Command::new("cmp")
-        .arg(actual)
-        .arg(expected)
-        .output()
-        .expect("cmp")
-        .status
+/// Same check the rust CI job runs with `cmp`, done here with the file bytes.
+/// The workflow's own `cmp` step is unchanged.
+fn cmp_verdicts(actual: &Path, expected: &Path) -> bool {
+    let left = fs::read(actual).unwrap_or_else(|err| panic!("read {}: {err}", actual.display()));
+    let right =
+        fs::read(expected).unwrap_or_else(|err| panic!("read {}: {err}", expected.display()));
+    left == right
 }
 
 fn sha256_file(path: &Path) -> String {
-    let output = Command::new("sha256sum")
-        .arg(path)
-        .output()
-        .expect("sha256sum");
-    assert!(
-        output.status.success(),
-        "sha256sum failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .expect("sha256sum output")
-        .split_whitespace()
-        .next()
-        .expect("sha256sum hash")
-        .to_string()
+    let bytes = fs::read(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn judge_fixture(out: &Path) -> std::process::Output {
@@ -115,8 +106,8 @@ fn the_contract_fixture_matches_expected_verdict_byte_for_byte() {
         );
     }
     assert!(
-        cmp_verdicts(&out, &fixture("expected-verdict.json")).success(),
-        "cmp must accept the judge output against the committed expected verdict"
+        cmp_verdicts(&out, &fixture("expected-verdict.json")),
+        "judge output must match the committed expected verdict byte for byte"
     );
 
     let verdict: serde_json::Value = serde_json::from_slice(&actual).unwrap();
@@ -287,17 +278,16 @@ fn the_ci_comparison_fails_when_the_expected_file_differs_by_one_byte() {
     let output = judge_fixture(&out);
     assert!(output.status.success());
     let expected = fixture("expected-verdict.json");
-    assert!(cmp_verdicts(&out, &expected).success());
+    assert!(cmp_verdicts(&out, &expected));
 
     let mutated = temp.path.join("expected-verdict.json");
     let mut bytes = fs::read(&expected).unwrap();
     let index = bytes.len() / 2;
     bytes[index] ^= 0xff;
     fs::write(&mutated, &bytes).unwrap();
-    let status = cmp_verdicts(&out, &mutated);
     assert!(
-        !status.success(),
-        "cmp must fail when the expected verdict differs by one byte"
+        !cmp_verdicts(&out, &mutated),
+        "the verdicts must differ when the expected file changes by one byte"
     );
 }
 
