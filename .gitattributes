@@ -7,6 +7,8 @@
 *.loom text eol=lf
 fixtures/*.csv  text eol=lf
 fixtures/*.json text eol=lf
+fixtures/**/*.json  text eol=lf
+fixtures/**/SHA256SUMS text eol=lf
 
 # Binary logs and images must never be converted.
 *.blf  binary
