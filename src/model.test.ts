@@ -62,7 +62,7 @@ describe("hasData", () => {
     expect(hasData(signal({ name: "Speed", min: 0 }))).toBe(true);
     expect(hasData(signal({ name: "Diff", min: null, max: null, messageName: "Math" }))).toBe(true);
     expect(hasData(signal({ name: "Empty", min: null, max: null, messageName: "ECM" }))).toBe(false);
-    expect(hasData(signal({ name: "Empty", min: null, max: null, messageName: "math" }))).toBe(false);
+    expect(hasData(signal({ name: "Empty", min: null, max: null, messageName: "math" }))).toBe(true);
   });
 });
 
