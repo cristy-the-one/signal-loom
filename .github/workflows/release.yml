@@ -71,8 +71,8 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install the pinned stable toolchain and this job's Rust target
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install the pinned toolchain (1.96.0) and this job's Rust target
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: ${{ matrix.target }}
 
