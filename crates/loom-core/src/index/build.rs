@@ -223,7 +223,7 @@ fn scan_framed(
     let checksums = source.with_reader(|reader| probe_checksums(&mut built, reader, format))?;
     let mut watch = IntegrityWatch::new(map, timeout, checksums);
     let mut pending: Vec<(usize, f64)> = Vec::new();
-    drive(source, format, built, control, |pass, rec| {
+    let mut built = drive(source, format, built, control, |pass, rec| {
         match &rec.kind {
             RecKind::Frame {
                 id,
@@ -268,7 +268,10 @@ fn scan_framed(
             RecKind::Event { label } => note_event(&mut pass.built, rec.t_us, label),
             RecKind::Sample { .. } => {}
         }
-    })
+    })?;
+    let t_end_us = built.t_end_us;
+    watch.finish(&mut built, t_end_us);
+    Ok(built)
 }
 
 fn scan_decoded(source: &Source, control: Option<&IndexControl>) -> Result<Built> {

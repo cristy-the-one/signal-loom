@@ -1,5 +1,8 @@
 //! SL-19: integrity timeouts and checksums follow the frame's channel.
 //! An SLOG log has no channels; the hypercar lap event tests cover that case.
+//!
+//! SL-20: a cyclic message that stops, and never comes back, times out at the
+//! end of the log. The stamp is the last frame plus the threshold, rounded up.
 
 use crate::index::integrity::IntegrityKind;
 use crate::index::IndexedLog;
@@ -137,5 +140,90 @@ BO_ 512 Body: 8 ECU
     assert_eq!(
         stored,
         vec![(bad_us, IntegrityKind::Checksum, 0x200, "Checksum@2")]
+    );
+}
+
+/// 0x200 at a 10 ms cycle. The default timeout is 2.5 cycles, 25 ms.
+const BODY_10MS: &str = "\
+BO_ 512 Body: 8 ECU
+ SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU
+BA_ \"GenMsgCycleTime\" BO_ 512 10;
+";
+
+/// `0x200` every 10 ms on `channel` from 0 through `last_us`.
+fn frames_until(text: &mut String, channel: u8, last_us: u64) {
+    let data = [0u8; 8];
+    for t_us in (0..=last_us).step_by(10_000) {
+        text.push_str(&asc_line(t_us, channel, 0x200, &data));
+    }
+}
+
+/// A frame with no cycle time, so the log's end is 2000 ms even when every
+/// watched message has already stopped.
+fn marker_at_end(text: &mut String) {
+    text.push_str(&asc_line(2_000_000, 1, 0x100, &[0]));
+}
+
+/// (a) A 2000 ms log. 0x200, cycle 10 ms, stops at 980 ms and never returns.
+/// 980 ms + ceil(10 ms × 2.5) = 1005 ms. Today nothing is raised: the gap is
+/// only noticed when a later frame arrives.
+#[test]
+fn a_message_that_stops_and_never_returns_times_out_at_1005_ms() {
+    let map = crate::dbc::parse(BODY_10MS).unwrap();
+    let mut text = asc_header();
+    frames_until(&mut text, 1, 980_000);
+    marker_at_end(&mut text);
+    let log = open(text, &map);
+    assert_eq!(log.t_end_us(), 2_000_000);
+    assert_eq!(log.events(), &[(1_005_000, "Timeout Body".to_string())][..]);
+}
+
+/// (b) The same message stops at 1980 ms. The gap to the end is 20 ms, inside
+/// the 25 ms threshold, so the end of the log raises nothing.
+#[test]
+fn a_stop_inside_the_end_threshold_raises_no_timeout() {
+    let map = crate::dbc::parse(BODY_10MS).unwrap();
+    let mut text = asc_header();
+    frames_until(&mut text, 1, 1_980_000);
+    marker_at_end(&mut text);
+    let log = open(text, &map);
+    assert_eq!(log.t_end_us(), 2_000_000);
+    assert!(log.events().is_empty(), "{:?}", log.events());
+}
+
+/// (c) Two channels of 0x200. Channel 1 stops at 980 ms. Channel 2 keeps the
+/// 10 ms cadence through 2000 ms. Only the channel that stopped times out.
+#[test]
+fn only_the_channel_that_stops_raises_an_end_of_log_timeout() {
+    let map = crate::dbc::parse(BODY_10MS).unwrap();
+    let mut text = asc_header();
+    let data = [0u8; 8];
+    for t_us in (0..=2_000_000u64).step_by(10_000) {
+        if t_us <= 980_000 {
+            text.push_str(&asc_line(t_us, 1, 0x200, &data));
+        }
+        text.push_str(&asc_line(t_us, 2, 0x200, &data));
+    }
+    let log = open(text, &map);
+    assert_eq!(log.t_end_us(), 2_000_000);
+    assert_eq!(log.events(), &[(1_005_000, "Timeout Body".to_string())][..]);
+}
+
+/// The timeout is stamped at 1005 ms, which is before an error frame recorded
+/// at 1500 ms. `finish` must put that stamp in time order, not after the scan.
+#[test]
+fn an_end_of_log_timeout_is_kept_in_time_order() {
+    let map = crate::dbc::parse(BODY_10MS).unwrap();
+    let mut text = asc_header();
+    frames_until(&mut text, 1, 980_000);
+    text.push_str("1.500000 1 ErrorFrame\n");
+    marker_at_end(&mut text);
+    let log = open(text, &map);
+    assert_eq!(
+        log.events(),
+        &[
+            (1_005_000, "Timeout Body".to_string()),
+            (1_500_000, "Error frame".to_string()),
+        ][..]
     );
 }

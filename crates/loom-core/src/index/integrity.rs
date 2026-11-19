@@ -182,6 +182,49 @@ impl IntegrityWatch {
             note_integrity(built, &label, event);
         }
     }
+
+    /// Called once after the last record. A timeout is raised when a later
+    /// frame arrives; a message that stops and never returns has no such
+    /// frame. The gap is measured to `t_end_us`, with the same comparison as
+    /// `note`. The stamp is the one the judge uses for an ongoing silence:
+    /// the last frame plus the threshold, rounded up to a whole microsecond
+    /// (`index/evaluate.rs`, `Problems`: `from = last + ceil(threshold)`).
+    pub(super) fn finish(&mut self, built: &mut Built, t_end_us: u64) {
+        let mut raised: Vec<(u64, u8, u32, String)> = Vec::new();
+        for (&(channel, id), &last) in &self.last_seen {
+            let Some(cycle) = self.cycles.get(&id).copied() else {
+                continue;
+            };
+            if cycle == 0 {
+                continue;
+            }
+            let threshold = cycle as f64 * self.timeout_factor;
+            if t_end_us.saturating_sub(last) as f64 > threshold {
+                let name = built
+                    .message_names
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{:03X}", id));
+                let t_us = last.saturating_add(threshold.ceil() as u64);
+                raised.push((t_us, channel, id, format!("Timeout {name}")));
+            }
+        }
+        if raised.is_empty() {
+            return;
+        }
+        // Time order, then channel and id, so two silences at one instant
+        // do not follow `HashMap`'s iteration. `note_event` appends and keeps
+        // the cap: past it the event is counted, `events_truncated` is set,
+        // and the label is not stored.
+        raised.sort_by_key(|event| (event.0, event.1, event.2));
+        for (t_us, _, _, label) in &raised {
+            note_event(built, *t_us, label);
+        }
+        // The new stamps sit before the end of the log, ahead of labels that
+        // were recorded later. A stable sort keeps equal times in the order
+        // they already had.
+        built.events.sort_by_key(|event| event.0);
+    }
 }
 
 fn integrity_event(
