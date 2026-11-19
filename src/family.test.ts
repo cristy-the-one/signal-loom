@@ -30,7 +30,7 @@ describe("familyColor", () => {
 
   it("wraps the trace palette, including a negative index", () => {
     expect(familyColor("Nope", "", 8)).toBe(TRACE_COLORS[8 % TRACE_COLORS.length]);
-    expect(familyColor("Nope", "", -1)).toBe(TRACE_COLORS[Math.abs(-1) % TRACE_COLORS.length]);
+    expect(familyColor("Nope", "", -1)).toBe(TRACE_COLORS[1]);
   });
 });
 

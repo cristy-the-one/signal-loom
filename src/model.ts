@@ -14,7 +14,7 @@ export function duration(summary: Summary): number {
 
 /** A signal has data when the log decoded at least one sample of it. */
 export function hasData(signal: SignalInfo): boolean {
-  return signal.min != null || signal.messageName === "Math";
+  return signal.min != null || signal.messageName.toLowerCase() === "math";
 }
 
 /** Three signals worth a first look: ones with data, not checksums or counters. */
