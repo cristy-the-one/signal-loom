@@ -167,8 +167,37 @@ struct SignalBuild {
 }
 
 fn parse_bo(rest: &str) -> Result<MessageBuild> {
-    // 416 ECM_Engine: 8 ECM
+    // `416 ECM_Engine: 8 ECM`, or `1041 PCS_HUD : 8 DSU` with a space before
+    // the colon. Split once on the first ':' so the colon separates the name
+    // from the length and is never read as the length. A line with no ':'
+    // stays id, name, length on whitespace, and a trailing ':' on the name
+    // is still trimmed.
     let rest = rest.trim().trim_end_matches(';');
+    if let Some((left, right)) = rest.split_once(':') {
+        let mut tokens = left.split_whitespace();
+        let id_tok = tokens.next().unwrap_or("");
+        let name = tokens.next().unwrap_or("");
+        let extra = tokens.next().is_some();
+        let id = normalize_id(parse_int(id_tok).map_err(Error::invalid)?);
+        if extra {
+            return Err(Error::invalid(format!(
+                "BO_ {id_tok} has more than an id and a name before ':'"
+            )));
+        }
+        if name.is_empty() {
+            return Err(Error::invalid(format!(
+                "BO_ {id_tok} is missing a message name"
+            )));
+        }
+        let dlc_tok = right.split_whitespace().next().unwrap_or("8");
+        let dlc = parse_int(dlc_tok.trim_end_matches(':')).map_err(Error::invalid)? as u8;
+        return Ok(MessageBuild {
+            id,
+            name: name.to_string(),
+            dlc: dlc.min(64),
+            signals: Vec::new(),
+        });
+    }
     let mut parts = rest.split_whitespace();
     let id_tok = parts.next().unwrap_or("");
     let name_tok = parts.next().unwrap_or("");
@@ -444,6 +473,70 @@ BO_ 256 MotorolaDemo: 8 ECM
         let word = map.signals.iter().find(|s| s.name == "BigWord").unwrap();
         let payload = hex_payload("1234000000000000");
         assert_eq!(word.spec.decode(&payload) as u64, 0x1234);
+    }
+
+    #[test]
+    fn space_before_the_colon_keeps_the_message_and_its_signal() {
+        let map = parse(
+            "\
+BO_ 1041 PCS_HUD : 8 DSU
+ SG_ Shown : 0|8@1+ (1,0) [0|255] \"\" DSU
+",
+        )
+        .unwrap();
+        assert_eq!(map.messages.len(), 1);
+        assert_eq!(map.messages[0].name, "PCS_HUD");
+        assert_eq!(map.messages[0].id, 1041);
+        assert_eq!(map.messages[0].dlc, 8);
+        assert_eq!(map.signals.len(), 1);
+        assert_eq!(map.signals[0].name, "Shown");
+        assert_eq!(map.signals[0].message_name, "PCS_HUD");
+        assert_eq!(map.signals[0].message_id, 1041);
+    }
+
+    #[test]
+    fn a_name_with_the_colon_attached_still_parses() {
+        let map = parse(
+            "\
+BO_ 416 ECM_Engine: 8 ECM
+ SG_ EngineRPM : 0|16@1+ (0.25,0) [0|16383.75] \"rpm\" TCU
+",
+        )
+        .unwrap();
+        assert_eq!(map.messages.len(), 1);
+        assert_eq!(map.messages[0].name, "ECM_Engine");
+        assert_eq!(map.messages[0].id, 416);
+        assert_eq!(map.messages[0].dlc, 8);
+        assert_eq!(map.signals.len(), 1);
+        assert_eq!(map.signals[0].name, "EngineRPM");
+        assert_eq!(map.signals[0].message_name, "ECM_Engine");
+    }
+
+    #[test]
+    fn space_before_the_colon_matches_the_parity_extended_id() {
+        // parity.dbc writes `BO_ 2566848528 Ext: 8 ECU2`. A space before the
+        // colon has to keep that same extended id.
+        let spaced = parse(
+            "\
+BO_ 2566848528 Ext : 8 ECU2
+ SG_ Gear : 0|4@1+ (1,0) [0|15] \"\" ECU1
+",
+        )
+        .unwrap();
+        let parity = parse(
+            "\
+BO_ 2566848528 Ext: 8 ECU2
+ SG_ Gear : 0|4@1+ (1,0) [0|15] \"\" ECU1
+",
+        )
+        .unwrap();
+        let spaced_ext = spaced.messages.iter().find(|m| m.name == "Ext").unwrap();
+        let parity_ext = parity.messages.iter().find(|m| m.name == "Ext").unwrap();
+        assert_eq!(spaced_ext.id, parity_ext.id);
+        assert_eq!(spaced_ext.dlc, parity_ext.dlc);
+        assert_eq!(spaced.signals.len(), 1);
+        assert_eq!(spaced.signals[0].name, "Gear");
+        assert_eq!(spaced.signals[0].message_id, parity_ext.id);
     }
 
     fn hex_payload(text: &str) -> [u8; 8] {
