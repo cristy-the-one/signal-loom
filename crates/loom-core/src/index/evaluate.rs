@@ -96,6 +96,9 @@ pub struct Occurrence {
     pub anchor_us: u64,
     pub verdict: Verdict,
     pub evidence: Evidence,
+    /// Evidence, not a verdict. True only for an `eventually` pass whose
+    /// expect already held just before the anchor.
+    pub already_held: bool,
 }
 
 /// One check. `occurrences` holds every judged anchor, in time order; skipped
@@ -109,6 +112,8 @@ pub struct CheckOutcome {
     pub pass: u64,
     pub fail: u64,
     pub inconclusive: u64,
+    /// How many of `pass` are `already_held`. Evidence, not a verdict.
+    pub pass_already_held: u64,
     pub occurrences: Vec<Occurrence>,
 }
 
@@ -500,6 +505,7 @@ impl Ctx<'_> {
             pass: 0,
             fail: 0,
             inconclusive: 0,
+            pass_already_held: 0,
             occurrences: Vec::new(),
         };
         for anchor in anchors(&when) {
@@ -534,10 +540,22 @@ impl Ctx<'_> {
                 Verdict::Fail => outcome.fail += 1,
                 _ => outcome.inconclusive += 1,
             }
+            // Evidence only. An eventually pass whose expect already held
+            // just before the anchor did not depend on the trigger. Always
+            // and never never set it, and a non-pass never does either.
+            let already_held = check.mode == Mode::Eventually
+                && verdict == Verdict::Pass
+                && expect
+                    .held_before(anchor)
+                    .is_some_and(|value| expect.holds(value));
+            if already_held {
+                outcome.pass_already_held += 1;
+            }
             outcome.occurrences.push(Occurrence {
                 anchor_us: anchor,
                 verdict,
                 evidence,
+                already_held,
             });
         }
         outcome.verdict = if outcome.fail > 0 {

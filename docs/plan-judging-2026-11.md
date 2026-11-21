@@ -168,6 +168,8 @@ that decided it (for an `eventually` fail and for `always`/`never` passes, which
 decides: the window end and the value held there); for an
 inconclusive one, the reason and, for `integrity`, the event's `t_us` and kind.
 
+An eventually pass whose expect already held just before the anchor is marked already_held; it stays a pass.
+
 **Points §4.2 left open, fixed by SL-13 and covered by its tests:**
 
 - The window start is evaluated on the value held there, reported at the window start. When
@@ -254,6 +256,8 @@ check `never BrakeLamp == 1 within [0, 100]` gives that check **fail** at 1040 m
   No run time, no host name, no absolute path (`file` is the base name).
 - Exit codes: `0` judged (whatever the verdicts), `2` request refused, `1` a file could not be
   read.
+- `pass_already_held` is written on every check, right after `inconclusive`, including when it is 0.
+- `already_held` is written on an occurrence only when it is true, and is absent otherwise.
 
 ---
 
