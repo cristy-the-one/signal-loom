@@ -909,3 +909,166 @@ base hex timestamps absolute
         vec![(1000, Verdict::Fail, sample(1100, 0.0))]
     );
 }
+
+// ---- SL-22: already_held is evidence on an eventually pass, not a verdict --
+
+fn counts(check: &CheckOutcome) -> (Verdict, u64, u64, u64, u64) {
+    (
+        check.verdict,
+        check.pass,
+        check.fail,
+        check.inconclusive,
+        check.pass_already_held,
+    )
+}
+
+/// SL-22 (a). The expect is true before the anchor and inside the window.
+#[test]
+fn eventually_pass_already_held_when_expect_held_before_the_anchor() {
+    let mut text = String::new();
+    for t in (0..=2000).step_by(10) {
+        text.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        text.push_str(&frame(t, 0x200, 1));
+    }
+    let log = open(text);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 100], ""),
+        ),
+    );
+    let got = only_check(&evaluation);
+    assert_eq!(rows(got), vec![(1000, Verdict::Pass, sample(1000, 1.0))]);
+    assert!(got.occurrences[0].already_held);
+    assert_eq!(counts(got), (Verdict::Pass, 1, 0, 0, 1));
+}
+
+/// SL-22 (b). The expect is false before the anchor and becomes true inside
+/// the window, so the pass depends on the window.
+#[test]
+fn eventually_pass_not_already_held_when_expect_was_false_before_the_anchor() {
+    let mut text = String::new();
+    for t in (0..=2000).step_by(10) {
+        text.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        text.push_str(&frame(t, 0x200, (t >= 1040) as u8));
+    }
+    let log = open(text);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 100], ""),
+        ),
+    );
+    let got = only_check(&evaluation);
+    assert_eq!(rows(got), vec![(1000, Verdict::Pass, sample(1040, 1.0))]);
+    assert!(!got.occurrences[0].already_held);
+    assert_eq!(counts(got), (Verdict::Pass, 1, 0, 0, 0));
+}
+
+/// SL-22 (c). No expect sample exists before the anchor.
+#[test]
+fn eventually_pass_not_already_held_when_expect_has_no_sample_before_the_anchor() {
+    let mut text = String::new();
+    for t in (0..=2000).step_by(10) {
+        text.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        if t >= 1040 {
+            text.push_str(&frame(t, 0x200, 1));
+        }
+    }
+    let log = open(text);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 100], ""),
+        ),
+    );
+    let got = only_check(&evaluation);
+    assert_eq!(rows(got), vec![(1000, Verdict::Pass, sample(1040, 1.0))]);
+    assert!(!got.occurrences[0].already_held);
+    assert_eq!(counts(got), (Verdict::Pass, 1, 0, 0, 0));
+}
+
+/// SL-22 (d). Always and never never set the mark, even when expect held
+/// just before the anchor.
+#[test]
+fn always_and_never_are_never_already_held() {
+    let mut always_log = String::new();
+    for t in (0..=2000).step_by(10) {
+        always_log.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        always_log.push_str(&frame(t, 0x200, 1));
+    }
+    let log = open(always_log);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "always", [0, 100], ""),
+        ),
+    );
+    let got = only_check(&evaluation);
+    assert_eq!(rows(got), vec![(1000, Verdict::Pass, sample(1100, 1.0))]);
+    assert!(!got.occurrences[0].already_held);
+    assert_eq!(counts(got), (Verdict::Pass, 1, 0, 0, 0));
+
+    // On before the anchor, off from the anchor through the window. Never
+    // passes, and held_before(anchor) still holds.
+    let mut never_log = String::new();
+    for t in (0..=2000).step_by(10) {
+        never_log.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        never_log.push_str(&frame(t, 0x200, (t < 1000) as u8));
+    }
+    let log = open(never_log);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "never", [0, 100], ""),
+        ),
+    );
+    let got = only_check(&evaluation);
+    assert_eq!(rows(got), vec![(1000, Verdict::Pass, sample(1100, 0.0))]);
+    assert!(!got.occurrences[0].already_held);
+    assert_eq!(counts(got), (Verdict::Pass, 1, 0, 0, 0));
+}
+
+/// SL-22 (e). Integrity turns the occurrence inconclusive. The mark stays
+/// off and the counts stay what they were.
+#[test]
+fn eventually_inconclusive_by_integrity_is_not_already_held() {
+    let mut text = String::new();
+    for t in (0..=2000).step_by(10) {
+        text.push_str(&frame(t, 0x100, (t >= 1000) as u8));
+        if t <= 500 {
+            text.push_str(&frame(t, 0x200, 1));
+        }
+    }
+    let log = open(text);
+    let evaluation = evaluate(
+        &log,
+        &request(
+            "positive",
+            &check(&pedal_is(1), &lamp_is(1), "eventually", [0, 100], ""),
+        ),
+    );
+    let got = only_check(&evaluation);
+    assert_eq!(
+        rows(got),
+        vec![(1000, Verdict::Inconclusive, timeout_at(1000))]
+    );
+    assert!(!got.occurrences[0].already_held);
+    assert_eq!(
+        (
+            got.verdict,
+            got.anchors,
+            got.skipped,
+            got.pass,
+            got.fail,
+            got.inconclusive,
+            got.pass_already_held,
+        ),
+        (Verdict::Inconclusive, 1, 0, 0, 0, 1, 0)
+    );
+}

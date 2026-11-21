@@ -130,6 +130,7 @@ fn occurrence(anchor_us: u64, verdict: Verdict) -> Occurrence {
             t_us: anchor_us + 1_000,
             value: 1.0,
         },
+        already_held: false,
     }
 }
 
@@ -187,6 +188,7 @@ fn sixty_anchors_keep_fifty_occurrences_and_full_counts() {
         pass: 30,
         fail: 20,
         inconclusive: 6,
+        pass_already_held: 0,
         occurrences,
     });
     let text = judge::render_verdict(&evaluation, "request", &bare_log(), &[]);
@@ -293,6 +295,7 @@ fn every_name_and_odd_value_round_trips_as_json() {
                 t_us: anchor,
                 value,
             },
+            already_held: false,
         });
         anchor += 1;
     }
@@ -310,6 +313,7 @@ fn every_name_and_odd_value_round_trips_as_json() {
                 reason,
                 event: None,
             },
+            already_held: false,
         });
         anchor += 1;
     }
@@ -321,6 +325,7 @@ fn every_name_and_odd_value_round_trips_as_json() {
                 reason: Reason::Integrity,
                 event: Some((anchor, kind)),
             },
+            already_held: false,
         });
         anchor += 1;
     }
@@ -332,6 +337,7 @@ fn every_name_and_odd_value_round_trips_as_json() {
         pass: samples.len() as u64,
         fail: 0,
         inconclusive: (occurrences.len() - samples.len()) as u64,
+        pass_already_held: 0,
         occurrences,
     });
     evaluation.cases[0].case_id = "TC-\"q\"\\x".to_string();
@@ -380,4 +386,124 @@ fn every_name_and_odd_value_round_trips_as_json() {
         .filter_map(|item| item.get("event").and_then(|event| event["kind"].as_str()))
         .collect();
     assert_eq!(kinds, ["timeout", "checksum", "counter"]);
+}
+
+/// SL-22 (f). Every check writes `pass_already_held`, including 0. An
+/// occurrence writes `already_held` only when it is true.
+#[test]
+fn verdict_file_writes_pass_already_held_and_omits_false_already_held() {
+    let held = Occurrence {
+        anchor_us: 1_000,
+        verdict: Verdict::Pass,
+        evidence: Evidence::Sample {
+            t_us: 1_000,
+            value: 0.0,
+        },
+        already_held: true,
+    };
+    let not_held = Occurrence {
+        anchor_us: 2_000,
+        verdict: Verdict::Pass,
+        evidence: Evidence::Sample {
+            t_us: 2_040,
+            value: 1.0,
+        },
+        already_held: false,
+    };
+    let failed = Occurrence {
+        anchor_us: 3_000,
+        verdict: Verdict::Fail,
+        evidence: Evidence::Sample {
+            t_us: 3_100,
+            value: 0.0,
+        },
+        already_held: false,
+    };
+    let evaluation = Evaluation {
+        integrity_complete: true,
+        cases: vec![
+            CaseOutcome {
+                case_id: "TC-1".to_string(),
+                verdict: Verdict::Pass,
+                checks: vec![CheckOutcome {
+                    id: "held".to_string(),
+                    verdict: Verdict::Pass,
+                    anchors: 1,
+                    skipped: 0,
+                    pass: 1,
+                    fail: 0,
+                    inconclusive: 0,
+                    pass_already_held: 1,
+                    occurrences: vec![held],
+                }],
+            },
+            CaseOutcome {
+                case_id: "TC-2".to_string(),
+                verdict: Verdict::Fail,
+                checks: vec![CheckOutcome {
+                    id: "fresh".to_string(),
+                    verdict: Verdict::Fail,
+                    anchors: 2,
+                    skipped: 0,
+                    pass: 1,
+                    fail: 1,
+                    inconclusive: 0,
+                    pass_already_held: 0,
+                    occurrences: vec![not_held, failed],
+                }],
+            },
+            CaseOutcome {
+                case_id: "TC-3".to_string(),
+                verdict: Verdict::NotExercised,
+                checks: vec![CheckOutcome {
+                    id: "none".to_string(),
+                    verdict: Verdict::NotExercised,
+                    anchors: 0,
+                    skipped: 0,
+                    pass: 0,
+                    fail: 0,
+                    inconclusive: 0,
+                    pass_already_held: 0,
+                    occurrences: Vec::new(),
+                }],
+            },
+        ],
+    };
+    let text = judge::render_verdict(&evaluation, "request", &bare_log(), &[]);
+    let value: Value = serde_json::from_str(&text).expect("verdict json");
+    let checks: Vec<&Value> = value["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .flat_map(|case| case["checks"].as_array().expect("checks").iter())
+        .collect();
+    assert_eq!(checks.len(), 3, "one check in each case");
+    for check in &checks {
+        assert!(
+            check.get("pass_already_held").is_some(),
+            "every check writes pass_already_held\n{text}"
+        );
+    }
+    assert_eq!(checks[0]["pass_already_held"], 1);
+    assert_eq!(checks[1]["pass_already_held"], 0);
+    assert_eq!(checks[2]["pass_already_held"], 0);
+    assert_eq!(checks[0]["occurrences"][0]["already_held"], true);
+    assert!(
+        checks[1]["occurrences"][0].get("already_held").is_none(),
+        "a false occurrence omits already_held\n{text}"
+    );
+    assert!(
+        checks[1]["occurrences"][1].get("already_held").is_none(),
+        "a false occurrence omits already_held\n{text}"
+    );
+
+    // The count sits on the line immediately after `inconclusive`, 0 included.
+    assert!(
+        text.contains("\"inconclusive\": 0,\n          \"pass_already_held\": 1,"),
+        "pass_already_held does not follow inconclusive\n{text}"
+    );
+    assert!(
+        text.contains("\"inconclusive\": 0,\n          \"pass_already_held\": 0,"),
+        "a zero count is still written, right after inconclusive\n{text}"
+    );
 }

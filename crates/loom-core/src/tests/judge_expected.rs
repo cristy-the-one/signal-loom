@@ -70,6 +70,9 @@ fn occurrence_json(occurrence: &Occurrence) -> Value {
             }
         }
     }
+    if occurrence.already_held {
+        fields.insert("already_held".to_string(), json!(true));
+    }
     Value::Object(fields)
 }
 
@@ -82,6 +85,7 @@ fn check_json(check: &CheckOutcome) -> Value {
         "pass": check.pass,
         "fail": check.fail,
         "inconclusive": check.inconclusive,
+        "pass_already_held": check.pass_already_held,
         "occurrences": check.occurrences.iter().map(occurrence_json).collect::<Vec<_>>(),
     })
 }

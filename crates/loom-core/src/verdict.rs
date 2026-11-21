@@ -212,6 +212,13 @@ fn render_check(indent: usize, check: &CheckOutcome) -> String {
         check.inconclusive,
         true,
     );
+    kv_u64(
+        &mut out,
+        indent + 1,
+        "pass_already_held",
+        check.pass_already_held,
+        true,
+    );
     // A comma follows the list only when `occurrences_truncated` is next.
     kv_raw(
         &mut out,
@@ -231,19 +238,21 @@ fn render_check(indent: usize, check: &CheckOutcome) -> String {
 fn render_occurrence(indent: usize, occurrence: &Occurrence) -> String {
     match &occurrence.evidence {
         Evidence::Sample { t_us, value } => format!(
-            "{{\"anchor_us\": {}, \"verdict\": {}, \"t_us\": {t_us}, \"value\": {}}}",
+            "{{\"anchor_us\": {}, \"verdict\": {}, \"t_us\": {t_us}, \"value\": {}{}}}",
             occurrence.anchor_us,
             json_string(verdict_name(occurrence.verdict)),
             json_number(*value),
+            already_held_suffix(occurrence.already_held),
         ),
         Evidence::Reason {
             reason,
             event: None,
         } => format!(
-            "{{\"anchor_us\": {}, \"verdict\": {}, \"reason\": {}}}",
+            "{{\"anchor_us\": {}, \"verdict\": {}, \"reason\": {}{}}}",
             occurrence.anchor_us,
             json_string(verdict_name(occurrence.verdict)),
             json_string(reason_name(*reason)),
+            already_held_suffix(occurrence.already_held),
         ),
         Evidence::Reason {
             reason,
@@ -269,9 +278,27 @@ fn render_occurrence(indent: usize, occurrence: &Occurrence) -> String {
                 true,
             );
             kv_str(&mut out, indent + 1, "reason", reason_name(*reason), true);
-            kv_raw(&mut out, indent + 1, "event", &event, false);
+            kv_raw(
+                &mut out,
+                indent + 1,
+                "event",
+                &event,
+                occurrence.already_held,
+            );
+            if occurrence.already_held {
+                kv_bool(&mut out, indent + 1, "already_held", true, false);
+            }
             close(out, indent)
         }
+    }
+}
+
+/// `already_held` is written only when true, so a false occurrence is unchanged.
+fn already_held_suffix(already_held: bool) -> &'static str {
+    if already_held {
+        ", \"already_held\": true"
+    } else {
+        ""
     }
 }
 
