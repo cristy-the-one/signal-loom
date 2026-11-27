@@ -170,6 +170,7 @@ impl IndexedLog {
             msg_index: built.msg_index,
             message_names: built.message_names,
             seen_ids: built.seen_ids,
+            sha256: std::sync::OnceLock::new(),
         })
     }
 }

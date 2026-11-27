@@ -331,7 +331,8 @@ impl Session {
     }
 
     /// Evaluate a `loom-judge/1` request JSON string against the already-open
-    /// log and signal map without re-indexing or re-hashing the recording,
+    /// log and signal map without re-indexing it (the log's sha256 is read
+    /// once, on the first call, and cached with the log),
     /// returning the rendered `loom-verdict/1` JSON document.
     pub fn judge_request(&self, request_json: &str) -> Result<String> {
         let log = self.log()?;
@@ -352,9 +353,11 @@ impl Session {
         } else {
             self.maps.sources().to_vec()
         };
+        // The verdict names its recording by hash (plan GJ-04 records it per
+        // run). The first judge call reads the file once; later ones are free.
         let verdict_log = crate::judge::VerdictLog {
             file: self.log_label.clone(),
-            sha256: String::new(),
+            sha256: log.sha256_hex()?,
             t_start_us: log.t_start_us(),
             t_end_us: log.t_end_us(),
             frames: log.frame_count(),
