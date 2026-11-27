@@ -16,7 +16,7 @@ pub use crate::index::evaluate::{
     CaseOutcome, CheckOutcome, Evaluation, EventKind, Evidence, Occurrence, Reason, Verdict,
 };
 use crate::index::IndexedLog;
-use crate::map::{MappedSignal, SignalMap, TimeoutFactor};
+use crate::map::{unknown_pair_message, MappedSignal, SignalMap, TimeoutFactor};
 pub use crate::verdict::{count_cases, render_verdict, Counts, VerdictDbc, VerdictLog};
 
 const FORMAT: &str = "loom-judge/1";
@@ -514,9 +514,10 @@ fn resolve(
     match found.as_slice() {
         [one] => reject_bad_label(&[*one], message, signal, compared, problems),
         [] => {
+            let base = unknown_pair_message(message, signal);
             let text = match channel {
-                Some(ch) => format!("unknown signal pair ({message}, {signal}) on channel {ch}"),
-                None => format!("unknown signal pair ({message}, {signal})"),
+                Some(ch) => format!("{base} on channel {ch}"),
+                None => base,
             };
             problems.push(text);
         }
@@ -533,13 +534,8 @@ fn pairs_on<'a>(
     signal: &str,
     channel: Option<i64>,
 ) -> Vec<&'a MappedSignal> {
-    dbc.signals
-        .iter()
-        .filter(|candidate| {
-            candidate.message_name == message
-                && candidate.defined_name == signal
-                && channel.is_none_or(|ch| i64::from(candidate.channel) == ch)
-        })
+    dbc.pairs(message, signal)
+        .filter(|candidate| channel.is_none_or(|ch| i64::from(candidate.channel) == ch))
         .collect()
 }
 

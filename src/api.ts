@@ -9,7 +9,6 @@ import type {
   IndexStatus,
   Summary,
   ThresholdTrigger,
-  ValueRead,
   WindowStats,
 } from "./types";
 
@@ -237,16 +236,6 @@ export function step(tUs: number, direction: "next" | "prev"): Promise<FrameHit 
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ tUs: t, direction }),
-  });
-}
-
-export function valuesAt(tUs: number): Promise<ValueRead[]> {
-  const t = us(tUs);
-  if (inTauri()) return invoke<ValueRead[]>("values_at", { tUs: t });
-  return http<ValueRead[]>("/api/values", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ tUs: t }),
   });
 }
 

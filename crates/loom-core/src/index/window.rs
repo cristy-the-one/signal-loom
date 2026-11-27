@@ -1,6 +1,6 @@
 use super::query::Series;
 use super::replay::{Phase, Step};
-use super::signal::{decode_one, SignalFilter};
+use super::signal::SignalFilter;
 use super::time::ordered_range;
 use super::IndexedLog;
 use crate::error::{Error, Result};
@@ -73,7 +73,7 @@ impl IndexedLog {
         let mut last = None;
         self.scan_window(t0, t1, |phase, rec| {
             if phase == Phase::Window {
-                if let Some(value) = decode_one(&self.signals, &self.msg_index, rec, idx) {
+                if let Some(value) = self.decode_one(rec, idx) {
                     count += 1;
                     sum += value;
                     min = min.min(value);

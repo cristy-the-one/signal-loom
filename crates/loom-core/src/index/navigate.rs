@@ -1,5 +1,4 @@
 use super::query::HeldValue;
-use super::signal::decode_one;
 use super::IndexedLog;
 use crate::error::Result;
 use crate::project::TriggerOp;
@@ -18,7 +17,7 @@ pub struct FrameHit {
 
 impl IndexedLog {
     #[cfg(test)]
-    pub fn step_frame(&self, t_us: u64, next: bool) -> Result<Option<FrameHit>> {
+    pub(crate) fn step_frame(&self, t_us: u64, next: bool) -> Result<Option<FrameHit>> {
         Ok(self.step_frame_with_values(t_us, next)?.map(|(hit, _)| hit))
     }
 
@@ -93,7 +92,7 @@ impl IndexedLog {
         let mut events = Vec::new();
         let mut armed = true;
         self.scan_from(0, |rec| {
-            if let Some(value) = decode_one(&self.signals, &self.msg_index, rec, idx) {
+            if let Some(value) = self.decode_one(rec, idx) {
                 let hot = op.holds(value, level);
                 if hot && armed {
                     events.push((rec.t_us, label.clone()));

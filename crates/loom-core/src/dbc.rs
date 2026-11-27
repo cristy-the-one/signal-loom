@@ -343,7 +343,13 @@ fn value_table(line: &str) -> Option<ValueTable> {
         .trim();
     let (id_tok, after_id) = rest.split_once(char::is_whitespace)?;
     let id = normalize_id(parse_int(id_tok).ok()?);
-    let (name_tok, tail) = after_id.trim_start().split_once(char::is_whitespace)?;
+    let after_id = after_id.trim_start();
+    let (name_tok, tail) = after_id
+        .split_once(char::is_whitespace)
+        .unwrap_or((after_id, ""));
+    if name_tok.is_empty() {
+        return None;
+    }
     let name = name_tok.to_string();
     let mut rows = Vec::new();
     let mut chars = tail.chars().peekable();
@@ -381,9 +387,6 @@ fn value_table(line: &str) -> Option<ValueTable> {
         if rows.len() < 64 {
             rows.push((value, label));
         }
-    }
-    if rows.is_empty() {
-        return None;
     }
     Some(ValueTable { id, name, rows })
 }
@@ -545,16 +548,20 @@ BO_ 2566848528 Ext: 8 ECU2
             "\
 BO_ 256 Msg: 8 ECU
  SG_ x : 0|8@1+\t(1,0) [0|255] \"\" ECU
+ SG_ y : 8|8@1+ (1,0) [0|255] \"\" ECU
 VAL_ 0x100 x 0 \"OFF\" 1 \"ON\" ;
+VAL_ 256 y 0 \"A\" ;
+VAL_ 256 y ;
 ",
         )
         .unwrap();
-        assert_eq!(map.signals.len(), 1);
+        assert_eq!(map.signals.len(), 2);
         assert_eq!(map.signals[0].name, "x");
         assert_eq!(
             map.signals[0].table,
             vec![(0, "OFF".to_string()), (1, "ON".to_string())]
         );
+        assert!(map.signals[1].table.is_empty());
     }
 
     fn hex_payload(text: &str) -> [u8; 8] {

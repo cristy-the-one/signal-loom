@@ -227,39 +227,36 @@ impl IndexedLog {
             RecKind::Event { .. } => {}
         }
     }
-}
 
-/// Decode one signal from `rec`, skipping every other message and signal.
-pub(super) fn decode_one(
-    signals: &[SignalMeta],
-    msg_index: &HashMap<u32, MessageSignals>,
-    rec: &Rec,
-    idx: usize,
-) -> Option<f64> {
-    let signal = &signals[idx];
-    match &rec.kind {
-        RecKind::Frame {
-            id,
-            dlc,
-            data,
-            channel,
-            ..
-        } => {
-            if signal.message_id != Some(*id) {
-                return None;
-            }
-            let spec = carried_spec(signal, *channel, *dlc)?;
-            if let Some(expected) = signal.mux_value {
-                let switch = msg_index.get(id).and_then(|group| {
-                    mux_switch_value(signals, &group.indices, *channel, *dlc, data)
-                });
-                if switch != Some(expected) {
+    /// Decode one signal from `rec`, skipping every other message and signal.
+    pub(super) fn decode_one(&self, rec: &Rec, idx: usize) -> Option<f64> {
+        let signal = &self.signals[idx];
+        match &rec.kind {
+            RecKind::Frame {
+                id,
+                dlc,
+                data,
+                channel,
+                ..
+            } => {
+                if signal.message_id != Some(*id) {
                     return None;
                 }
+                let spec = carried_spec(signal, *channel, *dlc)?;
+                if let Some(expected) = signal.mux_value {
+                    let switch = self.msg_index.get(id).and_then(|group| {
+                        mux_switch_value(&self.signals, &group.indices, *channel, *dlc, data)
+                    });
+                    if switch != Some(expected) {
+                        return None;
+                    }
+                }
+                Some(spec.decode(data))
             }
-            Some(spec.decode(data))
+            RecKind::Sample { name, value, .. } => {
+                (self.resolve_signal(name) == Some(idx)).then_some(*value)
+            }
+            RecKind::Event { .. } => None,
         }
-        RecKind::Sample { name, value, .. } => (signal.name == *name).then_some(*value),
-        RecKind::Event { .. } => None,
     }
 }

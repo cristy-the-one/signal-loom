@@ -119,24 +119,27 @@ impl IndexedLog {
             if phase == Phase::Lead {
                 return true;
             }
-            if matches!(rec.kind, RecKind::Sample { .. }) {
-                return true;
-            }
-            if rows == cap {
-                truncated = true;
-                return false;
-            }
             match &rec.kind {
+                RecKind::Sample { .. } => true,
                 RecKind::Frame { id, dlc, data, .. } => {
+                    if rows == cap {
+                        truncated = true;
+                        return false;
+                    }
                     let _ = writeln!(out, "F {} {id:X} {}", rec.t_us, hex_payload(data, *dlc));
+                    rows += 1;
+                    true
                 }
                 RecKind::Event { label } => {
+                    if rows == cap {
+                        truncated = true;
+                        return false;
+                    }
                     let _ = writeln!(out, "E {} {label}", rec.t_us);
+                    rows += 1;
+                    true
                 }
-                RecKind::Sample { .. } => unreachable!(),
             }
-            rows += 1;
-            true
         })?;
         if rows == 0 {
             return Err(Error::invalid("that window has no frames to export"));

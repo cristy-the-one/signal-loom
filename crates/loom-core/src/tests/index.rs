@@ -169,3 +169,43 @@ fn streams_a_large_log_with_bounded_checkpoints() {
     let hit = log.step_frame(0, true).unwrap().unwrap();
     assert!(hit.t_us > 0);
 }
+
+#[test]
+fn duplicate_signal_names_fill_every_slot_in_query_samples_and_export() {
+    let text = "SLOGv1\nF 0 1A0 800C000000000000\nF 10000 1A0 0019000000000000\n";
+    let log = IndexedLog::open_bytes(text.as_bytes().to_vec(), Some(&tiny_map())).unwrap();
+    let names = vec!["EngineRPM".to_string(), "EngineRPM".to_string()];
+
+    let queried = log
+        .query(&crate::index::QueryWindow {
+            t0_us: 0,
+            t1_us: 10_000,
+            signals: names.clone(),
+            max_points: 100,
+        })
+        .unwrap();
+    assert_eq!(queried.len(), 2);
+    assert_eq!(queried[0].points, queried[1].points);
+    assert_eq!(queried[0].points.len(), 2);
+
+    let sampled = log.samples(&names, 0, 10_000).unwrap();
+    assert_eq!(sampled.len(), 2);
+    assert_eq!(sampled[0].points, sampled[1].points);
+    assert_eq!(sampled[0].points, vec![(0, 800.0), (10_000, 1600.0)]);
+
+    let csv = log.export_csv(&names, 0, 10_000).unwrap();
+    assert_eq!(
+        csv.text,
+        "t_us,EngineRPM,EngineRPM\n0,800.000000,800.000000\n10000,1600.000000,1600.000000\n"
+    );
+
+    // Also verify Sample records (decoded CSV log without a CAN map).
+    let decoded = "t_us,signal,value\n0,Speed,12.5\n5000,Speed,25.0\n";
+    let sample_log = IndexedLog::open_bytes(decoded.as_bytes().to_vec(), None).unwrap();
+    let dup_speed = vec!["Speed".to_string(), "Speed".to_string()];
+    let sample_series = sample_log.samples(&dup_speed, 0, 5_000).unwrap();
+    assert_eq!(sample_series[0].points, sample_series[1].points);
+    assert_eq!(sample_series[0].points, vec![(0, 12.5), (5_000, 25.0)]);
+    let stats = sample_log.stats("Speed", 0, 5_000).unwrap();
+    assert_eq!(stats.count, 2);
+}
