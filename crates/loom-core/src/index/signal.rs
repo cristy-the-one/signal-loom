@@ -49,6 +49,7 @@ impl SignalFilter {
 #[derive(Clone)]
 pub(super) struct SignalMeta {
     pub(super) name: String,
+    pub(super) defined_name: Option<String>,
     pub(super) unit: String,
     pub(super) message_name: String,
     pub(super) message_id: Option<u32>,
@@ -65,23 +66,30 @@ pub(super) struct SignalMeta {
 #[derive(Debug, Clone)]
 pub struct SignalInfo {
     pub name: String,
+    pub defined_name: Option<String>,
     pub unit: String,
     pub message_name: String,
     pub message_id: Option<u32>,
+    pub channel: u8,
     pub min: Option<f64>,
     pub max: Option<f64>,
     /// The decoder's scale factor: the smallest change the value can show.
     pub step: Option<f64>,
     pub from_map: bool,
+    pub table: Vec<(i64, String)>,
 }
 
 impl SignalMeta {
     fn info(&self) -> SignalInfo {
+        let mut table = self.table.clone();
+        table.sort_by_key(|(raw, _)| *raw);
         SignalInfo {
             name: self.name.clone(),
+            defined_name: self.defined_name.clone(),
             unit: self.unit.clone(),
             message_name: self.message_name.clone(),
             message_id: self.message_id,
+            channel: self.channel,
             min: self.min,
             max: self.max,
             step: self
@@ -89,6 +97,7 @@ impl SignalMeta {
                 .map(|spec| spec.factor.abs())
                 .filter(|step| *step > 0.0),
             from_map: self.spec.is_some(),
+            table,
         }
     }
 

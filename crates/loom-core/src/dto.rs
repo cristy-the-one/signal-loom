@@ -35,15 +35,32 @@ pub struct MapMatch {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SignalLabelDto {
+    pub value: i64,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SignalDto {
     pub name: String,
+    /// DBC `SG_` name before disambiguation (`Name@<id>` / `Name@<ch>`). Set
+    /// whenever the signal comes from a map or DBC so `loom-judge/1` pairs can
+    /// be constructed directly from `/api/summary`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defined_name: Option<String>,
     pub unit: String,
     pub message_name: String,
     pub message_id: Option<u32>,
+    /// CAN channel (`0` = applies on every channel).
+    pub channel: u8,
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub step: Option<f64>,
     pub from_map: bool,
+    /// `VAL_` enum labels, sorted by raw value, omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<SignalLabelDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]

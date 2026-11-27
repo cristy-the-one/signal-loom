@@ -11,6 +11,7 @@ mod decode;
 mod dto;
 mod error;
 mod index;
+pub mod inspect;
 mod jobs;
 mod json_number;
 pub mod judge;
@@ -27,7 +28,8 @@ mod tests;
 pub use dbc_dump::dump_dbc;
 pub use dto::{
     deserialize_us, BusLoad, EventDto, FrameDto, IndexStatus, MapMatch, OpenedProject, PointDto,
-    ProjectOpen, Query, SeriesDto, SignalDto, StepDir, Summary, ValueDto, WindowStats,
+    ProjectOpen, Query, SeriesDto, SignalDto, SignalLabelDto, StepDir, Summary, ValueDto,
+    WindowStats,
 };
 pub use error::{Error, ErrorBody, ErrorKind, Result};
 pub use index::{Export, IndexControl};

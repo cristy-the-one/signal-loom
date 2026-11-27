@@ -15,10 +15,12 @@ import { bindMarks } from "./panels/marks";
 import { bindSignals } from "./panels/signals";
 import { bindTabs } from "./panels/tabs";
 import { bindPlotView, paint } from "./plot-view";
-import { adoptSummary } from "./project";
+import { errText } from "./format";
+import { adoptSummary, applyProject } from "./project";
 import { bindRenderers, draw } from "./state";
-import { paintBusy, withBusy } from "./status";
+import { followIndex, paintBusy, setError, withBusy } from "./status";
 import { bindTransport } from "./transport";
+import type { IndexStatus } from "./types";
 import "./styles.css";
 
 function bind(): void {
@@ -47,6 +49,20 @@ async function waitForEngine(): Promise<void> {
   );
 }
 
+function adoptStartupResult(
+  summary: import("./types").Summary,
+  project?: { project: import("./types").ProjectFile; warnings: string[]; compareOpened: boolean },
+): void {
+  if (project) {
+    applyProject(
+      { project: project.project, warnings: project.warnings, compareOpened: project.compareOpened, summary },
+      null,
+    );
+  } else {
+    adoptSummary(summary, "fresh");
+  }
+}
+
 async function boot(): Promise<void> {
   bind();
   draw();
@@ -54,11 +70,38 @@ async function boot(): Promise<void> {
     await loadSample();
     return;
   }
+  let initial: IndexStatus | null = null;
   await withBusy("Waiting for the local engine", async () => {
     await waitForEngine();
+    initial = await api.indexProgress();
+    if (initial.running || initial.done) return;
+    try {
+      adoptSummary(await api.summary(), "fresh");
+      return;
+    } catch (err) {
+      if (!(err instanceof api.ApiError && err.kind === "not_found")) throw err;
+    }
     paintBusy("Indexing cluster sample");
     adoptSummary(await api.openSample(), "fresh");
   });
+  const tick = initial as IndexStatus | null;
+  if (!tick) return;
+  if (tick.running) {
+    try {
+      const result = await followIndex("Indexing recording", tick);
+      adoptStartupResult(result.summary, result.project);
+    } catch (err) {
+      setError(errText(err), "action");
+    }
+    return;
+  }
+  if (tick.error) {
+    setError(tick.error, "action");
+    return;
+  }
+  if (tick.summary) {
+    adoptStartupResult(tick.summary, tick.project);
+  }
 }
 
 void boot();

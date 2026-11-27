@@ -42,13 +42,16 @@ export interface IndexStatus {
 
 export interface SignalInfo {
   name: string;
+  definedName?: string;
   unit: string;
   messageName: string;
   messageId: number | null;
+  channel?: number;
   min: number | null;
   max: number | null;
   step: number | null;
   fromMap: boolean;
+  labels?: { value: number; label: string }[];
 }
 
 export interface LogEvent {

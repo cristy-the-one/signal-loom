@@ -112,6 +112,23 @@ impl IndexedLog {
         )
     }
 
+    pub(crate) fn open_path_tapped(
+        path: &Path,
+        map: Option<&SignalMap>,
+        timeout: TimeoutFactor,
+        tap: build::FrameTap<'_>,
+    ) -> Result<Self> {
+        let format = sniff_path(path)?;
+        Self::build_with_tap(
+            Source::Path(path.to_path_buf()),
+            format,
+            map,
+            timeout,
+            None,
+            Some(tap),
+        )
+    }
+
     pub fn open_bytes_timed(
         bytes: Vec<u8>,
         map: Option<&SignalMap>,

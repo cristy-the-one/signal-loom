@@ -12,7 +12,5 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
 sha2 = "0.10"
+thiserror = { workspace = true }

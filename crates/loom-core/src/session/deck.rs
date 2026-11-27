@@ -75,13 +75,16 @@ impl Deck {
     pub(super) fn signals(&self) -> impl Iterator<Item = SignalDto> + '_ {
         self.math.iter().map(|channel| SignalDto {
             name: channel.name.clone(),
+            defined_name: None,
             unit: channel.unit.clone(),
             message_name: "Math".to_string(),
             message_id: None,
+            channel: 0,
             min: None,
             max: None,
             step: None,
             from_map: false,
+            labels: Vec::new(),
         })
     }
 

@@ -26,6 +26,7 @@ pub struct VerdictLog {
 }
 
 /// One DBC named in the verdict. `file` is a base name.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerdictDbc {
     pub file: String,
     pub sha256: String,

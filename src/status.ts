@@ -2,7 +2,7 @@ import * as api from "./api";
 import { els } from "./dom";
 import { errText, formatCount } from "./format";
 import { state } from "./state";
-import type { ProjectFile, ProjectOpen, Summary } from "./types";
+import type { IndexStatus, ProjectFile, ProjectOpen, Summary } from "./types";
 
 /** Who raised a banner message; only the owner's later success clears it. */
 export type ErrorOwner = "query" | "project" | "action";
@@ -56,13 +56,27 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** What a finished background job hands over: the summary, and the project when the job opened one. */
-interface IndexResult {
+export interface IndexResult {
   summary: Summary;
   project?: { project: ProjectFile; warnings: string[]; compareOpened: boolean };
 }
 
+function paintProgress(label: string, tick: IndexStatus, stop: boolean): void {
+  const pct = tick.bytesTotal
+    ? Math.min(99, Math.round((100 * tick.bytesDone) / tick.bytesTotal))
+    : 0;
+  els.veilFill.style.width = `${pct}%`;
+  els.veilLabel.textContent = stop ? "Cancelling" : `${label} · ${pct}%`;
+  const skipped = tick.skipped ? ` · ${formatCount(tick.skipped)} skipped` : "";
+  els.veilDetail.textContent = `${formatCount(tick.frames)} frames${skipped}`;
+}
+
 /** Runs a background job behind the veil, with progress and a cancel button, until its result is ready. */
-async function runIndex(label: string, start: () => Promise<void>): Promise<IndexResult> {
+async function runIndex(
+  label: string,
+  start: () => Promise<void>,
+  firstTick?: IndexStatus,
+): Promise<IndexResult> {
   state.busy += 1;
   paintBusy(label);
   els.veilCancel.hidden = false;
@@ -75,18 +89,16 @@ async function runIndex(label: string, start: () => Promise<void>): Promise<Inde
   els.veilCancel.addEventListener("click", onCancel);
   try {
     await start();
+    if (firstTick) {
+      paintProgress(label, firstTick, stop);
+      await sleep(80);
+    }
     for (;;) {
       const tick = await api.indexProgress();
       if (tick.error) throw new api.ApiError(tick.errorKind ?? "internal", tick.error);
       if (tick.done && tick.summary) return { summary: tick.summary, project: tick.project };
       if (tick.idle && !tick.done) throw new api.ApiError("internal", "indexing did not start");
-      const pct = tick.bytesTotal
-        ? Math.min(99, Math.round((100 * tick.bytesDone) / tick.bytesTotal))
-        : 0;
-      els.veilFill.style.width = `${pct}%`;
-      els.veilLabel.textContent = stop ? "Cancelling" : `${label} · ${pct}%`;
-      const skipped = tick.skipped ? ` · ${formatCount(tick.skipped)} skipped` : "";
-      els.veilDetail.textContent = `${formatCount(tick.frames)} frames${skipped}`;
+      paintProgress(label, tick, stop);
       await sleep(80);
     }
   } finally {
@@ -94,6 +106,11 @@ async function runIndex(label: string, start: () => Promise<void>): Promise<Inde
     state.busy = Math.max(0, state.busy - 1);
     paintBusy();
   }
+}
+
+/** Follows an already-running background job (such as a `loom-serve --log` startup scan) behind the veil. */
+export function followIndex(label: string, firstTick: IndexStatus): Promise<IndexResult> {
+  return runIndex(label, async () => undefined, firstTick);
 }
 
 /** Runs a background index behind the veil until its summary is ready. */

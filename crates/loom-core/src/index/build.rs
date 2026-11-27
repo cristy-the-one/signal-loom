@@ -16,10 +16,10 @@ use std::collections::{HashMap, HashSet};
 const MAX_EVENTS: usize = 5_000;
 const MAX_WARNINGS: usize = 32;
 
-/// Optional observer fed every accepted `(t_us, id, channel, decoded)` frame
-/// during `scan_framed` so `loom-judge` can collect its series and cyclic frame
-/// timestamps in the same pass that builds the index.
-pub(super) type FrameTap<'a> = &'a mut dyn FnMut(u64, u32, u8, &[(usize, f64)]);
+/// Optional observer fed every accepted `(t_us, id, channel, extended, dlc, decoded)`
+/// frame during `scan_framed` so `loom-judge` and `inspect_log` can collect
+/// per-frame data in the same pass that builds the index.
+pub(crate) type FrameTap<'a> = &'a mut dyn FnMut(u64, u32, u8, bool, u8, &[(usize, f64)]);
 
 pub(super) struct Built {
     pub(super) hints: ScanHints,
@@ -95,6 +95,7 @@ impl Built {
                     .or_insert_with(|| mapped.message_name.clone());
                 signals.push(SignalMeta {
                     name: mapped.name.clone(),
+                    defined_name: Some(mapped.defined_name.clone()),
                     unit: mapped.unit.clone(),
                     message_name: mapped.message_name.clone(),
                     message_id: Some(mapped.message_id),
@@ -267,7 +268,7 @@ fn scan_framed(
                 dlc,
                 data,
                 channel,
-                ..
+                extended,
             } => {
                 if rec.starts_container || pass.built.frame_count.is_multiple_of(pass.stride) {
                     pass.checkpoint(rec);
@@ -289,7 +290,7 @@ fn scan_framed(
                     pass.built.spans.observe_last(idx, rec.t_us, value);
                 }
                 if let Some(tap) = tap.as_deref_mut() {
-                    tap(rec.t_us, *id, *channel, &pending);
+                    tap(rec.t_us, *id, *channel, *extended, *dlc, &pending);
                 }
                 watch.note(
                     &mut pass.built,
@@ -353,6 +354,7 @@ fn ensure_signal(built: &mut Built, name: &str, unit: &str) -> usize {
     built.name_index.insert(name.to_string(), idx);
     built.signals.push(SignalMeta {
         name: name.to_string(),
+        defined_name: None,
         unit: unit.to_string(),
         message_name: "decoded".into(),
         message_id: None,
