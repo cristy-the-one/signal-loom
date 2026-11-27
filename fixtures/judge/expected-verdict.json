@@ -1,6 +1,6 @@
 {
   "format": "loom-verdict/1",
-  "tool": "loom-judge 0.2.0",
+  "tool": "loom-judge 0.3.0",
   "request_sha256": "0df2dfbe33d8ef9922cd3d84c1eb0b90e7493003dd428ee762cea8a787a78bf0",
   "log": {
     "file": "brake.asc",

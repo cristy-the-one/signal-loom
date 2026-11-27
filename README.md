@@ -191,6 +191,6 @@ cargo check -p signal-loom
 
 ## Installers
 
-`.github/workflows/release.yml` builds unsigned installers on `workflow_dispatch` and on `v*` tags. Windows is an NSIS setup (`Signal Loom_0.2.0_x64-setup.exe` at the current version). Linux builds a `.deb` and an AppImage. macOS builds two dmgs, Apple silicon and Intel, after installing that job's Rust target on the Rust 1.96.0 toolchain pinned in `rust-toolchain.toml`. The installer name and wizard use the product name **Signal Loom**, with `src-tauri/icons/icon.ico` (Windows) and `icon.icns` (macOS).
+`.github/workflows/release.yml` builds unsigned installers on `workflow_dispatch` and on `v*` tags. Windows is an NSIS setup (`Signal Loom_0.3.0_x64-setup.exe` at the current version). Linux builds a `.deb` and an AppImage. macOS builds two dmgs, Apple silicon and Intel, after installing that job's Rust target on the Rust 1.96.0 toolchain pinned in `rust-toolchain.toml`. The installer name and wizard use the product name **Signal Loom**, with `src-tauri/icons/icon.ico` (Windows) and `icon.icns` (macOS).
 
 This repository (`cristy-the-one/signal-loom`) is the main copy of Signal Loom. GitHub Actions runs CI and attaches the unsigned installers, including the Windows `x64-setup.exe`, to a draft GitHub Release. The Origin repository `marius-cristian/signal-loom` is the archived original and is no longer updated.
