@@ -7,6 +7,7 @@ import { activeView, baseName, colorFor, compareName, isCompareName, labelForVal
 import { renderLegend } from "./panels/legend";
 import { syncEventSelection } from "./panels/events";
 import { drawPlot, formatHover, heldValue, type PlotLane, type Trace } from "./plot";
+import { mathRange } from "./query";
 import { renderTransport } from "./readout";
 import { draw, state } from "./state";
 import { drawTimeline, type TimelineMark } from "./timeline";
@@ -39,8 +40,9 @@ function makeRawTrace(name: string, byName: Map<string, { points: { t: number; v
   const series = byName.get(name);
   const points = series?.points ?? [];
   const info = signalNamed(base);
-  let min = info?.min ?? null;
-  let max = info?.max ?? null;
+  const whole = info?.min == null ? mathRange(base) : null;
+  let min = info?.min ?? whole?.min ?? null;
+  let max = info?.max ?? whole?.max ?? null;
   if (min == null || max == null || max <= min) {
     const scalePoints = points.length ? points : (byName.get(base)?.points ?? []);
     min = scalePoints.reduce((lo, point) => Math.min(lo, point.v), Infinity);
@@ -50,7 +52,15 @@ function makeRawTrace(name: string, byName: Map<string, { points: { t: number; v
       max = 1;
     }
   }
-  return { name, color: colorFor(name), points, min, max, dashed: isCompareName(name) };
+  return {
+    name,
+    color: colorFor(name),
+    points,
+    min,
+    max,
+    dashed: isCompareName(name),
+    endT: state.seriesRange?.t1,
+  };
 }
 
 /** Build tracks and traces according to `state.laneMode` (`overlay` / `split` / `grouped`). */

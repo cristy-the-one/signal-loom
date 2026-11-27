@@ -33,6 +33,8 @@ interface State {
   rate: number;
   busy: number;
   series: Series[];
+  /** The stretch of the log `series` covers; traces are not drawn past it. */
+  seriesRange: View | null;
   view: View;
   /** Explicit camera center when panned/zoomed independently of the playhead; null tracks playhead. */
   viewCenter: number | null;
@@ -79,6 +81,7 @@ export const state: State = {
   rate: 1,
   busy: 0,
   series: [],
+  seriesRange: null,
   view: { t0: 0, t1: 1 },
   viewCenter: null,
   boxZoom: null,
