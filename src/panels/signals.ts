@@ -7,7 +7,8 @@ import { draw, state } from "../state";
 import type { SignalInfo, Summary } from "../types";
 import { createVirtualList, type VirtualList } from "../virtual-list";
 
-const SIG_ROW_HEIGHT = 34;
+/** Must match `.sig { height }` in styles.css. */
+const SIG_ROW_HEIGHT = 38;
 
 let sigVirtual: VirtualList<SignalInfo> | null = null;
 let cachedSummary: Summary | null = null;

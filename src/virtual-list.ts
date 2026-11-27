@@ -8,8 +8,8 @@ const VIRTUAL_THRESHOLD = 100;
 const OVERSCAN = 8;
 
 export interface VirtualList<T> {
-  /** Replace the backing items and repaint the visible slice. */
-  setItems(items: readonly T[], emptyText?: string): void;
+  /** Replace the backing items and repaint the visible slice. `footerText`, when set, follows the last row. */
+  setItems(items: readonly T[], emptyText?: string, footerText?: string): void;
   /** Re-run row state updates on currently mounted rows (e.g. selection / checkbox sync). */
   refresh(): void;
   /** Scroll just enough so `index` is inside the visible viewport. */
@@ -24,6 +24,7 @@ export function createVirtualList<T>(
 ): VirtualList<T> {
   let items: readonly T[] = [];
   let emptyMessage = "";
+  let footerMessage = "";
   let mountedStart = -1;
   let mountedEnd = -1;
   let mountedNodes: Map<number, HTMLElement> = new Map();
@@ -33,6 +34,15 @@ export function createVirtualList<T>(
   const bottomSpacer = document.createElement("div");
   topSpacer.style.flex = "none";
   bottomSpacer.style.flex = "none";
+  const footer = document.createElement("p");
+  footer.className = "empty-note";
+
+  /** The footer note, or nothing; it sits after the bottom spacer so it is reached at the end. */
+  function footerNodes(): HTMLElement[] {
+    if (!footerMessage) return [];
+    footer.textContent = footerMessage;
+    return [footer];
+  }
 
   function viewportHeight(): number {
     return container.clientHeight || 360;
@@ -65,6 +75,7 @@ export function createVirtualList<T>(
         }
         mountedStart = 0;
         mountedEnd = items.length;
+        frag.append(...footerNodes());
         container.replaceChildren(frag);
       } else if (syncRow) {
         for (const [idx, el] of mountedNodes) {
@@ -102,7 +113,7 @@ export function createVirtualList<T>(
       frag.append(el);
     }
 
-    frag.append(bottomSpacer);
+    frag.append(bottomSpacer, ...footerNodes());
     mountedNodes = nextNodes;
     mountedStart = start;
     mountedEnd = end;
@@ -122,9 +133,10 @@ export function createVirtualList<T>(
   );
 
   return {
-    setItems(next: readonly T[], emptyText = ""): void {
+    setItems(next: readonly T[], emptyText = "", footerText = ""): void {
       items = next;
       emptyMessage = emptyText;
+      footerMessage = footerText;
       if (container.scrollTop > next.length * rowHeight) {
         container.scrollTop = 0;
       }

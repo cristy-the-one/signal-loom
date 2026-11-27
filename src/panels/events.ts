@@ -6,6 +6,7 @@ import { scrubTo } from "../transport";
 import type { LogEvent } from "../types";
 import { createVirtualList, type VirtualList } from "../virtual-list";
 
+/** Must match `.event-row { height }` in styles.css. */
 const EVENT_ROW_HEIGHT = 24;
 const SELECT_TOLERANCE_US = 500;
 
@@ -71,9 +72,8 @@ export function renderEvents(): void {
   const events = state.summary?.events ?? [];
   currentEvents = events;
   lastScrolledIndex = -1;
-  const emptyText = state.summary?.eventsTruncated
-    ? "Event list truncated"
-    : "This log has no event marks";
-  virtualList().setItems(events, emptyText);
+  const truncated = state.summary?.eventsTruncated ?? false;
+  const emptyText = truncated ? "Event list truncated" : "This log has no event marks";
+  virtualList().setItems(events, emptyText, truncated ? "Event list truncated" : "");
   syncEventSelection();
 }
