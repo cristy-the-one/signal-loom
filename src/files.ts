@@ -188,17 +188,65 @@ async function ingestFile(file: File, mode: "replace" | "add" = "replace"): Prom
   });
 }
 
-async function ingestPath(path: string): Promise<void> {
+function isMapName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower.endsWith(".dbc") || lower.endsWith(".json");
+}
+
+async function ingestFiles(fileList: FileList | File[]): Promise<void> {
+  const files = Array.from(fileList);
+  if (files.length === 0) return;
+  if (files.length === 1) {
+    await ingestFile(files[0]);
+    return;
+  }
+  const project = files.find((f) => f.name.toLowerCase().endsWith(".loom"));
+  if (project) {
+    await ingestFile(project);
+    return;
+  }
+  const logs = files.filter((f) => !isMapName(f.name));
+  const maps = files.filter((f) => isMapName(f.name));
+  if (logs[0]) await ingestFile(logs[0]);
+  for (let i = 0; i < maps.length; i += 1) {
+    await ingestFile(maps[i], i === 0 ? "replace" : "add");
+  }
+}
+
+async function ingestPath(path: string, mapMode: "replace" | "add" = "replace"): Promise<void> {
   const lower = path.toLowerCase();
   if (lower.endsWith(".loom")) {
     await openProjectPath(path);
     return;
   }
   if (lower.endsWith(".dbc") || lower.endsWith(".json")) {
-    await indexInto(`Decoding ${basename(path)}`, () => api.beginMap(path), "edit");
+    if (mapMode === "add") {
+      await indexInto(`Adding ${basename(path)}`, () => api.beginAddMap(path, mapChannel()), "edit");
+    } else {
+      await indexInto(`Decoding ${basename(path)}`, () => api.beginMap(path), "edit");
+    }
     return;
   }
   await indexInto(`Indexing ${basename(path)}`, () => api.beginOpen(path), "fresh");
+}
+
+async function ingestPaths(paths: string[]): Promise<void> {
+  if (paths.length === 0) return;
+  if (paths.length === 1) {
+    await ingestPath(paths[0]);
+    return;
+  }
+  const project = paths.find((p) => p.toLowerCase().endsWith(".loom"));
+  if (project) {
+    await ingestPath(project);
+    return;
+  }
+  const logs = paths.filter((p) => !isMapName(p));
+  const maps = paths.filter((p) => isMapName(p));
+  if (logs[0]) await ingestPath(logs[0]);
+  for (let i = 0; i < maps.length; i += 1) {
+    await ingestPath(maps[i], i === 0 ? "replace" : "add");
+  }
 }
 
 export function bindFiles(): void {
@@ -229,8 +277,8 @@ export function bindFiles(): void {
     event.preventDefault();
     dragDepth = 0;
     els.drop.hidden = true;
-    const file = event.dataTransfer?.files?.[0];
-    if (file) void ingestFile(file);
+    const files = event.dataTransfer?.files;
+    if (files && files.length > 0) void ingestFiles(files);
   });
 
   if (api.inTauri()) {
@@ -240,8 +288,7 @@ export function bindFiles(): void {
         if (event.payload.type === "leave") els.drop.hidden = true;
         if (event.payload.type === "drop") {
           els.drop.hidden = true;
-          const path = event.payload.paths[0];
-          if (path) void ingestPath(path);
+          if (event.payload.paths.length > 0) void ingestPaths(event.payload.paths);
         }
       });
     });

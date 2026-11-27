@@ -85,7 +85,7 @@ python3 scripts/gen_fixture.py
 - A large file is streamed. The index keeps at most 4096 checkpoints and does not load the recording into one buffer. Opening a path shows percent, frame count, and a cancel button. A bad line or a truncated record is skipped, counted, and listed; the rest of the log still opens. Records up to 50 ms out of order, as Tx and Rx lines often are in a real capture, are kept at the previous timestamp and counted. An ASC whose time column holds whole microseconds instead of seconds is detected and read as microseconds, and tool-level `Node.Message` lines without a CAN id are left out with one note.
 - JSON signal maps and Vector `.dbc` files are decoded for real: little-endian (Intel) and big-endian (Motorola) bit layouts, signed values, factor, offset, multiplexed signals, and `VAL_` labels. A second DBC can be added on a channel. Channel 0 applies everywhere. The header shows how many of the map's messages the log carries. A map kept from the previous log that matches none of the new log's messages is set aside with a note, and a DBC that matches nothing is flagged; signals with no data are listed last and dimmed. Signals can sit anywhere in a 64-byte CAN FD payload. A signal name that repeats across messages, such as `Counter` or `CRC`, is kept as `Name@<id>`, and a signal with a broken layout is skipped and listed; the rest of the DBC still loads.
 - `.loom` projects store the log path, map path, bookmarks, playhead, span, plotted signals, math channels, triggers, notes, cursors, and an optional compare log. A math channel or trigger that does not validate is dropped with a warning when the project opens, and an out-of-range timeout is reported and the default, 2.5, is used. A save is refused if the project would not load cleanly. Saves write a temporary file and rename it over the old one, so an interrupted save keeps the old file.
-- Scrub, frame step, event step, playback, and overlay plots call that indexer. The plot keeps a hover crosshair, measurement cursors, and wheel zoom anchored on the cursor.
+- Scrub, frame step, event step, playback, and scope plots call that indexer. Switch the scope between a single **Overlay** track, **Split** per-signal tracks, and **Group** tracks (`L` or the transport toggle — auto-grouping signals by physical unit/message with a shared Y-scale, or pinning custom groups via the `T1`/`T2` legend badges). Click any legend chip to solo a signal, `Shift+drag` on the plot to box-zoom down to 1 ms, double-click to reset zoom, and drop a recording together with its `.dbc` in one gesture.
 - A cluster strip (two dials, a digit, three bars and six lamps) and a one-second bus-load strip follow the playhead. Click a gauge or lamp to put any signal in it; an assigned signal scales to its own range, and the assignments are saved with the project. Without assignments the cluster shows the sample's speed, rpm, gear, temperatures, SoC or fuel, and telltales. The timeline is a minimap of the whole drive, with an event lane coloured by severity.
 - Math channels (`WheelFL - WheelFR`, `abs`, `lp`), threshold triggers, cursor statistics, CSV and trimmed SLOGv1 export (a Save dialog on the desktop, a download in the browser preview), and a second log aligned by a time offset. An export that reaches the 500,000-row cap ends with a `#` note line, and the UI shows a notice.
 - With a DBC or map loaded, a message late by more than 2.5 cycle times (set on the Alerts tab and saved with the project), a broken counter, or a bad checksum is marked on the event lane. The checksum scheme is recognised from up to the first 16 frames: XOR, byte sum, CRC-8/SAE-J1850 or CRC-8H2F over the other bytes. A frame with a bad checksum is rejected before its counter is checked, as an ECU does.
@@ -116,11 +116,12 @@ No decode path is mocked. The browser preview uses the same `loom-core` crate ov
 | Frame step | Left / Right |
 | Event or bookmark step | Shift+Left / Shift+Right |
 | Play / pause | Space |
+| Track layout (Overlay / Split / Group) | L |
 | Bookmark the playhead | B |
 | Note at the playhead | N |
 | Measurement cursors | 1 and 2 |
-| Zoom | `[` `]` or the wheel, anchored on the cursor |
-| Pan | Alt+drag, or Shift+wheel |
+| Zoom / Box zoom | `[` `]`, wheel toward cursor, or Shift+drag |
+| Pan camera | Alt+drag, or Shift+wheel |
 | Filter signals | `/` |
 
 Transport buttons are slim on purpose.

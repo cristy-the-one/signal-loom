@@ -35,7 +35,8 @@ describe("formatHover", () => {
     expect(formatHover("Speed", null, "km/h", readout)).toBe("Speed     — km/h");
   });
 
-  it("uses the readout, including its negative-zero collapse", () => {
+  it("uses the readout, including its negative-zero collapse, and appends enum labels", () => {
     expect(formatHover("N", -0.0001, "", { decimals: 3, width: 6 })).toBe("N   0.000");
+    expect(formatHover("Gear", 3, "", { decimals: 0, width: 2 }, "3rd")).toBe("Gear   3 (3rd)");
   });
 });

@@ -76,21 +76,44 @@ export function drawTimeline(
   ctx.strokeStyle = "#1e2830";
   ctx.strokeRect(pad + 0.5, laneTop + 0.5, w - pad * 2 - 1, laneH - 1);
 
+  // Bucket events per pixel column, keeping the highest severity (`fault > warn > info`)
+  // and painting faults last so critical markers are never painted over by dense info ticks.
+  const maxPx = Math.max(1, Math.ceil(w));
+  const colRank = new Uint8Array(maxPx + 1);
+  const bookmarkXs: number[] = [];
   for (const mark of marks) {
     const x = xOf(mark.t);
     if (mark.kind === "mark") {
-      ctx.fillStyle = YELLOW;
-      ctx.beginPath();
-      ctx.moveTo(x, trackTop + 1);
-      ctx.lineTo(x - 3.5, trackTop + 7);
-      ctx.lineTo(x + 3.5, trackTop + 7);
-      ctx.closePath();
-      ctx.fill();
+      bookmarkXs.push(x);
       continue;
     }
-    const color = severityColor(mark.severity ?? "info");
-    ctx.fillStyle = color;
-    ctx.fillRect(x - 2, laneTop + 1, 4, laneH - 2);
+    const col = Math.max(0, Math.min(maxPx, Math.round(x)));
+    const rank = mark.severity === "fault" ? 3 : mark.severity === "warn" ? 2 : 1;
+    if (rank > colRank[col]) colRank[col] = rank;
+  }
+
+  const severities: readonly [number, Severity][] = [
+    [1, "info"],
+    [2, "warn"],
+    [3, "fault"],
+  ];
+  for (const [rank, sev] of severities) {
+    ctx.fillStyle = severityColor(sev);
+    for (let col = 0; col <= maxPx; col += 1) {
+      if (colRank[col] === rank) {
+        ctx.fillRect(col - 1.5, laneTop + 1, 3, laneH - 2);
+      }
+    }
+  }
+
+  ctx.fillStyle = YELLOW;
+  for (const x of bookmarkXs) {
+    ctx.beginPath();
+    ctx.moveTo(x, trackTop + 1);
+    ctx.lineTo(x - 3.5, trackTop + 7);
+    ctx.lineTo(x + 3.5, trackTop + 7);
+    ctx.closePath();
+    ctx.fill();
   }
 
   const px = xOf(playhead);

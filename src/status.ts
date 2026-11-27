@@ -134,6 +134,10 @@ export async function indexThen(
   try {
     adopt(await withIndex(label, start));
   } catch (err) {
+    if (err instanceof api.ApiError && err.kind === "cancelled") {
+      setNotice("Indexing cancelled.");
+      return;
+    }
     setError(errText(err), "action");
   }
 }

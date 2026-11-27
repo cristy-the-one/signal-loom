@@ -3,8 +3,8 @@ import { loadSample, openLog, openProject, saveProject } from "./files";
 import { addBookmark, removeBookmark } from "./panels/marks";
 import { dropCursor } from "./panels/drive";
 import { showTab } from "./panels/tabs";
-import { state } from "./state";
-import { scrubTo, stepEvent, stepFrame, togglePlay, zoom } from "./transport";
+import { draw, state } from "./state";
+import { cycleLaneMode, scrubTo, stepEvent, stepFrame, togglePlay, zoom } from "./transport";
 
 function typingTarget(target: EventTarget | null): boolean {
   return (
@@ -19,6 +19,10 @@ function onKey(event: KeyboardEvent): void {
   if (event.key === "Escape") {
     els.help.close();
     els.sigFilter.blur();
+    if (state.solo) {
+      state.solo = null;
+      draw();
+    }
     return;
   }
   if (mod && event.key.toLowerCase() === "o" && !event.shiftKey) {
@@ -56,6 +60,11 @@ function onKey(event: KeyboardEvent): void {
   if (event.key === " ") {
     event.preventDefault();
     togglePlay();
+    return;
+  }
+  if (!mod && (event.key === "l" || event.key === "L")) {
+    event.preventDefault();
+    cycleLaneMode();
     return;
   }
   if (event.key === "ArrowLeft" || event.key === "ArrowRight") {

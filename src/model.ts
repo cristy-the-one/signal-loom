@@ -3,7 +3,7 @@ import { clamp } from "./format";
 import { state, type View } from "./state";
 import type { SignalInfo, Summary } from "./types";
 
-export const MIN_SPAN = 10_000;
+export const MIN_SPAN = 1_000;
 
 /** Suffix of a trace drawn from the compare drive. */
 const COMPARE_SUFFIX = " · B";
@@ -58,6 +58,15 @@ export function signalNamed(name: string): SignalInfo | undefined {
   return state.summary ? signalEntries(state.summary).get(name)?.signal : undefined;
 }
 
+/** Look up a DBC `VAL_` enum label for `value` on `signal`, if defined. */
+export function labelForValue(signal: SignalInfo | undefined, value: number | null): string | null {
+  if (value == null || !signal?.labels?.length) return null;
+  const rounded = Math.round(value);
+  if (Math.abs(value - rounded) > 1e-6) return null;
+  const hit = signal.labels.find((item) => item.value === rounded);
+  return hit ? hit.label : null;
+}
+
 /** The signal a trace shows: a compare trace carries its drive-A signal's name plus a suffix. */
 export function baseName(trace: string): string {
   return trace.endsWith(COMPARE_SUFFIX) ? trace.slice(0, -COMPARE_SUFFIX.length) : trace;
@@ -79,11 +88,13 @@ export function colorFor(name: string): string {
   return entry.color;
 }
 
-/** The plotted names, each followed by its compare-drive trace when that drive has one. */
+/** The plotted names (or the soloed one when active), each followed by its compare-drive trace when present. */
 export function traceNames(): string[] {
-  const names = [...state.plotted];
-  if (!state.compareOn) return names;
-  for (const name of state.plotted) {
+  const visible =
+    state.solo && state.plotted.includes(state.solo) ? [state.solo] : [...state.plotted];
+  if (!state.compareOn) return visible;
+  const names = [...visible];
+  for (const name of visible) {
     if (state.series.some((series) => series.name === compareName(name))) names.push(compareName(name));
   }
   return names;
@@ -106,6 +117,11 @@ export function windowFor(playhead: number, span: number, summary: Summary): Vie
     a = end - width;
   }
   return { t0: a, t1: b };
+}
+
+/** Current camera window on `summary`, using `viewCenter` when decoupled or `playhead` otherwise. */
+export function activeView(summary: Summary): View {
+  return windowFor(state.viewCenter ?? state.playhead, state.span, summary);
 }
 
 export function oneSecond(playhead: number, summary: Summary): View {

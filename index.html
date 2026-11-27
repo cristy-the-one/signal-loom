@@ -94,7 +94,7 @@
             </div>
             <div id="panel-alerts" hidden>
               <form id="trig-form" class="stack-form">
-                <input id="trig-signal" type="text" placeholder="Signal" autocomplete="off" />
+                <input id="trig-signal" type="text" list="signal-names" placeholder="Signal" autocomplete="off" />
                 <div class="inline">
                   <select id="trig-op" aria-label="Comparison">
                     <option value=">">&gt;</option>
@@ -154,12 +154,12 @@
               <canvas id="bus" aria-label="Bus load and message rate"></canvas>
             </div>
             <div class="stage" id="stage">
+              <div id="legend" class="legend" hidden></div>
               <canvas id="plot" aria-label="Signal overlay"></canvas>
               <div id="crosshair" class="crosshair" hidden>
                 <div id="cross-time"></div>
                 <div id="cross-vals"></div>
               </div>
-              <div id="legend" class="legend"></div>
               <p id="scale-note" class="scale-note" hidden>Each trace is scaled across the whole log</p>
               <p id="stage-msg" class="stage-msg">No log on the deck. Load the synthetic hypercar sample or open a CAN log.</p>
             </div>
@@ -176,9 +176,10 @@
                 <span class="spacer"></span>
                 <span class="readout dim" id="span-readout">span —</span>
                 <span class="readout dim cursor-read" id="cursor-read"></span>
+                <button type="button" id="lane-mode" title="Scope tracks: Overlay, Split, or Grouped (L)">Overlay</button>
                 <button type="button" id="zoom-out" title="Zoom out ([)">−</button>
                 <button type="button" id="zoom-in" title="Zoom in (])">+</button>
-                <button type="button" id="zoom-all" title="Show the whole log">All</button>
+                <button type="button" id="zoom-all" title="Show the whole log (double-click plot)">All</button>
                 <button type="button" id="rate" title="Playback rate">1×</button>
               </div>
             </div>
@@ -192,7 +193,7 @@
               <button type="button" id="veil-cancel">Cancel</button>
             </div>
           </div>
-          <div id="drop" class="drop" hidden>Drop a log, signal map, or .loom project</div>
+          <div id="drop" class="drop" hidden>Drop a log (+ .dbc), signal map, or .loom project</div>
         </main>
       </div>
     </div>
@@ -211,11 +212,12 @@
           <li><span>Frame step</span><kbd>←</kbd><kbd>→</kbd></li>
           <li><span>Event / bookmark step</span><kbd>Shift</kbd><kbd>←</kbd><kbd>→</kbd></li>
           <li><span>Play / pause</span><kbd>Space</kbd></li>
+          <li><span>Track layout (Overlay / Split / Group)</span><kbd>L</kbd></li>
           <li><span>Bookmark playhead</span><kbd>B</kbd></li>
           <li><span>Note</span><kbd>N</kbd></li>
           <li><span>Cursors A / B</span><kbd>1</kbd><kbd>2</kbd></li>
-          <li><span>Zoom</span><kbd>[</kbd><kbd>]</kbd><span class="hint-note">wheel toward cursor</span></li>
-          <li><span>Pan</span><kbd>Alt</kbd><span class="hint-note">drag, or shift+wheel</span></li>
+          <li><span>Zoom / Box zoom</span><kbd>[</kbd><kbd>]</kbd><span class="hint-note">wheel, or Shift+drag</span></li>
+          <li><span>Pan camera</span><kbd>Alt</kbd><span class="hint-note">drag, or Shift+wheel</span></li>
           <li><span>Filter signals</span><kbd>/</kbd></li>
           <li><span>Start / end</span><kbd>Home</kbd><kbd>End</kbd></li>
         </ul>
@@ -225,6 +227,7 @@
       <span class="title" id="slot-title">Gauge</span>
       <select id="slot-signal" aria-label="Signal shown in this gauge"></select>
     </div>
+    <datalist id="signal-names"></datalist>
     <input id="file-log" type="file" hidden accept=".slog,.slbin,.csv,.txt,.log,.asc,.blf" />
     <input id="file-map" type="file" hidden accept=".dbc,.json,application/json" />
     <input id="file-project" type="file" hidden accept=".loom,.json,application/json" />

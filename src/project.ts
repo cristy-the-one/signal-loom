@@ -18,6 +18,10 @@ export function resetDeck(): void {
   state.compareOn = false;
   state.comparePath = null;
   state.compareOffsetUs = 0;
+  state.viewCenter = null;
+  state.boxZoom = null;
+  state.solo = null;
+  state.signalLanes = {};
   state.held = [];
   state.bus = null;
   els.compareOffset.value = "0";
@@ -40,9 +44,13 @@ export function adoptSummary(summary: Summary, mode: "fresh" | "keep"): void {
     resetDeck();
   } else {
     state.plotted = state.plotted.filter((name) => summary.signals.some((signal) => signal.name === name));
+    if (state.solo && !state.plotted.includes(state.solo)) state.solo = null;
     const plottedWithData = summary.signals.some((signal) => hasData(signal) && state.plotted.includes(signal.name));
     if (!plottedWithData) state.plotted = defaultPlotted(summary);
     state.playhead = clamp(state.playhead, summary.tStartUs, summary.tEndUs);
+    if (state.viewCenter != null) {
+      state.viewCenter = clamp(state.viewCenter, summary.tStartUs, summary.tEndUs);
+    }
     state.span = clamp(state.span, MIN_SPAN, duration(summary));
     state.overview = null;
     state.overviewName = null;
@@ -68,6 +76,10 @@ export function applyProject(opened: ProjectOpen, path: string | null): void {
   state.summary = opened.summary;
   state.bookmarks = opened.project.bookmarks;
   state.playhead = opened.project.view.playheadUs;
+  state.viewCenter = null;
+  state.boxZoom = null;
+  state.solo = null;
+  state.signalLanes = {};
   state.span = opened.project.view.spanUs || duration(opened.summary);
   state.plotted = opened.project.view.plotted.filter((name) =>
     opened.summary.signals.some((signal) => signal.name === name),

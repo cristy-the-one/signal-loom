@@ -1,27 +1,32 @@
 import * as api from "./api";
 import { els } from "./dom";
 import { errText, formatSpan, formatUs, formatValue } from "./format";
-import { oneSecond, windowFor } from "./model";
+import { activeView, oneSecond } from "./model";
 import { renderTransport } from "./readout";
 import { bumpDataGen, dataGen, draw, state } from "./state";
 import { clearError, setError } from "./status";
-import type { Series } from "./types";
+import type { Point, Series } from "./types";
 
 let queryFlight = false;
 let queryAgain = false;
 let refreshTimer = 0;
 let cursorSeq = 0;
+let lastSeriesKey = "";
+let overviewCacheGen = -1;
+const overviewCache = new Map<string, Point[]>();
+const OVERVIEW_CACHE_CAP = 8;
 
 /** Changes the plotted set; plot responses and cursor stats asked for the old set are dropped. */
 export function setPlotted(names: string[]): void {
   state.plotted = names;
+  if (state.solo && !names.includes(state.solo)) state.solo = null;
   bumpDataGen();
   void refreshCursors();
 }
 
 export function scheduleRefresh(): void {
   window.clearTimeout(refreshTimer);
-  refreshTimer = window.setTimeout(() => void refresh(), 40);
+  refreshTimer = window.setTimeout(() => void refresh(), 32);
 }
 
 export async function refresh(): Promise<void> {
@@ -36,25 +41,34 @@ export async function refresh(): Promise<void> {
   }
   queryFlight = true;
   const gen = dataGen();
-  const view = windowFor(state.playhead, state.span, summary);
+  const view = activeView(summary);
   const width = els.plot.getBoundingClientRect().width || 800;
   const maxPoints = Math.max(200, Math.min(4000, Math.round(width * 2)));
+  const t0Us = Math.round(view.t0);
+  const t1Us = Math.round(view.t1);
+  const seriesKey = state.plotted.length
+    ? `${gen}|${t0Us}|${t1Us}|${maxPoints}|${state.compareOn ? 1 : 0}|${state.plotted.join("\u0001")}`
+    : "";
+  const reuseSeries = seriesKey !== "" && seriesKey === lastSeriesKey;
   try {
     const bus = oneSecond(state.playhead, summary);
     const [series, frame, load] = await Promise.all([
-      state.plotted.length
-        ? api.query({
-            t0Us: view.t0,
-            t1Us: view.t1,
-            signals: state.plotted,
-            maxPoints,
-            includeCompare: state.compareOn,
-          })
-        : Promise.resolve([] as Series[]),
+      state.plotted.length === 0
+        ? Promise.resolve([] as Series[])
+        : reuseSeries
+          ? Promise.resolve(state.series)
+          : api.query({
+              t0Us,
+              t1Us,
+              signals: state.plotted,
+              maxPoints,
+              includeCompare: state.compareOn,
+            }),
       api.frameAt(state.playhead),
       api.busLoad(bus.t0, bus.t1),
     ]);
     if (gen !== dataGen()) return;
+    lastSeriesKey = seriesKey;
     state.series = series;
     state.frame = frame;
     state.held = frame?.values ?? [];
@@ -82,8 +96,19 @@ export async function refreshOverview(): Promise<void> {
     draw();
     return;
   }
-  if (state.overviewName === name && state.overview) return;
   const gen = dataGen();
+  if (overviewCacheGen !== gen) {
+    overviewCache.clear();
+    overviewCacheGen = gen;
+  }
+  const cached = overviewCache.get(name);
+  if (cached) {
+    state.overview = cached;
+    state.overviewName = name;
+    draw();
+    return;
+  }
+  if (state.overviewName === name && state.overview) return;
   try {
     const series = await api.query({
       t0Us: summary.tStartUs,
@@ -92,7 +117,15 @@ export async function refreshOverview(): Promise<void> {
       maxPoints: 700,
     });
     if (gen !== dataGen()) return;
-    state.overview = series[0]?.points ?? null;
+    const pts = series[0]?.points ?? null;
+    if (pts) {
+      if (overviewCache.size >= OVERVIEW_CACHE_CAP) {
+        const oldest = overviewCache.keys().next().value;
+        if (oldest !== undefined) overviewCache.delete(oldest);
+      }
+      overviewCache.set(name, pts);
+    }
+    state.overview = pts;
     state.overviewName = name;
     draw();
   } catch {

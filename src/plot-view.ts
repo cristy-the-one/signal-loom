@@ -1,11 +1,12 @@
 import { drawBus, drawGauges, readingsFrom } from "./gauges";
 import { els } from "./dom";
 import { severityOf } from "./family";
-import { formatUs, readoutFor } from "./format";
-import { baseName, colorFor, isCompareName, signalNamed, traceNames, windowFor } from "./model";
+import { formatTimeForSpan, readoutFor } from "./format";
+import { buildLaneSpecs } from "./lanes";
+import { activeView, baseName, colorFor, compareName, isCompareName, labelForValue, signalNamed } from "./model";
 import { renderLegend } from "./panels/legend";
 import { syncEventSelection } from "./panels/events";
-import { drawPlot, formatHover, heldValue, type Trace } from "./plot";
+import { drawPlot, formatHover, heldValue, type PlotLane, type Trace } from "./plot";
 import { renderTransport } from "./readout";
 import { draw, state } from "./state";
 import { drawTimeline, type TimelineMark } from "./timeline";
@@ -33,47 +34,96 @@ function stageMessage(): string | null {
   return null;
 }
 
-/** One trace per plotted name, scaled by its signal's range, or by the points it has when the range is flat. */
-function buildTraces(): Trace[] {
-  const byName = new Map(state.series.map((item) => [item.name, item]));
-  return traceNames().map((name) => {
-    const base = baseName(name);
-    const series = byName.get(name);
-    const points = series?.points ?? [];
-    const info = signalNamed(base);
-    let min = info?.min ?? null;
-    let max = info?.max ?? null;
-    if (min == null || max == null || max <= min) {
-      const scalePoints = points.length ? points : (byName.get(base)?.points ?? []);
-      min = scalePoints.reduce((lo, point) => Math.min(lo, point.v), Infinity);
-      max = scalePoints.reduce((hi, point) => Math.max(hi, point.v), -Infinity);
-      if (!Number.isFinite(min) || !Number.isFinite(max)) {
-        min = 0;
-        max = 1;
-      }
+function makeRawTrace(name: string, byName: Map<string, { points: { t: number; v: number }[] }>): Trace {
+  const base = baseName(name);
+  const series = byName.get(name);
+  const points = series?.points ?? [];
+  const info = signalNamed(base);
+  let min = info?.min ?? null;
+  let max = info?.max ?? null;
+  if (min == null || max == null || max <= min) {
+    const scalePoints = points.length ? points : (byName.get(base)?.points ?? []);
+    min = scalePoints.reduce((lo, point) => Math.min(lo, point.v), Infinity);
+    max = scalePoints.reduce((hi, point) => Math.max(hi, point.v), -Infinity);
+    if (!Number.isFinite(min) || !Number.isFinite(max)) {
+      min = 0;
+      max = 1;
     }
-    return { name, color: colorFor(name), points, min, max, dashed: isCompareName(name) };
-  });
+  }
+  return { name, color: colorFor(name), points, min, max, dashed: isCompareName(name) };
 }
 
-function placeCrosshair(traces: Trace[]): void {
-  if (state.hoverT == null || !state.summary) {
+/** Build tracks and traces according to `state.laneMode` (`overlay` / `split` / `grouped`). */
+function buildLanes(): { traces: Trace[]; lanes: PlotLane[]; hasMixedScale: boolean } {
+  const byName = new Map(state.series.map((item) => [item.name, item]));
+  const visibleBases =
+    state.solo && state.plotted.includes(state.solo) ? [state.solo] : [...state.plotted];
+  const specs = buildLaneSpecs(visibleBases, state.laneMode, state.signalLanes, signalNamed);
+  const allTraces: Trace[] = [];
+  let hasMixedScale = false;
+
+  const lanes: PlotLane[] = specs.map((spec) => {
+    const laneTraces: Trace[] = [];
+    for (const sig of spec.signals) {
+      laneTraces.push(makeRawTrace(sig, byName));
+      if (state.compareOn && byName.has(compareName(sig))) {
+        laneTraces.push(makeRawTrace(compareName(sig), byName));
+      }
+    }
+    let scaleMin = 0;
+    let scaleMax = 1;
+    if (spec.sharedScale && laneTraces.length > 0) {
+      scaleMin = Math.min(...laneTraces.map((t) => t.min));
+      scaleMax = Math.max(...laneTraces.map((t) => t.max));
+      if (!Number.isFinite(scaleMin) || !Number.isFinite(scaleMax)) {
+        scaleMin = 0;
+        scaleMax = 1;
+      }
+      for (const t of laneTraces) {
+        t.min = scaleMin;
+        t.max = scaleMax;
+      }
+    } else if (laneTraces.length > 1) {
+      hasMixedScale = true;
+    }
+    allTraces.push(...laneTraces);
+    return {
+      title: spec.title,
+      traces: laneTraces,
+      sharedScale: spec.sharedScale,
+      scaleMin,
+      scaleMax,
+    };
+  });
+
+  return { traces: allTraces, lanes, hasMixedScale };
+}
+
+function placeCrosshair(traces: Trace[], viewSpan: number): void {
+  if (state.hoverT == null || !state.summary || traces.length === 0) {
     els.crosshair.hidden = true;
     return;
   }
   els.crosshair.hidden = false;
   const stage = els.plot.parentElement?.getBoundingClientRect();
+  const plotRect = els.plot.getBoundingClientRect();
   if (!stage) return;
   let left = state.hoverX - stage.left + 14;
-  if (left > stage.width - 200) left = Math.max(8, state.hoverX - stage.left - 200);
+  if (left > stage.width - 220) left = Math.max(8, state.hoverX - stage.left - 220);
   els.crosshair.style.left = `${left}px`;
-  els.crosshair.style.top = "18px";
-  els.crossTime.textContent = formatUs(state.hoverT);
+  els.crosshair.style.top = `${Math.max(8, plotRect.top - stage.top + 8)}px`;
+  els.crossTime.textContent = formatTimeForSpan(state.hoverT, viewSpan);
   const nameWidth = Math.max(0, ...traces.map((trace) => trace.name.length));
   const lines = traces.map((trace) => {
     const signal = signalNamed(baseName(trace.name));
     const value = heldValue(trace.points, state.hoverT ?? 0);
-    return formatHover(trace.name.padEnd(nameWidth), value, signal?.unit ?? "", readoutFor(signal));
+    return formatHover(
+      trace.name.padEnd(nameWidth),
+      value,
+      signal?.unit ?? "",
+      readoutFor(signal),
+      labelForValue(signal, value),
+    );
   });
   els.crossVals.textContent = lines.join("\n");
 }
@@ -84,27 +134,37 @@ export function paint(): void {
   const message = stageMessage();
   els.stageMsg.hidden = message == null;
   els.stageMsg.textContent = message ?? "";
-  const traces = buildTraces();
-  drawPlot(els.plot, state.view, state.playhead, traces, {
-    hoverT: state.hoverT,
-    cursorA: state.cursorA,
-    cursorB: state.cursorB,
-  });
+  // Render the legend first so `#plot` measures its true height when the legend bar toggles visibility.
+  renderLegend();
+  const { traces, lanes, hasMixedScale } = buildLanes();
+  els.scaleNote.hidden = !hasMixedScale;
+  const liveView = summary ? activeView(summary) : state.view;
+  drawPlot(
+    els.plot,
+    liveView,
+    state.playhead,
+    traces,
+    {
+      hoverT: state.hoverT,
+      cursorA: state.cursorA,
+      cursorB: state.cursorB,
+      boxZoom: state.boxZoom,
+    },
+    lanes,
+  );
   drawGauges(els.gauges, state.summary ? readingsFrom(state.held, state.summary.signals, state.cluster) : null);
   drawBus(els.bus, state.bus);
   const domain = summary
     ? { t0: summary.tStartUs, t1: summary.tEndUs }
     : { t0: 0, t1: 1 };
-  const view = summary ? windowFor(state.playhead, state.span, summary) : state.view;
   const marks: TimelineMark[] = [
     ...eventMarksFor(summary),
     ...state.bookmarks.map((mark) => ({ t: mark.tUs, kind: "mark" as const })),
     ...state.notes.map((note) => ({ t: note.tUs, kind: "mark" as const })),
   ];
-  drawTimeline(els.timeline, domain, view, state.playhead, marks, state.overview);
-  placeCrosshair(traces);
+  drawTimeline(els.timeline, domain, liveView, state.playhead, marks, state.overview);
+  placeCrosshair(traces, Math.max(1, liveView.t1 - liveView.t0));
   renderTransport();
-  renderLegend();
   syncEventSelection();
 }
 
