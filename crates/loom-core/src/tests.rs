@@ -3,6 +3,7 @@ mod decode;
 mod formats;
 mod fuzz;
 mod index;
+mod inspect;
 mod integrity_channels;
 mod judge;
 mod judge_eval;
