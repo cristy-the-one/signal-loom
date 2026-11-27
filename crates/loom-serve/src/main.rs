@@ -17,7 +17,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const MAX_BODY: usize = 32 * 1024 * 1024;
 const WORKER_THREADS: usize = 8;
-const VERSION: &str = "loom-serve 0.1.0";
+const VERSION: &str = concat!("loom-serve ", env!("CARGO_PKG_VERSION"));
 const USAGE: &str = "\
 usage:
   loom-serve [--port PORT] [--log FILE [--dbc FILE[@CHANNEL] ...]] [--project FILE]

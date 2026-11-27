@@ -20,7 +20,7 @@ use loom_core::judge::{self, Evaluation, VerdictDbc, VerdictLog};
 use loom_core::SignalMap;
 use sha2::{Digest, Sha256};
 
-const VERSION: &str = "loom-judge 0.1.0";
+const VERSION: &str = concat!("loom-judge ", env!("CARGO_PKG_VERSION"));
 
 const USAGE: &str = "\
 usage:
@@ -434,7 +434,13 @@ where
     }
 
     if check_mode {
-        if log.is_some() || out.is_some() || no_hash || from_us.is_some() || to_us.is_some() {
+        if log.is_some()
+            || out.is_some()
+            || no_hash
+            || from_us.is_some()
+            || to_us.is_some()
+            || max_points.is_some()
+        {
             return Err(Fail::Usage(format!(
                 "--check only takes --dbc and --request\n{USAGE}"
             )));
@@ -449,7 +455,12 @@ where
     }
 
     if inspect_mode {
-        if request.is_some() || out.is_some() || from_us.is_some() || to_us.is_some() {
+        if request.is_some()
+            || out.is_some()
+            || from_us.is_some()
+            || to_us.is_some()
+            || max_points.is_some()
+        {
             return Err(Fail::Usage(format!(
                 "--inspect only takes --log, optional --dbc, and optional --no-hash\n{USAGE}"
             )));
@@ -737,6 +748,23 @@ mod tests {
             parse_args(["--version"].into_iter().map(str::to_string)).unwrap(),
             Args::Version
         ));
+    }
+
+    #[test]
+    fn max_points_is_refused_where_it_does_nothing() {
+        for mode in [
+            &["--check", "--dbc", "a.dbc", "--request", "r.json"][..],
+            &["--inspect", "--log", "a.blf"][..],
+        ] {
+            let args = mode
+                .iter()
+                .chain(["--max-points", "50"].iter())
+                .map(|s| s.to_string());
+            assert!(
+                matches!(parse_args(args), Err(super::Fail::Usage(_))),
+                "{mode:?} accepted --max-points"
+            );
+        }
     }
 
     #[test]

@@ -74,7 +74,12 @@ pub struct InspectedSignal {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InspectedEvents {
+    /// Every event the index counted.
     pub total: u64,
+    /// Events kept in the index's list (it stops at 5,000). The breakdown
+    /// below counts these, so with `events_truncated` it sums to `listed`,
+    /// not to `total`.
+    pub listed: u64,
     pub timeouts: u64,
     pub checksums: u64,
     pub counters: u64,
@@ -286,6 +291,7 @@ pub fn inspect_log(
         signals,
         events: InspectedEvents {
             total: log.event_count(),
+            listed: log.events().len() as u64,
             timeouts,
             checksums,
             counters,
