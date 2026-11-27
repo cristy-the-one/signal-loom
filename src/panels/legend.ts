@@ -7,9 +7,10 @@ let legendKey: string | null = null;
 
 /** Rebuilds the legend only when a swatch, name, reading or unit it shows differs from the last build. */
 export function renderLegend(): void {
+  const heldByName = new Map(state.held.map((item) => [item.name, item]));
   const rows = state.plotted.map((name) => {
     const signal = signalNamed(name);
-    const held = state.held.find((item) => item.name === name);
+    const held = heldByName.get(name);
     const readout = readoutFor(signal);
     const reading = held
       ? held.label

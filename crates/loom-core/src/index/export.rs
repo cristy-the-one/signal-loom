@@ -1,8 +1,10 @@
 use super::replay::{Phase, Step};
+use super::signal::SignalFilter;
 use super::time::ordered_range;
 use super::IndexedLog;
 use crate::error::{Error, Result};
 use crate::scan::{hex_payload, RecKind};
+use std::fmt::Write;
 
 /// Most data rows one export writes. A longer window is cut here, and the
 /// export says so.
@@ -56,33 +58,32 @@ impl IndexedLog {
             return Err(Error::invalid("export needs at least one signal"));
         }
         let (t0, t1) = ordered_range(t0_us, t1_us);
-        let mut indexes = Vec::new();
+        let mut indexes = Vec::with_capacity(names.len());
         for name in names {
             indexes.push(self.require_signal(name)?);
         }
+        let filter = SignalFilter::new(&self.signals, &indexes);
         let mut out = csv_header(names.iter().map(String::as_str));
         let mut rows = 0usize;
         let mut truncated = false;
-        self.replay(t0, t1, |step, held| {
+        self.replay_wanted(t0, t1, &filter, |step, held| {
             let Step::Record(rec) = step else {
                 return true;
             };
             let mut dirty = false;
-            self.touch(rec, held, |signal, _value| {
-                if indexes.contains(&signal) {
-                    dirty = true;
-                }
+            self.touch_wanted(rec, &filter, held, |_slot, _value| {
+                dirty = true;
             });
             if dirty {
                 if rows == cap {
                     truncated = true;
                     return false;
                 }
-                out.push_str(&rec.t_us.to_string());
-                for idx in &indexes {
+                let _ = write!(out, "{}", rec.t_us);
+                for value in held.iter().copied() {
                     out.push(',');
-                    if let Some(value) = held.get(*idx).copied().flatten() {
-                        out.push_str(&format!("{value:.6}"));
+                    if let Some(value) = value {
+                        let _ = write!(out, "{value:.6}");
                     }
                 }
                 out.push('\n');
@@ -118,20 +119,27 @@ impl IndexedLog {
             if phase == Phase::Lead {
                 return true;
             }
-            let line = match &rec.kind {
+            match &rec.kind {
+                RecKind::Sample { .. } => true,
                 RecKind::Frame { id, dlc, data, .. } => {
-                    format!("F {} {id:X} {}\n", rec.t_us, hex_payload(data, *dlc))
+                    if rows == cap {
+                        truncated = true;
+                        return false;
+                    }
+                    let _ = writeln!(out, "F {} {id:X} {}", rec.t_us, hex_payload(data, *dlc));
+                    rows += 1;
+                    true
                 }
-                RecKind::Event { label } => format!("E {} {label}\n", rec.t_us),
-                RecKind::Sample { .. } => return true,
-            };
-            if rows == cap {
-                truncated = true;
-                return false;
+                RecKind::Event { label } => {
+                    if rows == cap {
+                        truncated = true;
+                        return false;
+                    }
+                    let _ = writeln!(out, "E {} {label}", rec.t_us);
+                    rows += 1;
+                    true
+                }
             }
-            out.push_str(&line);
-            rows += 1;
-            true
         })?;
         if rows == 0 {
             return Err(Error::invalid("that window has no frames to export"));

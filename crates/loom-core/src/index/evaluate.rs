@@ -27,7 +27,6 @@
 //! - No evaluation is made after the recording ends.
 
 use super::integrity::IntegrityKind;
-use super::replay::Step;
 use super::IndexedLog;
 use crate::error::{Error, Result};
 use crate::judge::{Check, Condition, Mode, Op, Request, SignalRef, Value};
@@ -277,29 +276,37 @@ impl Plan {
         &self.targets[&key(signal)]
     }
 
-    /// One replay over the whole log.
+    /// One pass over the whole log, decoding only the signals the request names
+    /// and recording frame timestamps only for cyclic `expect` messages.
     fn collect(&self, log: &IndexedLog) -> Result<Data> {
-        let wanted: BTreeSet<usize> = self.targets.values().map(|target| target.idx).collect();
-        let mut series: BTreeMap<usize, Vec<(u64, f64)>> =
-            wanted.iter().map(|idx| (*idx, Vec::new())).collect();
-        let mut frames: BTreeMap<u32, Vec<(u64, u8)>> =
-            self.thresholds.keys().map(|id| (*id, Vec::new())).collect();
-        log.replay(log.t_start_us(), log.t_end_us(), |step, held| {
-            let Step::Record(rec) = step else {
-                return true;
-            };
-            if let RecKind::Frame { id, channel, .. } = &rec.kind {
-                if let Some(times) = frames.get_mut(id) {
-                    times.push((rec.t_us, *channel));
+        let wanted: Vec<usize> = self
+            .targets
+            .values()
+            .map(|target| target.idx)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let filter = super::signal::SignalFilter::new(&log.signals, &wanted);
+        let mut rows: Vec<Vec<(u64, f64)>> = vec![Vec::new(); wanted.len()];
+        let mut frames: BTreeMap<u32, Vec<(u64, u8)>> = self
+            .thresholds
+            .iter()
+            .filter_map(|(&id, threshold)| threshold.map(|_| (id, Vec::new())))
+            .collect();
+        if !log.checkpoints.is_empty() && (!wanted.is_empty() || !frames.is_empty()) {
+            log.scan_from(0, |rec| {
+                if let RecKind::Frame { id, channel, .. } = &rec.kind {
+                    if let Some(times) = frames.get_mut(id) {
+                        times.push((rec.t_us, *channel));
+                    }
                 }
-            }
-            log.touch(rec, held, |idx, value| {
-                if let Some(points) = series.get_mut(&idx) {
-                    points.push((rec.t_us, value));
-                }
-            });
-            true
-        })?;
+                log.decode_wanted(rec, &filter, |slot, value| {
+                    rows[slot].push((rec.t_us, value));
+                });
+                true
+            })?;
+        }
+        let series = wanted.into_iter().zip(rows).collect();
         Ok(Data { series, frames })
     }
 }

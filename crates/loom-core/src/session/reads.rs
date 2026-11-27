@@ -68,11 +68,11 @@ impl Session {
 
     pub fn step(&self, t_us: u64, dir: StepDir) -> Result<Option<FrameDto>> {
         let log = self.log()?;
-        let Some(hit) = log.step_frame(t_us, matches!(dir, StepDir::Next))? else {
+        let Some((hit, values)) = log.step_frame_with_values(t_us, matches!(dir, StepDir::Next))?
+        else {
             return Ok(None);
         };
-        let values = log
-            .values_at(hit.t_us)?
+        let values = values
             .into_iter()
             .map(|value| ValueDto {
                 name: value.name,

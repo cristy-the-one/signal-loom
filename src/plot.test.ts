@@ -14,6 +14,16 @@ describe("heldValue", () => {
     expect(heldValue(points, 10)).toBe(1);
     expect(heldValue(points, 25)).toBe(2);
     expect(heldValue(points, 100)).toBe(3);
+    expect(
+      heldValue(
+        [
+          { t: 10, v: 1 },
+          { t: 10, v: 4 },
+          { t: 20, v: 2 },
+        ],
+        10,
+      ),
+    ).toBe(4);
   });
 });
 

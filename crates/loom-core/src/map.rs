@@ -204,23 +204,34 @@ impl SignalMap {
         }
     }
 
+    /// Every signal whose DBC `(BO_, SG_)` names match `(message, signal)`.
+    pub fn pairs<'a, 'q>(
+        &'a self,
+        message: &'q str,
+        signal: &'q str,
+    ) -> impl Iterator<Item = &'a MappedSignal> + use<'a, 'q> {
+        self.signals.iter().filter(move |candidate| {
+            candidate.message_name == message && candidate.defined_name == signal
+        })
+    }
+
     /// Resolve `(message, signal)` using the names in the DBC: the `BO_` name
     /// and the `SG_` name. A signal shown as `Name@<id>` is still found by
     /// `Name`. An unknown pair is an error naming that pair.
     pub fn lookup(&self, message: &str, signal: &str) -> Result<&MappedSignal> {
-        let mut matches = self.signals.iter().filter(|candidate| {
-            candidate.message_name == message && candidate.defined_name == signal
-        });
+        let mut matches = self.pairs(message, signal);
         match (matches.next(), matches.next()) {
             (Some(found), None) => Ok(found),
-            (None, _) => Err(Error::not_found(format!(
-                "unknown signal pair ({message}, {signal})"
-            ))),
+            (None, _) => Err(Error::not_found(unknown_pair_message(message, signal))),
             (Some(_), Some(_)) => Err(Error::invalid(format!(
                 "signal pair ({message}, {signal}) is not unique"
             ))),
         }
     }
+}
+
+pub(crate) fn unknown_pair_message(message: &str, signal: &str) -> String {
+    format!("unknown signal pair ({message}, {signal})")
 }
 
 pub(crate) fn unique_name(

@@ -34,6 +34,7 @@ export async function stepFrame(direction: "next" | "prev"): Promise<void> {
     clearError("action");
     state.playhead = frame.tUs;
     state.frame = frame;
+    state.held = frame.values;
     state.dirty = true;
     requestDraw();
     scheduleRefresh();

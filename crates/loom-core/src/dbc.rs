@@ -280,7 +280,7 @@ pub fn looks_like(text: &str) -> bool {
 
 fn parse_sg_tail(name: &str, tail: &str) -> Option<SignalBuild> {
     // 0|16@1+ (0.25,0) [0|16383.75] "rpm" TCU
-    let (layout, after_layout) = tail.split_once(' ')?;
+    let (layout, after_layout) = tail.split_once(char::is_whitespace)?;
     let (start_len, order_sign) = layout.split_once('@')?;
     let (start_s, len_s) = start_len.split_once('|')?;
     let order = order_sign.chars().next()?;
@@ -341,11 +341,17 @@ fn value_table(line: &str) -> Option<ValueTable> {
         .trim()
         .trim_end_matches(';')
         .trim();
-    let mut parts = rest.split_whitespace();
-    let id = normalize_id(parse_int(parts.next()?).ok()?);
-    let name = parts.next()?.to_string();
+    let (id_tok, after_id) = rest.split_once(char::is_whitespace)?;
+    let id = normalize_id(parse_int(id_tok).ok()?);
+    let after_id = after_id.trim_start();
+    let (name_tok, tail) = after_id
+        .split_once(char::is_whitespace)
+        .unwrap_or((after_id, ""));
+    if name_tok.is_empty() {
+        return None;
+    }
+    let name = name_tok.to_string();
     let mut rows = Vec::new();
-    let tail = rest.split_once(&name)?.1;
     let mut chars = tail.chars().peekable();
     while chars.peek().is_some() {
         while chars.peek().is_some_and(|c| c.is_whitespace()) {
@@ -381,9 +387,6 @@ fn value_table(line: &str) -> Option<ValueTable> {
         if rows.len() < 64 {
             rows.push((value, label));
         }
-    }
-    if rows.is_empty() {
-        return None;
     }
     Some(ValueTable { id, name, rows })
 }
@@ -537,6 +540,28 @@ BO_ 2566848528 Ext: 8 ECU2
         assert_eq!(spaced.signals.len(), 1);
         assert_eq!(spaced.signals[0].name, "Gear");
         assert_eq!(spaced.signals[0].message_id, parity_ext.id);
+    }
+
+    #[test]
+    fn tab_separated_sg_and_val_with_short_signal_name_parse() {
+        let map = parse(
+            "\
+BO_ 256 Msg: 8 ECU
+ SG_ x : 0|8@1+\t(1,0) [0|255] \"\" ECU
+ SG_ y : 8|8@1+ (1,0) [0|255] \"\" ECU
+VAL_ 0x100 x 0 \"OFF\" 1 \"ON\" ;
+VAL_ 256 y 0 \"A\" ;
+VAL_ 256 y ;
+",
+        )
+        .unwrap();
+        assert_eq!(map.signals.len(), 2);
+        assert_eq!(map.signals[0].name, "x");
+        assert_eq!(
+            map.signals[0].table,
+            vec![(0, "OFF".to_string()), (1, "ON".to_string())]
+        );
+        assert!(map.signals[1].table.is_empty());
     }
 
     fn hex_payload(text: &str) -> [u8; 8] {

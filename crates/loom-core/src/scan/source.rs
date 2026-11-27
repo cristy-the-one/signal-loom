@@ -17,8 +17,8 @@ pub(super) enum Line {
     TooLong,
 }
 
-/// Position-tracking view of the log. Text is read through a chunk buffer;
-/// binary reads go straight to the reader.
+/// Position-tracking view of the log. Reads go through a chunk buffer so
+/// binary formats do not issue one syscall per field.
 pub(super) struct Source<'a> {
     reader: &'a mut dyn ReadSeek,
     pos: u64,
@@ -61,15 +61,28 @@ impl<'a> Source<'a> {
             }
             let chunk = &self.buf[self.at..self.len];
             let end = chunk.iter().position(|byte| *byte == b'\n');
-            for byte in &chunk[..end.unwrap_or(chunk.len())] {
-                if *byte == b'\r' {
-                    continue;
+            let body = &chunk[..end.unwrap_or(chunk.len())];
+            if !too_long {
+                if !body.contains(&b'\r') {
+                    let room = MAX_LINE - line.len();
+                    if body.len() <= room {
+                        line.extend_from_slice(body);
+                    } else {
+                        line.extend_from_slice(&body[..room]);
+                        too_long = true;
+                    }
+                } else {
+                    for &byte in body {
+                        if byte == b'\r' {
+                            continue;
+                        }
+                        if line.len() >= MAX_LINE {
+                            too_long = true;
+                            break;
+                        }
+                        line.push(byte);
+                    }
                 }
-                if line.len() >= MAX_LINE {
-                    too_long = true;
-                    continue;
-                }
-                line.push(*byte);
             }
             let used = end.map_or(chunk.len(), |at| at + 1);
             self.at += used;
@@ -89,7 +102,16 @@ impl<'a> Source<'a> {
         let start = self.pos;
         let mut off = 0;
         while off < buf.len() {
-            if self.at >= self.len {
+            if self.at < self.len {
+                let take = (self.len - self.at).min(buf.len() - off);
+                buf[off..off + take].copy_from_slice(&self.buf[self.at..self.at + take]);
+                self.at += take;
+                self.pos += take as u64;
+                off += take;
+                continue;
+            }
+            let remaining = buf.len() - off;
+            if remaining >= self.buf.len() {
                 let n = read_retrying(self.reader, &mut buf[off..])
                     .map_err(|err| Error::io("binary read failed", err))?;
                 if n == 0 {
@@ -100,12 +122,17 @@ impl<'a> Source<'a> {
                 }
                 off += n;
                 self.pos += n as u64;
-                continue;
+            } else {
+                self.len = read_retrying(self.reader, &mut self.buf)
+                    .map_err(|err| Error::io("binary read failed", err))?;
+                self.at = 0;
+                if self.len == 0 {
+                    return Err(Error::Binary {
+                        offset: start,
+                        message: "truncated record".into(),
+                    });
+                }
             }
-            buf[off] = self.buf[self.at];
-            self.at += 1;
-            self.pos += 1;
-            off += 1;
         }
         Ok(())
     }
@@ -170,9 +197,7 @@ pub(super) fn peek_prefix(reader: &mut dyn ReadSeek) -> Result<String> {
         .seek(SeekFrom::Start(0))
         .map_err(|err| Error::io("could not rewind log", err))?;
     let mut buf = [0u8; PEEK_LEN];
-    let n = reader
-        .read(&mut buf)
-        .map_err(|err| Error::io("could not read log", err))?;
+    let n = read_retrying(reader, &mut buf).map_err(|err| Error::io("could not read log", err))?;
     reader
         .seek(SeekFrom::Start(pos))
         .map_err(|err| Error::io("could not restore log position", err))?;

@@ -560,3 +560,32 @@ fn a_channel_that_matches_nothing_is_an_unknown_signal() {
         ]
     );
 }
+
+#[test]
+fn optional_null_fields_including_given_are_accepted() {
+    let json = r#"{
+      "format": "loom-judge/1",
+      "spec_id": "s",
+      "cases": [
+        {
+          "case_id": "TC-1",
+          "verifies": ["REQ"],
+          "kind": "positive",
+          "checks": [
+            {
+              "id": "c1",
+              "given": null,
+              "when": {"signal": {"message": "BrakeCmd", "signal": "BrakePedal", "channel": null}, "op": "==", "value": 1, "tolerance": null},
+              "expect": {"signal": {"message": "Lamps", "signal": "BrakeLamp", "channel": null}, "op": "==", "value": 1, "tolerance": null},
+              "mode": "eventually",
+              "within_ms": [0, 100]
+            }
+          ]
+        }
+      ]
+    }"#;
+    let request = judge::check(json, &cluster()).expect("null optional fields");
+    assert!(request.cases[0].checks[0].given.is_empty());
+    assert_eq!(request.cases[0].checks[0].when.signal.channel, None);
+    assert_eq!(request.cases[0].checks[0].when.tolerance, None);
+}

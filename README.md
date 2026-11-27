@@ -147,11 +147,12 @@ Paths resolve relative to the project file, then by walking parent directories. 
 ## Layout
 
 ```text
-crates/loom-core     parse, index, decode, window query
-crates/loom-serve    localhost preview of that crate
+crates/loom-core     parse, index, decode, window query, judge evaluator
+crates/loom-judge    CLI judge and DBC parity dump
+crates/loom-serve    localhost preview of loom-core
 src-tauri            Tauri 2 shell, unsigned builds
 src                  Vite + TypeScript UI
-fixtures             sample log, map, project, CSV snippet
+fixtures             sample log, map, project, CSV snippet, judge contract
 ```
 
 ## Checks
@@ -162,8 +163,8 @@ fixtures             sample log, map, project, CSV snippet
 python3 scripts/gen_fixture.py
 npm run typecheck
 npm run build
-cargo test -p loom-core
-cargo clippy -p loom-core -p loom-serve --all-targets -- -D warnings
+cargo test -p loom-core -p loom-serve -p loom-judge
+cargo clippy -p loom-core -p loom-serve -p loom-judge --all-targets -- -D warnings
 cargo check -p signal-loom
 ```
 

@@ -1,3 +1,4 @@
+use super::signal::{decode_frame, SignalFilter};
 use super::time::{order_time, TimeOrder};
 use super::IndexedLog;
 use crate::error::Result;
@@ -31,7 +32,7 @@ impl IndexedLog {
         let checkpoint = &self.checkpoints[idx];
         self.source.with_reader(|reader| {
             let mut scanner =
-                Scanner::resume_at(reader, self.body, checkpoint.offset, checkpoint.t_us)?;
+                Scanner::resume_at(reader, self.format, checkpoint.offset, checkpoint.t_us)?;
             let mut last = Some(checkpoint.t_us);
             while let Some(mut rec) = scanner.next_rec()? {
                 match order_time(&mut last, rec.t_us) {
@@ -100,6 +101,41 @@ impl IndexedLog {
         Ok(held)
     }
 
+    /// Like `replay`, but only decodes and tracks the signals selected by
+    /// `filter`. `held` is indexed by slot (`0..filter.wanted().len()`).
+    pub(super) fn replay_wanted(
+        &self,
+        t0: u64,
+        t1: u64,
+        filter: &SignalFilter,
+        mut visit: impl FnMut(Step<'_>, &mut [Option<f64>]) -> bool,
+    ) -> Result<()> {
+        let snap = self.snapshots.get(self.floor_checkpoint(t0));
+        let mut held: Vec<Option<f64>> = filter
+            .wanted()
+            .iter()
+            .map(|&idx| snap.and_then(|row| row.get(idx).copied().flatten()))
+            .collect();
+        let mut started = false;
+        self.scan_window(t0, t1, |phase, rec| match phase {
+            Phase::Lead => {
+                self.touch_wanted(rec, filter, &mut held, |_, _| {});
+                true
+            }
+            Phase::Window => {
+                if !started {
+                    started = true;
+                    visit(Step::Start, &mut held);
+                }
+                visit(Step::Record(rec), &mut held)
+            }
+        })?;
+        if !started {
+            visit(Step::Start, &mut held);
+        }
+        Ok(())
+    }
+
     /// Apply `rec` to `held`, reporting each signal it updates.
     pub(super) fn touch(
         &self,
@@ -118,18 +154,11 @@ impl IndexedLog {
                 channel,
                 ..
             } => {
-                if let Some(indices) = self.msg_index.get(id) {
-                    super::signal::decode_frame(
-                        &self.signals,
-                        indices,
-                        *channel,
-                        *dlc,
-                        data,
-                        |idx, value| {
-                            held[idx] = Some(value);
-                            on_update(idx, value);
-                        },
-                    );
+                if let Some(group) = self.msg_index.get(id) {
+                    decode_frame(&self.signals, group, *channel, *dlc, data, |idx, value| {
+                        held[idx] = Some(value);
+                        on_update(idx, value);
+                    });
                 }
             }
             RecKind::Sample { name, value, .. } => {
@@ -140,5 +169,19 @@ impl IndexedLog {
             }
             RecKind::Event { .. } => {}
         }
+    }
+
+    /// Apply only the signals in `filter` from `rec` to slot-indexed `held`.
+    pub(super) fn touch_wanted(
+        &self,
+        rec: &Rec,
+        filter: &SignalFilter,
+        held: &mut [Option<f64>],
+        mut on_update: impl FnMut(usize, f64),
+    ) {
+        self.decode_wanted(rec, filter, |slot, value| {
+            held[slot] = Some(value);
+            on_update(slot, value);
+        });
     }
 }

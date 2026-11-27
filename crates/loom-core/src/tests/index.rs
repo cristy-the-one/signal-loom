@@ -26,6 +26,54 @@ F 40000 1A0 800C000000000000
 }
 
 #[test]
+fn step_frame_with_values_matches_values_at_across_duplicate_stamps_and_checkpoints() {
+    let mut text = String::from("SLOGv1\n");
+    for i in 0..300u64 {
+        let t = i * 10_000;
+        let rpm = ((i + 1) * 4) as u16;
+        let speed = ((i + 1) * 10) as u16;
+        let b = rpm.to_le_bytes();
+        let s = speed.to_le_bytes();
+        text.push_str(&format!(
+            "F {t} 1A0 {:02X}{:02X}{:02X}{:02X}00000000\n",
+            b[0], b[1], s[0], s[1]
+        ));
+        if i % 50 == 0 {
+            // Second frame at the exact same timestamp updates the held value.
+            let rpm2 = rpm + 4;
+            let b2 = rpm2.to_le_bytes();
+            text.push_str(&format!(
+                "F {t} 1A0 {:02X}{:02X}{:02X}{:02X}00000000\n",
+                b2[0], b2[1], s[0], s[1]
+            ));
+        }
+    }
+    let log = IndexedLog::open_bytes(text.into_bytes(), Some(&tiny_map())).unwrap();
+    for t in [
+        0, 5_000, 500_000, 2_550_000, 2_560_000, 2_990_000, 3_500_000,
+    ] {
+        for next in [false, true] {
+            let stepped = log.step_frame_with_values(t, next).unwrap();
+            match stepped {
+                None => assert!(log.step_frame(t, next).unwrap().is_none()),
+                Some((hit, values)) => {
+                    let expected = log.values_at(hit.t_us).unwrap();
+                    let left: Vec<_> = values
+                        .iter()
+                        .map(|v| (&v.name, v.value, &v.label))
+                        .collect();
+                    let right: Vec<_> = expected
+                        .iter()
+                        .map(|v| (&v.name, v.value, &v.label))
+                        .collect();
+                    assert_eq!(left, right, "t={t} next={next} hit={}", hit.t_us);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn query_window_stays_bounded_on_a_large_log() {
     let mut text = String::from("SLOGv1\n");
     text.reserve(100_000 * 32);
@@ -120,4 +168,44 @@ fn streams_a_large_log_with_bounded_checkpoints() {
     assert_eq!(log.warnings()[0], "line 5: bad payload hex 'zz'");
     let hit = log.step_frame(0, true).unwrap().unwrap();
     assert!(hit.t_us > 0);
+}
+
+#[test]
+fn duplicate_signal_names_fill_every_slot_in_query_samples_and_export() {
+    let text = "SLOGv1\nF 0 1A0 800C000000000000\nF 10000 1A0 0019000000000000\n";
+    let log = IndexedLog::open_bytes(text.as_bytes().to_vec(), Some(&tiny_map())).unwrap();
+    let names = vec!["EngineRPM".to_string(), "EngineRPM".to_string()];
+
+    let queried = log
+        .query(&crate::index::QueryWindow {
+            t0_us: 0,
+            t1_us: 10_000,
+            signals: names.clone(),
+            max_points: 100,
+        })
+        .unwrap();
+    assert_eq!(queried.len(), 2);
+    assert_eq!(queried[0].points, queried[1].points);
+    assert_eq!(queried[0].points.len(), 2);
+
+    let sampled = log.samples(&names, 0, 10_000).unwrap();
+    assert_eq!(sampled.len(), 2);
+    assert_eq!(sampled[0].points, sampled[1].points);
+    assert_eq!(sampled[0].points, vec![(0, 800.0), (10_000, 1600.0)]);
+
+    let csv = log.export_csv(&names, 0, 10_000).unwrap();
+    assert_eq!(
+        csv.text,
+        "t_us,EngineRPM,EngineRPM\n0,800.000000,800.000000\n10000,1600.000000,1600.000000\n"
+    );
+
+    // Also verify Sample records (decoded CSV log without a CAN map).
+    let decoded = "t_us,signal,value\n0,Speed,12.5\n5000,Speed,25.0\n";
+    let sample_log = IndexedLog::open_bytes(decoded.as_bytes().to_vec(), None).unwrap();
+    let dup_speed = vec!["Speed".to_string(), "Speed".to_string()];
+    let sample_series = sample_log.samples(&dup_speed, 0, 5_000).unwrap();
+    assert_eq!(sample_series[0].points, sample_series[1].points);
+    assert_eq!(sample_series[0].points, vec![(0, 12.5), (5_000, 25.0)]);
+    let stats = sample_log.stats("Speed", 0, 5_000).unwrap();
+    assert_eq!(stats.count, 2);
 }

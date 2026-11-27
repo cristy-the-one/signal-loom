@@ -9,6 +9,22 @@ import { drawPlot, formatHover, heldValue, type Trace } from "./plot";
 import { renderTransport } from "./readout";
 import { draw, state } from "./state";
 import { drawTimeline, type TimelineMark } from "./timeline";
+import type { Summary } from "./types";
+
+let eventMarksOf: Summary | null = null;
+let eventMarksCache: TimelineMark[] = [];
+
+function eventMarksFor(summary: Summary | null): TimelineMark[] {
+  if (!summary) return [];
+  if (eventMarksOf === summary) return eventMarksCache;
+  eventMarksCache = summary.events.map((event) => ({
+    t: event.tUs,
+    kind: "event" as const,
+    severity: severityOf(event.label),
+  }));
+  eventMarksOf = summary;
+  return eventMarksCache;
+}
 
 function stageMessage(): string | null {
   if (!state.summary) return "No log on the deck. Load the synthetic hypercar sample or open a CAN log.";
@@ -19,15 +35,16 @@ function stageMessage(): string | null {
 
 /** One trace per plotted name, scaled by its signal's range, or by the points it has when the range is flat. */
 function buildTraces(): Trace[] {
+  const byName = new Map(state.series.map((item) => [item.name, item]));
   return traceNames().map((name) => {
     const base = baseName(name);
-    const series = state.series.find((item) => item.name === name);
+    const series = byName.get(name);
     const points = series?.points ?? [];
     const info = signalNamed(base);
     let min = info?.min ?? null;
     let max = info?.max ?? null;
     if (min == null || max == null || max <= min) {
-      const scalePoints = points.length ? points : (state.series.find((item) => item.name === base)?.points ?? []);
+      const scalePoints = points.length ? points : (byName.get(base)?.points ?? []);
       min = scalePoints.reduce((lo, point) => Math.min(lo, point.v), Infinity);
       max = scalePoints.reduce((hi, point) => Math.max(hi, point.v), -Infinity);
       if (!Number.isFinite(min) || !Number.isFinite(max)) {
@@ -80,11 +97,7 @@ export function paint(): void {
     : { t0: 0, t1: 1 };
   const view = summary ? windowFor(state.playhead, state.span, summary) : state.view;
   const marks: TimelineMark[] = [
-    ...(summary?.events.map((event) => ({
-      t: event.tUs,
-      kind: "event" as const,
-      severity: severityOf(event.label),
-    })) ?? []),
+    ...eventMarksFor(summary),
     ...state.bookmarks.map((mark) => ({ t: mark.tUs, kind: "mark" as const })),
     ...state.notes.map((note) => ({ t: note.tUs, kind: "mark" as const })),
   ];

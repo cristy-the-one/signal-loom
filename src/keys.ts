@@ -7,7 +7,11 @@ import { state } from "./state";
 import { scrubTo, stepEvent, stepFrame, togglePlay, zoom } from "./transport";
 
 function typingTarget(target: EventTarget | null): boolean {
-  return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
+  );
 }
 
 function onKey(event: KeyboardEvent): void {
