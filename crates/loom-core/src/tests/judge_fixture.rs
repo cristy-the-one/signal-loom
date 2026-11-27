@@ -499,7 +499,11 @@ fn judge_contract_fixture_matches_its_generator_and_sums() {
     let verdict: serde_json::Value =
         serde_json::from_slice(&read(&dir.join("expected-verdict.json"))).expect("verdict json");
     assert_eq!(verdict["format"], "loom-verdict/1");
-    assert_eq!(verdict["tool"], "loom-judge 0.1.0");
+    assert_eq!(
+        verdict["tool"],
+        concat!("loom-judge ", env!("CARGO_PKG_VERSION")),
+        "regenerate expected-verdict.json and SHA256SUMS on a version bump"
+    );
     assert_eq!(verdict["request_sha256"], sha256(&request_bytes));
     assert_eq!(verdict["log"]["file"], "brake.asc");
     assert_eq!(verdict["log"]["sha256"], sha256(&read(&asc)));
