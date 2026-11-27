@@ -12,6 +12,8 @@ export interface Trace {
   min: number;
   max: number;
   dashed?: boolean;
+  /** Where the fetched data ends; the trace stops here rather than holding its last value to the edge. */
+  endT?: number;
 }
 
 export interface PlotLane {
@@ -304,7 +306,7 @@ function drawTrace(
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
   ctx.setLineDash(trace.dashed ? [5, 3] : []);
-  ctx.moveTo(xOf(Math.max(points[0].t, view.t0)), yOf(points[0].v));
+  ctx.moveTo(xOf(points[0].t), yOf(points[0].v));
   for (let i = 1; i < points.length; i += 1) {
     const prev = points[i - 1];
     const cur = points[i];
@@ -312,7 +314,7 @@ function drawTrace(
     ctx.lineTo(xOf(cur.t), yOf(cur.v));
   }
   const last = points[points.length - 1];
-  ctx.lineTo(xOf(view.t1), yOf(last.v));
+  ctx.lineTo(xOf(Math.max(last.t, Math.min(view.t1, trace.endT ?? view.t1))), yOf(last.v));
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.globalAlpha = 1;
