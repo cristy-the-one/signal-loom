@@ -374,7 +374,10 @@ fn help_and_version_exit_zero_with_clean_stdout() {
         let out = judge(&[flag]);
         assert_eq!(out.status.code(), Some(0));
         assert!(out.stderr.is_empty());
-        assert_eq!(String::from_utf8(out.stdout).unwrap(), "loom-judge 0.1.0\n");
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            concat!("loom-judge ", env!("CARGO_PKG_VERSION"), "\n")
+        );
     }
 }
 
