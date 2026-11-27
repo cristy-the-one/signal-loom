@@ -100,4 +100,144 @@ impl IndexedLog {
             last: last.unwrap_or(0.0),
         })
     }
+
+    /// Stream a compiled math channel over `[t0_us, t1_us]` in O(1) memory,
+    /// matching `Compiled::eval_series(samples(...))` without the 4M-sample cap.
+    pub(crate) fn math_stats(
+        &self,
+        channel_name: &str,
+        compiled: &crate::analyze::Compiled,
+        t0_us: u64,
+        t1_us: u64,
+    ) -> Result<crate::dto::WindowStats> {
+        let deps = compiled.dependencies();
+        let (t0, t1) = ordered_range(t0_us, t1_us);
+        if deps.is_empty() {
+            let mut lp_state = Vec::new();
+            if !self.checkpoints.is_empty() {
+                if let Some(value) = compiled.eval(&[], &mut lp_state) {
+                    return Ok(crate::dto::WindowStats {
+                        count: 1,
+                        min: value,
+                        max: value,
+                        avg: value,
+                        first: value,
+                        last: value,
+                    });
+                }
+            }
+            return Err(Error::invalid(format!(
+                "no samples of {channel_name} in that window"
+            )));
+        }
+        let mut wanted = Vec::with_capacity(deps.len());
+        for dep in deps {
+            wanted.push(self.require_signal(dep)?);
+        }
+        if self.checkpoints.is_empty() {
+            return Err(Error::invalid(format!(
+                "no samples of {channel_name} in that window"
+            )));
+        }
+        let filter = SignalFilter::new(&self.signals, &wanted);
+        let mut vars = vec![0.0; deps.len()];
+        let mut ready = vec![false; deps.len()];
+        let mut ready_count = 0usize;
+        let mut lp_state = Vec::new();
+        let mut count = 0u64;
+        let mut sum = 0.0f64;
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        let mut first = None;
+        let mut last = None;
+
+        let mut push_eval = |compiled: &crate::analyze::Compiled, vars: &[f64]| {
+            if let Some(value) = compiled.eval(vars, &mut lp_state) {
+                count += 1;
+                sum += value;
+                min = min.min(value);
+                max = max.max(value);
+                if first.is_none() {
+                    first = Some(value);
+                }
+                last = Some(value);
+            }
+        };
+
+        let mut cur_t: Option<u64> = None;
+        let mut cur_dirty = false;
+        let mut had_t0_lead = false;
+
+        self.replay_wanted(t0, t1, &filter, |step, held| {
+            match step {
+                Step::Start => {
+                    for (slot, value) in held.iter().copied().enumerate() {
+                        if let Some(v) = value {
+                            vars[slot] = v;
+                            ready[slot] = true;
+                            ready_count += 1;
+                        }
+                    }
+                    had_t0_lead = ready_count > 0;
+                }
+                Step::Record(rec) => {
+                    let mut updated = false;
+                    self.decode_wanted(rec, &filter, |_slot, _value| {
+                        updated = true;
+                    });
+                    if !updated {
+                        return true;
+                    }
+                    if let Some(prev_t) = cur_t {
+                        if rec.t_us > prev_t {
+                            if cur_dirty && ready_count == deps.len() {
+                                push_eval(compiled, &vars);
+                            }
+                            cur_t = Some(rec.t_us);
+                            cur_dirty = false;
+                        }
+                    } else if had_t0_lead && rec.t_us > t0 {
+                        // Emit the t0 lead step before advancing past t0.
+                        if ready_count == deps.len() {
+                            push_eval(compiled, &vars);
+                        }
+                        cur_t = Some(rec.t_us);
+                    } else {
+                        cur_t = Some(rec.t_us);
+                    }
+                    self.touch_wanted(rec, &filter, held, |slot, value| {
+                        if !ready[slot] {
+                            ready[slot] = true;
+                            ready_count += 1;
+                        }
+                        vars[slot] = value;
+                        cur_dirty = true;
+                    });
+                }
+            }
+            true
+        })?;
+
+        if cur_t.is_some() {
+            if cur_dirty && ready_count == deps.len() {
+                push_eval(compiled, &vars);
+            }
+        } else if had_t0_lead && ready_count == deps.len() {
+            push_eval(compiled, &vars);
+        }
+
+        if count == 0 {
+            return Err(Error::invalid(format!(
+                "no samples of {channel_name} in that window"
+            )));
+        }
+        Ok(crate::dto::WindowStats {
+            count,
+            min,
+            max,
+            avg: sum / count as f64,
+            first: first.unwrap_or(0.0),
+            last: last.unwrap_or(0.0),
+        })
+    }
 }

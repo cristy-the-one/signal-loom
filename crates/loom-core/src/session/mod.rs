@@ -24,9 +24,9 @@ use crate::scan::LogFormat;
 use compare::Compare;
 use deck::Deck;
 use maps::{map_match, read_map_file, sibling_map, MapSet};
-use std::cell::RefCell;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub use project_io::ProjectView;
 
@@ -48,7 +48,7 @@ pub struct Session {
 #[derive(Default)]
 struct LogSlot {
     log: Option<IndexedLog>,
-    trigger_events: RefCell<Option<TriggerEvents>>,
+    trigger_events: Mutex<Option<TriggerEvents>>,
 }
 
 /// Event lane for one trigger set on one log: the log's own events merged with
@@ -62,7 +62,11 @@ struct TriggerEvents {
 impl LogSlot {
     fn set(&mut self, log: Option<IndexedLog>) {
         self.log = log;
-        self.trigger_events.get_mut().take();
+        if let Ok(slot) = self.trigger_events.get_mut() {
+            slot.take();
+        } else if let Ok(mut guard) = self.trigger_events.lock() {
+            guard.take();
+        }
     }
 
     fn get(&self) -> Result<&IndexedLog> {
@@ -73,7 +77,7 @@ impl LogSlot {
 
     /// The events cached for exactly this trigger set, with their warnings.
     fn cached_events(&self, triggers: &[ThresholdTrigger]) -> Option<(Vec<EventDto>, Vec<String>)> {
-        let cache = self.trigger_events.borrow();
+        let cache = self.trigger_events.lock().ok()?;
         cache
             .as_ref()
             .filter(|hit| hit.triggers == triggers)
@@ -86,16 +90,21 @@ impl LogSlot {
         events: &[EventDto],
         warnings: &[String],
     ) {
-        *self.trigger_events.borrow_mut() = Some(TriggerEvents {
-            triggers: triggers.to_vec(),
-            events: events.to_vec(),
-            warnings: warnings.to_vec(),
-        });
+        if let Ok(mut guard) = self.trigger_events.lock() {
+            *guard = Some(TriggerEvents {
+                triggers: triggers.to_vec(),
+                events: events.to_vec(),
+                warnings: warnings.to_vec(),
+            });
+        }
     }
 
     #[cfg(test)]
     fn has_cached_events(&self) -> bool {
-        self.trigger_events.borrow().is_some()
+        self.trigger_events
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
     }
 }
 

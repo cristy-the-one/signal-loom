@@ -70,11 +70,21 @@ pub enum RecKind {
     },
 }
 
+/// Header-derived format hints discovered on `Scanner::open` and reused on
+/// checkpoint resumes so `resume_indexed` never has to re-peek byte 0.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ScanHints {
+    pub(crate) asc_mode: Option<asc::AscMode>,
+    pub(crate) candump_origin_us: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Rec {
     /// Byte offset of this record. Checkpoints resume from here.
     /// For a compressed BLF container this is the container, not the inner object.
     pub offset: u64,
+    /// Byte offset inside an inflated BLF `LOG_CONTAINER` (0 elsewhere).
+    pub inner_offset: u32,
     pub t_us: u64,
     pub kind: RecKind,
     /// True for the first record yielded from a BLF container. Checkpoints land here
@@ -88,6 +98,7 @@ impl Rec {
     pub fn new(t_us: u64, kind: RecKind) -> Self {
         Self {
             offset: 0,
+            inner_offset: 0,
             t_us,
             kind,
             starts_container: false,
@@ -124,6 +135,17 @@ impl Rec {
     pub fn placed(self, offset: u64, starts_container: bool) -> Self {
         Self {
             offset,
+            inner_offset: 0,
+            starts_container,
+            ..self
+        }
+    }
+
+    /// Set where a BLF inner record sits in its container and in the file.
+    pub fn placed_inner(self, offset: u64, inner_offset: u32, starts_container: bool) -> Self {
+        Self {
+            offset,
+            inner_offset,
             starts_container,
             ..self
         }
@@ -225,11 +247,12 @@ trait RecordReader {
 
 pub struct Scanner<'a> {
     reader: Box<dyn RecordReader + 'a>,
+    hints: ScanHints,
 }
 
 impl<'a> Scanner<'a> {
     pub fn open(reader: &'a mut dyn ReadSeek, format: LogFormat) -> Result<Self> {
-        Self::start(reader, format, 0, None)
+        Self::start(reader, format, 0, 0, None, ScanHints::default())
     }
 
     /// Continue at a record boundary recorded in the checkpoint index. A
@@ -237,29 +260,45 @@ impl<'a> Scanner<'a> {
     /// `resume_at` skips that.
     #[cfg(test)]
     pub fn resume(reader: &'a mut dyn ReadSeek, format: LogFormat, offset: u64) -> Result<Self> {
-        Self::start(reader, format, offset, None)
+        Self::start(reader, format, offset, 0, None, ScanHints::default())
     }
 
     /// Like `resume`, given `at_us`, the time of the record at `offset`. A
     /// relative-time ASC log picks up its running clock from it.
+    #[cfg(test)]
     pub fn resume_at(
         reader: &'a mut dyn ReadSeek,
         format: LogFormat,
         offset: u64,
         at_us: u64,
     ) -> Result<Self> {
-        Self::start(reader, format, offset, Some(at_us))
+        Self::start(reader, format, offset, 0, Some(at_us), ScanHints::default())
+    }
+
+    /// Resume at an indexed checkpoint `(offset, inner_offset, at_us)` with
+    /// cached header hints so no format has to re-peek byte 0.
+    pub(crate) fn resume_indexed(
+        reader: &'a mut dyn ReadSeek,
+        format: LogFormat,
+        offset: u64,
+        inner_offset: u32,
+        at_us: u64,
+        hints: ScanHints,
+    ) -> Result<Self> {
+        Self::start(reader, format, offset, inner_offset, Some(at_us), hints)
     }
 
     fn start(
         reader: &'a mut dyn ReadSeek,
         format: LogFormat,
         offset: u64,
+        inner_offset: u32,
         at_us: Option<u64>,
+        mut hints: ScanHints,
     ) -> Result<Self> {
         let reader: Box<dyn RecordReader + 'a> = match format {
             LogFormat::Slbin => Box::new(Slb1Reader::open(reader, offset)?),
-            LogFormat::Blf => Box::new(BlfReader::open(reader, offset)?),
+            LogFormat::Blf => Box::new(BlfReader::open(reader, offset, inner_offset)?),
             LogFormat::Slog => Box::new(TextReader::open(reader, Box::new(slog::Slog), offset)?),
             LogFormat::CanCsv => {
                 let parser = csv::CanCsv::new(offset == 0);
@@ -269,10 +308,23 @@ impl<'a> Scanner<'a> {
                 let parser = csv::DecodedCsv::new(offset == 0);
                 Box::new(TextReader::open(reader, Box::new(parser), offset)?)
             }
-            LogFormat::Asc => Box::new(asc::reader(reader, offset, at_us)?),
-            LogFormat::Candump => Box::new(candump::reader(reader, offset)?),
+            LogFormat::Asc => {
+                let (text, mode) = asc::reader(reader, offset, at_us, hints.asc_mode)?;
+                hints.asc_mode = Some(mode);
+                Box::new(text)
+            }
+            LogFormat::Candump => {
+                let (text, origin) =
+                    candump::reader(reader, offset, at_us, hints.candump_origin_us)?;
+                hints.candump_origin_us = Some(origin);
+                Box::new(text)
+            }
         };
-        Ok(Self { reader })
+        Ok(Self { reader, hints })
+    }
+
+    pub(crate) fn hints(&self) -> ScanHints {
+        self.hints
     }
 
     pub fn next_rec(&mut self) -> Result<Option<Rec>> {
@@ -394,6 +446,7 @@ mod tests {
         data[..bytes.len()].copy_from_slice(bytes);
         Rec {
             offset: 0,
+            inner_offset: 0,
             t_us,
             starts_container: false,
             kind: RecKind::Frame {

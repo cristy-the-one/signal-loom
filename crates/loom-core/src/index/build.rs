@@ -1,4 +1,6 @@
-use super::checkpoint::{pad_snapshots, push_checkpoint, Checkpoint, CHECKPOINT_EVERY};
+use super::checkpoint::{
+    pad_snapshots, push_checkpoint, Checkpoint, SnapshotTable, SpanTable, CHECKPOINT_EVERY,
+};
 use super::checksum::probe_checksums;
 use super::control::{pulse, IndexControl};
 use super::integrity::{Integrity, IntegrityEvent, IntegrityFrame, IntegrityWatch};
@@ -8,16 +10,24 @@ use super::time::{accept_time, REORDER_TOLERANCE_US};
 use super::IndexedLog;
 use crate::error::{Error, Result};
 use crate::map::{SignalMap, TimeoutFactor};
-use crate::scan::{LogFormat, Rec, RecKind, Scanner};
+use crate::scan::{LogFormat, Rec, RecKind, ScanHints, Scanner};
 use std::collections::{HashMap, HashSet};
 
 const MAX_EVENTS: usize = 5_000;
 const MAX_WARNINGS: usize = 32;
 
+/// Optional observer fed every accepted `(t_us, id, channel, decoded)` frame
+/// during `scan_framed` so `loom-judge` can collect its series and cyclic frame
+/// timestamps in the same pass that builds the index.
+pub(super) type FrameTap<'a> = &'a mut dyn FnMut(u64, u32, u8, &[(usize, f64)]);
+
 pub(super) struct Built {
+    pub(super) hints: ScanHints,
     pub(super) checkpoints: Vec<Checkpoint>,
-    pub(super) snapshots: Vec<Vec<Option<f64>>>,
+    pub(super) snapshots: SnapshotTable,
+    pub(super) spans: SpanTable,
     pub(super) frame_count: u64,
+    pub(super) frame_bits: u64,
     pub(super) event_count: u64,
     pub(super) events_truncated: bool,
     pub(super) t_start_us: u64,
@@ -42,10 +52,14 @@ impl Built {
         msg_index: HashMap<u32, MessageSignals>,
         message_names: HashMap<u32, String>,
     ) -> Self {
+        let width = signals.len();
         Self {
+            hints: ScanHints::default(),
             checkpoints: Vec::new(),
-            snapshots: Vec::new(),
+            snapshots: SnapshotTable::with_width(width),
+            spans: SpanTable::with_width(width),
             frame_count: 0,
+            frame_bits: 0,
             event_count: 0,
             events_truncated: false,
             t_start_us: 0,
@@ -107,6 +121,17 @@ impl IndexedLog {
         timeout: TimeoutFactor,
         control: Option<&IndexControl>,
     ) -> Result<Self> {
+        Self::build_with_tap(source, format, map, timeout, control, None)
+    }
+
+    pub(super) fn build_with_tap(
+        source: Source,
+        format: LogFormat,
+        map: Option<&SignalMap>,
+        timeout: TimeoutFactor,
+        control: Option<&IndexControl>,
+        tap: Option<FrameTap<'_>>,
+    ) -> Result<Self> {
         let byte_len = source.byte_len()?;
         if let Some(control) = control {
             control.set_total(byte_len);
@@ -114,7 +139,7 @@ impl IndexedLog {
         let built = if format == LogFormat::DecodedCsv {
             scan_decoded(&source, control)?
         } else {
-            scan_framed(&source, format, map, timeout, control)?
+            scan_framed(&source, format, map, timeout, control, tap)?
         };
         if built.frame_count == 0 {
             return Err(Error::invalid(
@@ -124,9 +149,12 @@ impl IndexedLog {
         Ok(Self {
             source,
             format,
+            hints: built.hints,
             checkpoints: built.checkpoints,
             snapshots: built.snapshots,
+            spans: built.spans,
             frame_count: built.frame_count,
+            frame_bits: built.frame_bits,
             event_count: built.event_count,
             events_truncated: built.events_truncated,
             t_start_us: built.t_start_us,
@@ -160,6 +188,7 @@ impl Pass {
             &self.held,
             rec.t_us,
             rec.offset,
+            rec.inner_offset,
             &mut self.stride,
         );
     }
@@ -184,6 +213,7 @@ fn drive(
     let mut pulses = 0u64;
     source.with_reader(|reader| {
         let mut scanner = Scanner::open(reader, format)?;
+        pass.built.hints = scanner.hints();
         while let Some(mut rec) = scanner.next_rec()? {
             pulses += 1;
             if pulses.is_multiple_of(64) {
@@ -219,6 +249,7 @@ fn scan_framed(
     map: Option<&SignalMap>,
     timeout: TimeoutFactor,
     control: Option<&IndexControl>,
+    mut tap: Option<FrameTap<'_>>,
 ) -> Result<Built> {
     let mut built = Built::from_map(map);
     let checksums =
@@ -255,6 +286,10 @@ fn scan_framed(
                 for (idx, value) in pending.iter().copied() {
                     pass.held[idx] = Some(value);
                     pass.built.signals[idx].note(value);
+                    pass.built.spans.observe_last(idx, rec.t_us, value);
+                }
+                if let Some(tap) = tap.as_deref_mut() {
+                    tap(rec.t_us, *id, *channel, &pending);
                 }
                 watch.note(
                     &mut pass.built,
@@ -269,6 +304,7 @@ fn scan_framed(
                 );
                 pass.built.seen_ids.insert(*id);
                 note_domain(&mut pass.built, rec.t_us);
+                pass.built.frame_bits += super::bus_load::frame_wire_bits(*dlc);
                 pass.built.frame_count += 1;
             }
             RecKind::Event { label } => note_event(&mut pass.built, rec.t_us, label),
@@ -298,6 +334,7 @@ fn scan_decoded(source: &Source, control: Option<&IndexControl>) -> Result<Built
                 }
                 pass.held[idx] = Some(*value);
                 pass.built.signals[idx].note(*value);
+                pass.built.spans.observe_last(idx, rec.t_us, *value);
                 note_domain(&mut pass.built, rec.t_us);
                 pass.built.frame_count += 1;
             }

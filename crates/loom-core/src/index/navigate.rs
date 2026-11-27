@@ -1,7 +1,8 @@
 use super::query::HeldValue;
+use super::signal::SignalFilter;
 use super::IndexedLog;
 use crate::error::Result;
-use crate::project::TriggerOp;
+use crate::project::{ThresholdTrigger, TriggerOp};
 use crate::scan::{hex_payload, Rec, RecKind};
 
 #[derive(Debug, Clone)]
@@ -80,30 +81,111 @@ impl IndexedLog {
             idx -= 1;
         }
     }
+}
 
-    /// Times where `name` first satisfies `op` against `level`, until it stops
-    /// doing so. At most 200 hits.
-    pub fn crossings(&self, name: &str, op: TriggerOp, level: f64) -> Result<Vec<(u64, String)>> {
-        let idx = self.require_signal(name)?;
-        if self.checkpoints.is_empty() {
-            return Ok(Vec::new());
+pub(crate) struct TriggerScan {
+    pub(crate) hits: Vec<(u64, String)>,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) cacheable: bool,
+}
+
+impl IndexedLog {
+    /// Evaluate all `triggers` in a single sequential pass over the log,
+    /// capping each trigger at 200 hits and stopping early once every trigger
+    /// reaches its cap.
+    pub(crate) fn crossings_many(&self, triggers: &[ThresholdTrigger]) -> TriggerScan {
+        let mut wanted = Vec::with_capacity(triggers.len());
+        let mut states = Vec::with_capacity(triggers.len());
+        let mut warnings = Vec::new();
+        let mut cacheable = true;
+
+        struct TrigState {
+            op: TriggerOp,
+            level: f64,
+            label: String,
+            armed: bool,
+            hits: Vec<(u64, String)>,
         }
-        let label = format!("Trigger {name} {} {level}", op.symbol());
-        let mut events = Vec::new();
-        let mut armed = true;
-        self.scan_from(0, |rec| {
-            if let Some(value) = self.decode_one(rec, idx) {
-                let hot = op.holds(value, level);
-                if hot && armed {
-                    events.push((rec.t_us, label.clone()));
-                    armed = false;
-                } else if !hot {
-                    armed = true;
+
+        for trigger in triggers {
+            match self.require_signal(&trigger.signal) {
+                Ok(idx) => {
+                    wanted.push(idx);
+                    states.push(TrigState {
+                        op: trigger.op,
+                        level: trigger.value,
+                        label: format!(
+                            "Trigger {} {} {}",
+                            trigger.signal,
+                            trigger.op.symbol(),
+                            trigger.value
+                        ),
+                        armed: true,
+                        hits: Vec::new(),
+                    });
+                }
+                Err(err) => {
+                    warnings.push(format!(
+                        "Trigger {} {} {} could not be evaluated: {err}",
+                        trigger.signal,
+                        trigger.op.symbol(),
+                        trigger.value
+                    ));
+                    cacheable &= !self.has_signal(&trigger.signal);
                 }
             }
-            events.len() < 200
-        })?;
-        Ok(events)
+        }
+
+        if !self.checkpoints.is_empty() && !wanted.is_empty() {
+            let filter = SignalFilter::new(&self.signals, &wanted);
+            let mut active = wanted.len();
+            if let Err(err) = self.scan_from(0, |rec| {
+                self.decode_wanted(rec, &filter, |slot, value| {
+                    let state = &mut states[slot];
+                    if state.hits.len() >= 200 {
+                        return;
+                    }
+                    let hot = state.op.holds(value, state.level);
+                    if hot && state.armed {
+                        state.hits.push((rec.t_us, state.label.clone()));
+                        state.armed = false;
+                        if state.hits.len() == 200 {
+                            active -= 1;
+                        }
+                    } else if !hot {
+                        state.armed = true;
+                    }
+                });
+                active > 0
+            }) {
+                // Report per-trigger read failure without caching so a retry scans again.
+                for trigger in triggers {
+                    if self.has_signal(&trigger.signal) {
+                        warnings.push(format!(
+                            "Trigger {} {} {} could not be evaluated: {err}",
+                            trigger.signal,
+                            trigger.op.symbol(),
+                            trigger.value
+                        ));
+                    }
+                }
+                return TriggerScan {
+                    hits: Vec::new(),
+                    warnings,
+                    cacheable: false,
+                };
+            }
+        }
+
+        let mut hits = Vec::new();
+        for state in states {
+            hits.extend(state.hits);
+        }
+        TriggerScan {
+            hits,
+            warnings,
+            cacheable,
+        }
     }
 
     fn hit_from(&self, rec: &Rec, ordinal: u64) -> FrameHit {

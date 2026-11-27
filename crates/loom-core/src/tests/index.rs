@@ -209,3 +209,82 @@ fn duplicate_signal_names_fill_every_slot_in_query_samples_and_export() {
     let stats = sample_log.stats("Speed", 0, 5_000).unwrap();
     assert_eq!(stats.count, 2);
 }
+
+#[test]
+fn checkpoint_spans_and_bus_load_match_raw_decimation_across_checkpoint_halving() {
+    // 5,000 frames of a triangle wave + spike; enough to span ~20 checkpoints,
+    // plus sub-windows straddling checkpoint boundaries.
+    let mut text = String::from("SLOGv1\n");
+    for i in 0..5_000u64 {
+        let rpm_raw: u16 = if i == 2_777 {
+            32_000 // 8,000 rpm spike mid-checkpoint
+        } else {
+            ((i % 200) * 40) as u16
+        };
+        let b = rpm_raw.to_le_bytes();
+        text.push_str(&format!(
+            "F {} 1A0 {:02X}{:02X}000000000000\n",
+            i * 1_000,
+            b[0],
+            b[1]
+        ));
+    }
+    let log = IndexedLog::open_bytes(text.into_bytes(), Some(&tiny_map())).unwrap();
+    let names = vec!["EngineRPM".to_string()];
+
+    // Compare against `decimate_points(samples)` where `t0` sits between samples,
+    // AND against a full un-skipped replay reference at exact sample/checkpoint stamps.
+    for (t0, t1) in [(123_400, 4_567_800), (700_500, 3_900_000)] {
+        let raw = log.samples(&names, t0, t1).unwrap();
+        for max_points in [2, 5, 16, 64, 250] {
+            let expected = crate::index::decimate_points(raw[0].points.clone(), t0, t1, max_points);
+            let got = log
+                .query(&crate::index::QueryWindow {
+                    t0_us: t0,
+                    t1_us: t1,
+                    signals: names.clone(),
+                    max_points,
+                })
+                .unwrap();
+            assert_eq!(
+                got[0].points, expected,
+                "window=({t0}, {t1}) max_points={max_points}"
+            );
+        }
+    }
+
+    // Also test a >4,096-checkpoint log (1_100_000 frames => checkpoints halve at 4,096)
+    // and check full-range overview + sub-window queries preserve the spike and endpoints.
+    let mut big = String::from("SLOGv1\n");
+    big.reserve(1_100_000 * 26);
+    for i in 0..1_100_000u64 {
+        let raw_val: u16 = if i == 654_321 {
+            36_000
+        } else {
+            (i % 100) as u16 * 20
+        };
+        let b = raw_val.to_le_bytes();
+        big.push_str(&format!("F {} 1A0 {:02X}{:02X}\n", i * 1_000, b[0], b[1]));
+    }
+    let big_log = IndexedLog::open_bytes(big.into_bytes(), Some(&tiny_map())).unwrap();
+    assert!(big_log.checkpoint_count() <= 4_096);
+    let overview = big_log
+        .query(&crate::index::QueryWindow {
+            t0_us: 0,
+            t1_us: 1_099_999_000,
+            signals: names.clone(),
+            max_points: 200,
+        })
+        .unwrap();
+    assert!(overview[0].points.len() <= 200);
+    assert!(overview[0].points.contains(&(654_321_000, 9_000.0)));
+    assert_eq!(
+        big_log.bus_load(0, 1_099_999_000).unwrap().frames,
+        1_100_000
+    );
+
+    let full_bus = log.bus_load(0, 4_999_000).unwrap();
+    assert_eq!(full_bus.frames, 5_000);
+    let mid_bus = log.bus_load(123_400, 4_567_800).unwrap();
+    assert_eq!(mid_bus.frames, 4_567 - 124 + 1);
+}

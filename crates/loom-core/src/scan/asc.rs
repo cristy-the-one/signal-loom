@@ -17,10 +17,11 @@ const MICROS_LARGE_STAMP: f64 = 1000.0;
 /// Bytes read at a checkpoint to find the stamp of the line it points at.
 const STAMP_PEEK: usize = 256;
 
-struct AscMode {
-    hex: bool,
-    relative: bool,
-    micros: bool,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AscMode {
+    pub(crate) hex: bool,
+    pub(crate) relative: bool,
+    pub(crate) micros: bool,
 }
 
 impl Default for AscMode {
@@ -64,12 +65,16 @@ struct AscParser {
 /// An ASC reader that continues at `offset`. `at_us` is the time of the record
 /// there, when known. A relative-time log needs it to resume without reading
 /// from the top.
-pub(super) fn reader(
-    reader: &mut dyn ReadSeek,
+pub(super) fn reader<'a>(
+    reader: &'a mut dyn ReadSeek,
     offset: u64,
     at_us: Option<u64>,
-) -> Result<TextReader<'_>> {
-    let mode = peek_asc_mode(reader)?;
+    cached_mode: Option<AscMode>,
+) -> Result<(TextReader<'a>, AscMode)> {
+    let mode = match cached_mode {
+        Some(mode) => mode,
+        None => peek_asc_mode(reader)?,
+    };
     let mut clock_us = 0;
     let mut replay = false;
     if mode.relative && offset > 0 {
@@ -92,7 +97,7 @@ pub(super) fn reader(
     if replay {
         text.skip_until(offset)?;
     }
-    Ok(text)
+    Ok((text, mode))
 }
 
 impl LineParser for AscParser {

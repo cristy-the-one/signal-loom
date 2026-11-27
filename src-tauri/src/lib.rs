@@ -96,17 +96,17 @@ fn query_series(
     state: State<'_, AppState>,
     query: Query,
 ) -> Result<Vec<loom_core::SeriesDto>, Error> {
-    state.with_session(|session| session.query(&query))
+    state.read_session(|session| session.query(&query))
 }
 
 #[tauri::command(async)]
 fn values_at(state: State<'_, AppState>, t_us: u64) -> Result<Vec<loom_core::ValueDto>, Error> {
-    state.with_session(|session| session.values_at(t_us))
+    state.read_session(|session| session.values_at(t_us))
 }
 
 #[tauri::command(async)]
 fn frame_at(state: State<'_, AppState>, t_us: u64) -> Result<Option<loom_core::FrameDto>, Error> {
-    state.with_session(|session| session.frame_at(t_us))
+    state.read_session(|session| session.frame_at(t_us))
 }
 
 #[tauri::command(async)]
@@ -115,7 +115,7 @@ fn step_frame(
     t_us: u64,
     direction: StepDir,
 ) -> Result<Option<loom_core::FrameDto>, Error> {
-    state.with_session(|session| session.step(t_us, direction))
+    state.read_session(|session| session.step(t_us, direction))
 }
 
 #[tauri::command(async)]
@@ -130,7 +130,7 @@ fn signal_stats(
     t0_us: u64,
     t1_us: u64,
 ) -> Result<loom_core::WindowStats, Error> {
-    state.with_session(|session| session.stats(&name, t0_us, t1_us))
+    state.read_session(|session| session.stats(&name, t0_us, t1_us))
 }
 
 #[tauri::command(async)]
@@ -140,7 +140,7 @@ fn export_csv(
     t0_us: u64,
     t1_us: u64,
 ) -> Result<ExportReply, Error> {
-    state.with_session(|session| {
+    state.read_session(|session| {
         session
             .export_csv_report(&names, t0_us, t1_us)
             .map(ExportReply::from)
@@ -149,7 +149,7 @@ fn export_csv(
 
 #[tauri::command(async)]
 fn export_slog(state: State<'_, AppState>, t0_us: u64, t1_us: u64) -> Result<ExportReply, Error> {
-    state.with_session(|session| {
+    state.read_session(|session| {
         session
             .export_slog_report(t0_us, t1_us)
             .map(ExportReply::from)
@@ -165,7 +165,7 @@ fn save_csv(
     t0_us: u64,
     t1_us: u64,
 ) -> Result<SaveReply, Error> {
-    state.with_session(|session| {
+    state.read_session(|session| {
         session
             .save_csv(PathBuf::from(path).as_path(), &names, t0_us, t1_us)
             .map(SaveReply::from)
@@ -180,7 +180,7 @@ fn save_slog(
     t0_us: u64,
     t1_us: u64,
 ) -> Result<SaveReply, Error> {
-    state.with_session(|session| {
+    state.read_session(|session| {
         session
             .save_slog(PathBuf::from(path).as_path(), t0_us, t1_us)
             .map(SaveReply::from)
@@ -237,7 +237,7 @@ fn bus_load(
     t0_us: u64,
     t1_us: u64,
 ) -> Result<loom_core::BusLoad, Error> {
-    state.with_session(|session| session.bus_load(t0_us, t1_us))
+    state.read_session(|session| session.bus_load(t0_us, t1_us))
 }
 
 #[tauri::command(async)]
@@ -260,7 +260,7 @@ fn clear_compare(state: State<'_, AppState>) -> Result<loom_core::Summary, Error
 /// Saves the open deck with the UI's `view` of it. The session fills in what it owns.
 #[tauri::command(async)]
 fn write_project(state: State<'_, AppState>, path: String, view: ProjectView) -> Result<(), Error> {
-    state.with_session(|session| session.write_project(PathBuf::from(path).as_path(), &view))
+    state.read_session(|session| session.write_project(PathBuf::from(path).as_path(), &view))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

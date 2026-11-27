@@ -12,7 +12,7 @@ use crate::{Error, ErrorBody, IndexControl, IndexStatus, ProjectOpen, Result, Se
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Clone, Default)]
 enum Phase {
@@ -24,10 +24,11 @@ enum Phase {
     Failed(ErrorBody),
 }
 
-/// The session behind one lock, plus the state of its background job.
+/// The session behind an RwLock (concurrent reads, exclusive mutations/jobs),
+/// plus the state of its background job.
 #[derive(Default)]
 pub struct Engine {
-    session: Mutex<Session>,
+    session: RwLock<Session>,
     control: IndexControl,
     phase: Mutex<Phase>,
 }
@@ -37,14 +38,21 @@ impl Engine {
         Self::default()
     }
 
-    /// Run `f` with the session locked. Waits while a job holds the lock.
-    pub fn with_session<T>(&self, f: impl FnOnce(&mut Session) -> Result<T>) -> Result<T> {
-        f(&mut *lock(&self.session)?)
+    /// Run `f` with shared read access to the session so concurrent queries,
+    /// frame reads, stats, and bus-load calls execute in parallel.
+    pub fn read_session<T>(&self, f: impl FnOnce(&Session) -> Result<T>) -> Result<T> {
+        f(&*read_lock(&self.session)?)
     }
 
-    /// Start `work` on a background thread. It holds the session lock until it
-    /// returns. Refuses while another job runs. A panic in `work` is recorded
-    /// as a failed job, not propagated.
+    /// Run `f` with exclusive mutable access to the session. Waits while a job
+    /// or in-flight read holds the lock.
+    pub fn with_session<T>(&self, f: impl FnOnce(&mut Session) -> Result<T>) -> Result<T> {
+        f(&mut *write_lock(&self.session)?)
+    }
+
+    /// Start `work` on a background thread. It holds the session write lock
+    /// until it returns. Refuses while another job runs. A panic in `work` is
+    /// recorded as a failed job, not propagated.
     pub fn begin(
         self: &Arc<Self>,
         work: impl FnOnce(&mut Session, &IndexControl) -> Result<()> + Send + 'static,
@@ -123,7 +131,7 @@ impl Engine {
     /// Run `work` with the session locked. A panic in `work` becomes an error
     /// while the lock is still held, so it does not poison the session.
     fn locked<T>(&self, work: impl FnOnce(&mut Session, &IndexControl) -> Result<T>) -> Result<T> {
-        let mut session = lock(&self.session)?;
+        let mut session = write_lock(&self.session)?;
         catch_unwind(AssertUnwindSafe(|| work(&mut session, &self.control)))
             .unwrap_or_else(|payload| Err(panic_error(payload.as_ref())))
     }
@@ -157,7 +165,7 @@ impl Engine {
                 *phase = Phase::Running;
                 status.running = true;
             }
-            Phase::Ready(opened) => match lock(&self.session) {
+            Phase::Ready(opened) => match read_lock(&self.session) {
                 Ok(session) => match session.summary() {
                     Ok(summary) => {
                         status.done = true;
@@ -188,6 +196,14 @@ impl Engine {
 
 fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
     mutex.lock().map_err(|err| Error::internal(err.to_string()))
+}
+
+fn read_lock<T>(rw: &RwLock<T>) -> Result<RwLockReadGuard<'_, T>> {
+    rw.read().map_err(|err| Error::internal(err.to_string()))
+}
+
+fn write_lock<T>(rw: &RwLock<T>) -> Result<RwLockWriteGuard<'_, T>> {
+    rw.write().map_err(|err| Error::internal(err.to_string()))
 }
 
 fn panic_error(payload: &(dyn Any + Send)) -> Error {

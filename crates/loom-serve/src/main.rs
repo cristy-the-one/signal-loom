@@ -16,19 +16,30 @@ use std::sync::Arc;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const MAX_BODY: usize = 32 * 1024 * 1024;
+const WORKER_THREADS: usize = 8;
 
 fn main() {
     let port = parse_port();
     let addr = format!("127.0.0.1:{port}");
-    let server = Server::http(&addr).unwrap_or_else(|err| {
+    let server = Arc::new(Server::http(&addr).unwrap_or_else(|err| {
         eprintln!("loom-serve could not bind {addr}: {err}");
         std::process::exit(1);
-    });
+    }));
     eprintln!("signal-loom engine listening on http://{addr}");
     let engine = Arc::new(Engine::new());
-    for mut request in server.incoming_requests() {
-        let response = dispatch(&engine, &mut request);
-        let _ = request.respond(response);
+    let mut workers = Vec::with_capacity(WORKER_THREADS);
+    for _ in 0..WORKER_THREADS {
+        let server = Arc::clone(&server);
+        let engine = Arc::clone(&engine);
+        workers.push(std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let response = dispatch(&engine, &mut request);
+                let _ = request.respond(response);
+            }
+        }));
+    }
+    for worker in workers {
+        let _ = worker.join();
     }
 }
 
@@ -178,36 +189,36 @@ fn route(
         }
         (Method::Post, "/api/query") => {
             let query: Query = parse_json(&body)?;
-            json(&engine.with_session(|session| session.query(&query))?)
+            json(&engine.read_session(|session| session.query(&query))?)
         }
         (Method::Post, "/api/values") => {
             let req: TimeBody = parse_json(&body)?;
-            json(&engine.with_session(|session| session.values_at(req.t_us))?)
+            json(&engine.read_session(|session| session.values_at(req.t_us))?)
         }
         (Method::Post, "/api/step") => {
             let req: StepBody = parse_json(&body)?;
-            json(&engine.with_session(|session| session.step(req.t_us, req.direction))?)
+            json(&engine.read_session(|session| session.step(req.t_us, req.direction))?)
         }
         (Method::Post, "/api/frame") => {
             let req: TimeBody = parse_json(&body)?;
-            json(&engine.with_session(|session| session.frame_at(req.t_us))?)
+            json(&engine.read_session(|session| session.frame_at(req.t_us))?)
         }
         (Method::Post, "/api/project-json") => {
             let view: ProjectView = parse_json(&body)?;
-            let text = engine.with_session(|session| session.project_json(&view))?;
+            let text = engine.read_session(|session| session.project_json(&view))?;
             json(&ProjectJsonReply { json: &text })
         }
         (Method::Post, "/api/bus") => {
             let req: ExportBody = parse_json(&body)?;
-            json(&engine.with_session(|session| session.bus_load(req.t0_us, req.t1_us))?)
+            json(&engine.read_session(|session| session.bus_load(req.t0_us, req.t1_us))?)
         }
         (Method::Post, "/api/stats") => {
             let req: StatsBody = parse_json(&body)?;
-            json(&engine.with_session(|session| session.stats(&req.name, req.t0_us, req.t1_us))?)
+            json(&engine.read_session(|session| session.stats(&req.name, req.t0_us, req.t1_us))?)
         }
         (Method::Post, "/api/export-csv") => {
             let req: ExportBody = parse_json(&body)?;
-            let export = engine.with_session(|session| {
+            let export = engine.read_session(|session| {
                 session.export_csv_report(&req.names, req.t0_us, req.t1_us)
             })?;
             export_json(&export)
@@ -215,7 +226,7 @@ fn route(
         (Method::Post, "/api/export-slog") => {
             let req: ExportBody = parse_json(&body)?;
             let export =
-                engine.with_session(|session| session.export_slog_report(req.t0_us, req.t1_us))?;
+                engine.read_session(|session| session.export_slog_report(req.t0_us, req.t1_us))?;
             export_json(&export)
         }
         (Method::Post, "/api/math") => {

@@ -11,11 +11,12 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+#[cfg(test)]
 pub(crate) use crate::index::evaluate::evaluate;
+use crate::index::evaluate::evaluate_path;
 pub use crate::index::evaluate::{
     CaseOutcome, CheckOutcome, Evaluation, EventKind, Evidence, Occurrence, Reason, Verdict,
 };
-use crate::index::IndexedLog;
 use crate::map::{unknown_pair_message, MappedSignal, SignalMap, TimeoutFactor};
 pub use crate::verdict::{count_cases, render_verdict, Counts, VerdictDbc, VerdictLog};
 
@@ -198,8 +199,7 @@ pub struct Judgement {
 /// timeout factor is the default, 2.5 cycle times.
 pub fn evaluate_log(path: &Path, map: &SignalMap, request: &Request) -> Result<Judgement> {
     let timeout = TimeoutFactor::default();
-    let log = IndexedLog::open_path_timed(path, Some(map), timeout, None)?;
-    let evaluation = evaluate(&log, map, timeout, request)?;
+    let (log, evaluation) = evaluate_path(path, map, timeout, request)?;
     Ok(Judgement {
         evaluation,
         log: LogStats {

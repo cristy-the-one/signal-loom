@@ -27,8 +27,13 @@ pub(super) struct BlfReader<'a> {
 }
 
 impl<'a> BlfReader<'a> {
-    /// Continue at `offset`, an object boundary. At 0 the file header is read and checked.
-    pub(super) fn open(reader: &'a mut dyn ReadSeek, offset: u64) -> Result<Self> {
+    /// Continue at `offset` (an object boundary) and `inner_offset` inside a
+    /// `LOG_CONTAINER` when resuming mid-container. At 0 the file header is read.
+    pub(super) fn open(
+        reader: &'a mut dyn ReadSeek,
+        offset: u64,
+        inner_offset: u32,
+    ) -> Result<Self> {
         let mut this = Self {
             src: Source::at(reader, offset)?,
             skips: Skips::default(),
@@ -40,6 +45,22 @@ impl<'a> BlfReader<'a> {
         };
         if offset == 0 {
             this.read_file_header()?;
+        } else if inner_offset > 0 {
+            if let Some((obj_off, obj_type)) = this.read_object()? {
+                if blf::is_container(obj_type) {
+                    match blf::inflate_container(&this.object, &mut this.inflated) {
+                        Ok(()) => {
+                            this.container = obj_off;
+                            this.at = (inner_offset as usize).min(this.inflated.len());
+                            this.fresh = false;
+                        }
+                        Err(err) => {
+                            this.inflated.clear();
+                            this.skips.note(format!("byte {obj_off}: {err}"));
+                        }
+                    }
+                }
+            }
         }
         Ok(this)
     }
@@ -107,7 +128,8 @@ impl RecordReader for BlfReader<'_> {
             match blf::next_inner_checked(&self.inflated, &mut self.at, self.container) {
                 Ok(Some(rec)) => {
                     let offset = rec.offset;
-                    let rec = rec.placed(offset, self.fresh);
+                    let inner_offset = rec.inner_offset;
+                    let rec = rec.placed_inner(offset, inner_offset, self.fresh);
                     self.fresh = false;
                     return Ok(Some(rec));
                 }

@@ -26,8 +26,8 @@ mod testing;
 
 use crate::error::Result;
 use crate::map::{SignalMap, TimeoutFactor};
-use crate::scan::{sniff, LogFormat};
-use checkpoint::Checkpoint;
+use crate::scan::{sniff, LogFormat, ScanHints};
+use checkpoint::{Checkpoint, SnapshotTable, SpanTable};
 use integrity::IntegrityEvent;
 use signal::{MessageSignals, SignalMeta};
 use source::{sniff_path, Source};
@@ -49,9 +49,12 @@ pub struct IndexedLog {
     /// Format shown to the user and read by the scanner on resume.
     /// A BLF stays a BLF; containers are inflated one at a time.
     format: LogFormat,
+    hints: ScanHints,
     checkpoints: Vec<Checkpoint>,
-    snapshots: Vec<Vec<Option<f64>>>,
+    snapshots: SnapshotTable,
+    spans: SpanTable,
     frame_count: u64,
+    frame_bits: u64,
     event_count: u64,
     events_truncated: bool,
     t_start_us: u64,
