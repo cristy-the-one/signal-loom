@@ -17,7 +17,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const MAX_BODY: usize = 32 * 1024 * 1024;
 const WORKER_THREADS: usize = 8;
-const VERSION: &str = "loom-serve 0.1.0";
+const VERSION: &str = concat!("loom-serve ", env!("CARGO_PKG_VERSION"));
 const USAGE: &str = "\
 usage:
   loom-serve [--port PORT] [--log FILE [--dbc FILE[@CHANNEL] ...]] [--project FILE]
@@ -929,11 +929,8 @@ F 10000 1A0 800C881378640000
                 .unwrap();
         let (code, verdict) = answered(route(&engine, Method::Post, "/api/judge", None, req_bytes));
         assert_eq!(code, 200);
-        assert_eq!(verdict["format"], "loom-verdict/1");
-        assert_eq!(verdict["request_sha256"], expected["request_sha256"]);
-        assert_eq!(verdict["dbc"], expected["dbc"]);
-        assert_eq!(verdict["counts"], expected["counts"]);
-        assert_eq!(verdict["cases"], expected["cases"]);
+        // The in-memory verdict is the CLI's verdict, log hash included.
+        assert_eq!(verdict, expected);
 
         let (bad_code, bad_body) = post(
             &engine,

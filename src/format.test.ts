@@ -5,8 +5,10 @@ import {
   errText,
   formatBytes,
   formatCount,
+  formatHexBytes,
   formatReading,
   formatSpan,
+  formatTimeForSpan,
   formatUs,
   formatValue,
   hexId,
@@ -14,16 +16,17 @@ import {
   tickStep,
 } from "./format";
 
-describe("formatUs", () => {
+describe("formatUs & formatTimeForSpan", () => {
   it("prints zero and sub-millisecond times as 0.000", () => {
     expect(formatUs(0)).toBe("0.000");
     expect(formatUs(500)).toBe("0.000");
   });
 
-  it("prints milliseconds, seconds, and padded minutes", () => {
+  it("prints milliseconds, seconds, padded minutes, and hours", () => {
     expect(formatUs(1_000)).toBe("0.001");
     expect(formatUs(1_500_000)).toBe("1.500");
     expect(formatUs(61_250_000)).toBe("1:01.250");
+    expect(formatUs(3_661_250_000)).toBe("1:01:01.250");
   });
 
   it("rounds to the nearest microsecond and keeps the sign", () => {
@@ -31,10 +34,15 @@ describe("formatUs", () => {
     expect(formatUs(-1_500)).toBe("-0.001");
     expect(formatUs(-61_250_000)).toBe("-1:01.250");
   });
+
+  it("shows microsecond digits when zoomed below 100 ms", () => {
+    expect(formatTimeForSpan(1_234_567, 50_000)).toBe("1.234.567");
+    expect(formatTimeForSpan(1_234_567, 500_000)).toBe("1.234");
+  });
 });
 
 describe("formatSpan", () => {
-  it("uses microseconds, then milliseconds, then seconds", () => {
+  it("uses microseconds, milliseconds, seconds, minutes, and hours", () => {
     expect(formatSpan(0)).toBe("0 µs");
     expect(formatSpan(999.4)).toBe("999 µs");
     expect(formatSpan(1_000)).toBe("1 ms");
@@ -44,17 +52,28 @@ describe("formatSpan", () => {
     expect(formatSpan(1_500_000)).toBe("1.50 s");
     expect(formatSpan(9_500_000)).toBe("9.50 s");
     expect(formatSpan(10_000_000)).toBe("10.0 s");
+    expect(formatSpan(180_000_000)).toBe("3.0 min");
+    expect(formatSpan(7_500_000_000)).toBe("2h 5m");
   });
 });
 
-describe("formatBytes", () => {
-  it("switches at the kibibyte and mebibyte", () => {
+describe("formatBytes & formatHexBytes", () => {
+  it("switches at KB, MB, and GB", () => {
     expect(formatBytes(0)).toBe("0 B");
     expect(formatBytes(1023.4)).toBe("1023 B");
     expect(formatBytes(1024)).toBe("1.0 KB");
     expect(formatBytes(1536)).toBe("1.5 KB");
     expect(formatBytes(1024 * 1024)).toBe("1.0 MB");
     expect(formatBytes(1.5 * 1024 * 1024)).toBe("1.5 MB");
+    expect(formatBytes(2.5 * 1024 * 1024 * 1024)).toBe("2.50 GB");
+  });
+
+  it("formats CAN payload bytes in uppercase hex with truncation", () => {
+    expect(formatHexBytes([])).toBe("");
+    expect(formatHexBytes("")).toBe("");
+    expect(formatHexBytes([0x80, 0x0c, 0xff])).toBe("80 0C FF");
+    expect(formatHexBytes("800c8813")).toBe("80 0C 88 13");
+    expect(formatHexBytes([1, 2, 3, 4], 2)).toBe("01 02 …");
   });
 });
 
@@ -148,11 +167,12 @@ describe("errText", () => {
 });
 
 describe("tickStep", () => {
-  it("picks the first tick at least a sixth of the span, else one minute", () => {
-    expect(tickStep(0)).toBe(1_000);
+  it("scales from 100 µs up to 1 hour without crowding multi-hour logs", () => {
+    expect(tickStep(0)).toBe(100);
     expect(tickStep(6_000)).toBe(1_000);
     expect(tickStep(6_006)).toBe(2_000);
     expect(tickStep(360_000_000)).toBe(60_000_000);
-    expect(tickStep(360_000_006)).toBe(60_000_000);
+    expect(tickStep(360_000_006)).toBe(120_000_000);
+    expect(tickStep(50_000_000_000)).toBe(3_600_000_000);
   });
 });

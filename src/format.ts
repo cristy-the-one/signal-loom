@@ -1,18 +1,38 @@
 export function formatUs(us: number): string {
   const neg = us < 0;
   let rest = Math.abs(Math.round(us));
+  const hrs = Math.floor(rest / 3_600_000_000);
+  rest %= 3_600_000_000;
   const min = Math.floor(rest / 60_000_000);
   rest %= 60_000_000;
   const sec = Math.floor(rest / 1_000_000);
   const ms = Math.floor((rest % 1_000_000) / 1000);
   const body =
-    min > 0
-      ? `${min}:${sec.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`
-      : `${sec}.${ms.toString().padStart(3, "0")}`;
+    hrs > 0
+      ? `${hrs}:${min.toString().padStart(2, "0")}:${sec.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`
+      : min > 0
+        ? `${min}:${sec.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`
+        : `${sec}.${ms.toString().padStart(3, "0")}`;
   return neg ? `-${body}` : body;
 }
 
+/** Like `formatUs`, but appends `.µµµ` sub-millisecond digits when zoomed below 100 ms. */
+export function formatTimeForSpan(us: number, spanUs: number): string {
+  const base = formatUs(us);
+  if (spanUs >= 100_000) return base;
+  const micros = Math.abs(Math.round(us)) % 1000;
+  return `${base}.${micros.toString().padStart(3, "0")}`;
+}
+
 export function formatSpan(us: number): string {
+  if (us >= 3_600_000_000) {
+    const hrs = Math.floor(us / 3_600_000_000);
+    const mins = Math.round((us % 3_600_000_000) / 60_000_000);
+    return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+  }
+  if (us >= 120_000_000) {
+    return `${(us / 60_000_000).toFixed(1)} min`;
+  }
   if (us >= 1_000_000) {
     const digits = us >= 10_000_000 ? 1 : 2;
     return `${(us / 1_000_000).toFixed(digits)} s`;
@@ -24,7 +44,25 @@ export function formatSpan(us: number): string {
 export function formatBytes(n: number): string {
   if (n < 1024) return `${Math.round(n)} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+export function formatHexBytes(input: readonly number[] | string, maxShown = 8): string {
+  let pairs: string[];
+  if (typeof input === "string") {
+    const clean = input.replace(/\s+/g, "").toUpperCase();
+    if (!clean) return "";
+    pairs = [];
+    for (let i = 0; i < clean.length; i += 2) {
+      pairs.push(clean.slice(i, i + 2));
+    }
+  } else {
+    if (input.length === 0) return "";
+    pairs = input.map((b) => (b & 0xff).toString(16).toUpperCase().padStart(2, "0"));
+  }
+  const shown = pairs.slice(0, maxShown).join(" ");
+  return pairs.length > maxShown ? `${shown} …` : shown;
 }
 
 export function formatValue(v: number): string {
@@ -105,8 +143,9 @@ export function errText(err: unknown): string {
 }
 
 const TICKS = [
-  1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000, 2_000_000,
-  5_000_000, 10_000_000, 15_000_000, 30_000_000, 60_000_000,
+  100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000,
+  2_000_000, 5_000_000, 10_000_000, 15_000_000, 30_000_000, 60_000_000, 120_000_000, 300_000_000,
+  600_000_000, 1_800_000_000, 3_600_000_000,
 ];
 
 export function tickStep(span: number): number {
@@ -114,5 +153,5 @@ export function tickStep(span: number): number {
   for (const step of TICKS) {
     if (step >= target) return step;
   }
-  return 60_000_000;
+  return 3_600_000_000;
 }

@@ -1,5 +1,5 @@
 import { eachTick, fitCanvas } from "./canvas";
-import { clamp, formatReading, formatUs, type Readout } from "./format";
+import { clamp, formatReading, formatTimeForSpan, formatValue, type Readout } from "./format";
 import { AMBER, CORAL, CYAN, GREEN, MONO, PINK, PLAYHEAD, SURFACE, TEAL, TEXT_MUTED, VIOLET, YELLOW } from "./theme";
 import type { Point } from "./types";
 
@@ -14,13 +14,30 @@ export interface Trace {
   dashed?: boolean;
 }
 
+export interface PlotLane {
+  title: string;
+  traces: Trace[];
+  sharedScale: boolean;
+  scaleMin: number;
+  scaleMax: number;
+}
+
 export interface PlotOverlay {
   hoverT: number | null;
   cursorA: number | null;
   cursorB: number | null;
+  boxZoom?: { t0: number; t1: number } | null;
 }
 
-const PAD = { left: 8, right: 12, top: 16, bottom: 22 };
+const PAD = { left: 8, right: 12, top: 12, bottom: 22 };
+
+function yForTrace(value: number, trace: Trace, top: number, height: number): number {
+  const range = trace.max - trace.min;
+  const pad = range === 0 ? 1 : range * 0.08;
+  const lo = trace.min - pad;
+  const hi = trace.max + pad;
+  return top + (1 - (value - lo) / (hi - lo)) * height;
+}
 
 export function drawPlot(
   canvas: HTMLCanvasElement,
@@ -28,6 +45,7 @@ export function drawPlot(
   playhead: number,
   traces: Trace[],
   overlay: PlotOverlay,
+  lanes?: PlotLane[],
 ): void {
   const fitted = fitCanvas(canvas);
   if (!fitted) return;
@@ -43,22 +61,70 @@ export function drawPlot(
   const span = Math.max(1, view.t1 - view.t0);
   const xOf = (t: number) => PAD.left + ((t - view.t0) / span) * plotW;
 
+  const effectiveLanes: PlotLane[] =
+    lanes && lanes.length > 0
+      ? lanes
+      : [
+          {
+            title: "",
+            traces,
+            sharedScale: traces.length === 1,
+            scaleMin: traces[0]?.min ?? 0,
+            scaleMax: traces[0]?.max ?? 1,
+          },
+        ];
+  const multiLane = effectiveLanes.length > 1;
+  const laneGap = multiLane
+    ? Math.min(6, Math.max(2, Math.floor(plotH / (effectiveLanes.length * 14))))
+    : 0;
+  const laneH = Math.max(
+    8,
+    (plotH - laneGap * (effectiveLanes.length - 1)) / effectiveLanes.length,
+  );
+
   ctx.save();
   ctx.beginPath();
   ctx.rect(PAD.left, PAD.top, plotW, plotH);
   ctx.clip();
 
-  ctx.strokeStyle = "rgba(180, 200, 210, 0.07)";
-  ctx.lineWidth = 1;
-  for (let i = 1; i < 4; i += 1) {
-    const y = PAD.top + (plotH * i) / 4;
-    ctx.beginPath();
-    ctx.moveTo(PAD.left, y + 0.5);
-    ctx.lineTo(PAD.left + plotW, y + 0.5);
-    ctx.stroke();
+  if (!multiLane) {
+    ctx.strokeStyle = "rgba(180, 200, 210, 0.07)";
+    ctx.lineWidth = 1;
+    for (let i = 1; i < 4; i += 1) {
+      const y = PAD.top + (plotH * i) / 4;
+      ctx.beginPath();
+      ctx.moveTo(PAD.left, y + 0.5);
+      ctx.lineTo(PAD.left + plotW, y + 0.5);
+      ctx.stroke();
+    }
+  } else {
+    for (let k = 0; k < effectiveLanes.length; k += 1) {
+      const laneTop = PAD.top + k * (laneH + laneGap);
+      if (k % 2 === 1) {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.015)";
+        ctx.fillRect(PAD.left, laneTop, plotW, laneH);
+      }
+      if (k > 0) {
+        const sepY = Math.round(laneTop - laneGap / 2) + 0.5;
+        ctx.strokeStyle = "rgba(150, 175, 195, 0.2)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(PAD.left, sepY);
+        ctx.lineTo(PAD.left + plotW, sepY);
+        ctx.stroke();
+      }
+      const midY = Math.round(laneTop + laneH / 2) + 0.5;
+      ctx.strokeStyle = "rgba(180, 200, 210, 0.05)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(PAD.left, midY);
+      ctx.lineTo(PAD.left + plotW, midY);
+      ctx.stroke();
+    }
   }
 
   ctx.strokeStyle = "rgba(180, 200, 210, 0.045)";
+  ctx.lineWidth = 1;
   eachTick(view.t0, view.t1, (t) => {
     const x = xOf(t);
     ctx.beginPath();
@@ -67,8 +133,44 @@ export function drawPlot(
     ctx.stroke();
   });
 
-  for (const trace of traces) {
-    drawTrace(ctx, trace, view, plotW, plotH);
+  for (let k = 0; k < effectiveLanes.length; k += 1) {
+    const lane = effectiveLanes[k];
+    const laneTop = PAD.top + k * (laneH + laneGap);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(PAD.left, laneTop, plotW, laneH);
+    ctx.clip();
+    for (const trace of lane.traces) {
+      drawTrace(ctx, trace, view, plotW, laneTop, laneH);
+    }
+    if (multiLane && lane.title && laneH >= 20) {
+      ctx.font = `10px ${MONO}`;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = lane.traces.length === 1 ? lane.traces[0].color : "rgba(231, 238, 243, 0.72)";
+      ctx.fillText(lane.title, PAD.left + 5, laneTop + 3);
+    }
+    if (lane.sharedScale && lane.traces.length > 0 && laneH >= 32) {
+      ctx.font = `10px ${MONO}`;
+      ctx.textAlign = "right";
+      ctx.fillStyle = "rgba(139, 154, 166, 0.76)";
+      ctx.textBaseline = "top";
+      ctx.fillText(formatValue(lane.scaleMax), PAD.left + plotW - 4, laneTop + 3);
+      ctx.textBaseline = "bottom";
+      ctx.fillText(formatValue(lane.scaleMin), PAD.left + plotW - 4, laneTop + laneH - 2);
+    }
+    ctx.restore();
+  }
+
+  if (overlay.boxZoom) {
+    const bx0 = xOf(Math.min(overlay.boxZoom.t0, overlay.boxZoom.t1));
+    const bx1 = xOf(Math.max(overlay.boxZoom.t0, overlay.boxZoom.t1));
+    const bw = Math.max(1, bx1 - bx0);
+    ctx.fillStyle = "rgba(62, 198, 255, 0.14)";
+    ctx.fillRect(bx0, PAD.top, bw, plotH);
+    ctx.strokeStyle = "rgba(62, 198, 255, 0.85)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx0 + 0.5, PAD.top + 0.5, Math.max(1, bw - 1), plotH - 1);
   }
 
   drawCursor(ctx, overlay.cursorA, view, plotW, plotH, YELLOW);
@@ -84,18 +186,18 @@ export function drawPlot(
     ctx.lineTo(x + 0.5, PAD.top + plotH);
     ctx.stroke();
     ctx.setLineDash([]);
-    for (const trace of traces) {
-      const value = heldValue(trace.points, overlay.hoverT);
-      if (value == null) continue;
-      const range = trace.max - trace.min;
-      const pad = range === 0 ? 1 : range * 0.08;
-      const lo = trace.min - pad;
-      const hi = trace.max + pad;
-      const y = PAD.top + (1 - (value - lo) / (hi - lo)) * plotH;
-      ctx.fillStyle = trace.color;
-      ctx.beginPath();
-      ctx.arc(x, y, 2.4, 0, Math.PI * 2);
-      ctx.fill();
+    for (let k = 0; k < effectiveLanes.length; k += 1) {
+      const lane = effectiveLanes[k];
+      const laneTop = PAD.top + k * (laneH + laneGap);
+      for (const trace of lane.traces) {
+        const value = heldValue(trace.points, overlay.hoverT);
+        if (value == null) continue;
+        const y = yForTrace(value, trace, laneTop, laneH);
+        ctx.fillStyle = trace.color;
+        ctx.beginPath();
+        ctx.arc(x, y, 2.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 
@@ -122,7 +224,7 @@ export function drawPlot(
   ctx.textBaseline = "top";
   eachTick(view.t0, view.t1, (t) => {
     const x = xOf(t);
-    ctx.fillText(formatUs(t), x + 4, PAD.top + plotH + 4);
+    ctx.fillText(formatTimeForSpan(t, span), x + 4, PAD.top + plotH + 4);
   });
 }
 
@@ -148,9 +250,16 @@ export function timeOnPlot(
   return view.t0 + clamp(u, 0, 1) * (view.t1 - view.t0);
 }
 
-export function formatHover(name: string, value: number | null, unit: string, readout: Readout): string {
+export function formatHover(
+  name: string,
+  value: number | null,
+  unit: string,
+  readout: Readout,
+  enumLabel?: string | null,
+): string {
   const reading = value == null ? "—".padStart(readout.width) : formatReading(value, readout);
-  return unit ? `${name}  ${reading} ${unit}` : `${name}  ${reading}`;
+  const tail = [unit, enumLabel ? `(${enumLabel})` : ""].filter(Boolean).join(" ");
+  return tail ? `${name}  ${reading} ${tail}` : `${name}  ${reading}`;
 }
 
 function drawCursor(
@@ -179,16 +288,13 @@ function drawTrace(
   trace: Trace,
   view: { t0: number; t1: number },
   plotW: number,
-  plotH: number,
+  laneTop: number,
+  laneH: number,
 ): void {
   const points = trace.points;
   if (points.length === 0) return;
   const span = Math.max(1, view.t1 - view.t0);
-  const range = trace.max - trace.min;
-  const pad = range === 0 ? 1 : range * 0.08;
-  const lo = trace.min - pad;
-  const hi = trace.max + pad;
-  const yOf = (v: number) => PAD.top + (1 - (v - lo) / (hi - lo)) * plotH;
+  const yOf = (v: number) => yForTrace(v, trace, laneTop, laneH);
   const xOf = (t: number) => PAD.left + ((t - view.t0) / span) * plotW;
 
   ctx.beginPath();

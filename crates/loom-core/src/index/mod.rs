@@ -33,7 +33,7 @@ use signal::{MessageSignals, SignalMeta};
 use source::{sniff_path, Source};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
 pub(crate) use checksum::ChecksumAlgo;
@@ -72,6 +72,8 @@ pub struct IndexedLog {
     message_names: HashMap<u32, String>,
     /// Every CAN id that has at least one frame in the log.
     seen_ids: HashSet<u32>,
+    /// SHA-256 of the recording, read once on first request.
+    sha256: OnceLock<String>,
 }
 
 impl IndexedLog {
@@ -196,6 +198,16 @@ impl IndexedLog {
 
     pub fn checkpoint_count(&self) -> usize {
         self.checkpoints.len()
+    }
+
+    /// SHA-256 of the recording in lowercase hex. The first call reads the
+    /// whole file once; later calls return the cached digest.
+    pub fn sha256_hex(&self) -> Result<String> {
+        if let Some(hex) = self.sha256.get() {
+            return Ok(hex.clone());
+        }
+        let hex = self.source.sha256_hex()?;
+        Ok(self.sha256.get_or_init(|| hex).clone())
     }
 
     pub fn events(&self) -> &[(u64, String)] {

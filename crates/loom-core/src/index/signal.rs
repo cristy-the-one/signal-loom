@@ -117,6 +117,11 @@ impl IndexedLog {
         self.resolve_signal(name).is_some()
     }
 
+    /// The slot `stats(name)` reads, as handed to a build tap's decoded values.
+    pub(crate) fn signal_slot(&self, name: &str) -> Option<usize> {
+        self.resolve_signal(name)
+    }
+
     /// The position of the signal called `name`, if the log has one.
     pub(super) fn resolve_signal(&self, name: &str) -> Option<usize> {
         self.name_index.get(name).copied()

@@ -1,5 +1,6 @@
 import type { ClusterBindings } from "./gauges";
 import type { RailTab } from "./dom";
+import type { LaneMode } from "./lanes";
 import type {
   Bookmark,
   BusLoad,
@@ -33,6 +34,16 @@ interface State {
   busy: number;
   series: Series[];
   view: View;
+  /** Explicit camera center when panned/zoomed independently of the playhead; null tracks playhead. */
+  viewCenter: number | null;
+  /** Active Shift+drag box-zoom selection on the plot, if any. */
+  boxZoom: View | null;
+  /** Plotted signal temporarily soloed from the scope legend, if any. */
+  solo: string | null;
+  /** Scope track layout: single overlay, split per-signal tracks, or grouped tracks. */
+  laneMode: LaneMode;
+  /** Manual signal -> track group number (`1..N`) overrides used in `grouped` mode. */
+  signalLanes: Record<string, number>;
   frame: FrameHit | null;
   overview: Point[] | null;
   overviewName: string | null;
@@ -69,6 +80,11 @@ export const state: State = {
   busy: 0,
   series: [],
   view: { t0: 0, t1: 1 },
+  viewCenter: null,
+  boxZoom: null,
+  solo: null,
+  laneMode: "overlay",
+  signalLanes: {},
   frame: null,
   overview: null,
   overviewName: null,

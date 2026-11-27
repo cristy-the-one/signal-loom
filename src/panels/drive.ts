@@ -2,7 +2,7 @@ import * as api from "../api";
 import { els } from "../dom";
 import { LOG_FILTERS, download, onFile, pickPath, pickSavePath, withExtension } from "../files";
 import { basename, formatBytes, formatCount } from "../format";
-import { windowFor } from "../model";
+import { activeView } from "../model";
 import { adoptEdited, adoptSummary } from "../project";
 import { cancelCursorStats, refreshCursors } from "../query";
 import { draw, state } from "../state";
@@ -99,7 +99,7 @@ function exportWindow(): { t0: number; t1: number } | null {
   if (state.cursorA != null && state.cursorB != null) {
     return { t0: Math.min(state.cursorA, state.cursorB), t1: Math.max(state.cursorA, state.cursorB) };
   }
-  const view = windowFor(state.playhead, state.span, state.summary);
+  const view = activeView(state.summary);
   return { t0: view.t0, t1: view.t1 };
 }
 

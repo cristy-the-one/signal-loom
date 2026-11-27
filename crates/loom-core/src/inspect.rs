@@ -74,7 +74,12 @@ pub struct InspectedSignal {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InspectedEvents {
+    /// Every event the index counted.
     pub total: u64,
+    /// Events kept in the index's list (it stops at 5,000). The breakdown
+    /// below counts these, so with `events_truncated` it sums to `listed`,
+    /// not to `total`.
+    pub listed: u64,
     pub timeouts: u64,
     pub checksums: u64,
     pub counters: u64,
@@ -286,6 +291,7 @@ pub fn inspect_log(
         signals,
         events: InspectedEvents {
             total: log.event_count(),
+            listed: log.events().len() as u64,
             timeouts,
             checksums,
             counters,
@@ -297,8 +303,59 @@ pub fn inspect_log(
     })
 }
 
+/// Running window statistics for one signal slot, in record order, so the
+/// result matches `IndexedLog::stats` exactly.
+#[derive(Clone, Copy)]
+struct StatAcc {
+    count: u64,
+    sum: f64,
+    min: f64,
+    max: f64,
+    first: f64,
+    last: f64,
+}
+
+impl StatAcc {
+    const EMPTY: Self = Self {
+        count: 0,
+        sum: 0.0,
+        min: f64::INFINITY,
+        max: f64::NEG_INFINITY,
+        first: 0.0,
+        last: 0.0,
+    };
+
+    fn note(&mut self, value: f64) {
+        if self.count == 0 {
+            self.first = value;
+        }
+        self.count += 1;
+        self.sum += value;
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+        self.last = value;
+    }
+
+    fn stats(&self) -> Option<WindowStats> {
+        (self.count > 0).then(|| WindowStats {
+            count: self.count,
+            min: self.min,
+            max: self.max,
+            avg: self.sum / self.count as f64,
+            first: self.first,
+            last: self.last,
+        })
+    }
+}
+
 /// Compute window statistics for one or more signals over `[from_us, to_us]`
 /// (defaulting to `[t_start_us, t_end_us]` when omitted).
+///
+/// Every signal is gathered in the pass that builds the index, so a
+/// multi-gigabyte recording is read once however many signals are asked for.
+/// With no names, every signal with data in the log is reported, and one with
+/// no sample in the window is left out. A named signal with no sample in the
+/// window is an error, as `IndexedLog::stats` reports it.
 pub fn stats_for_log(
     path: &Path,
     map: Option<&SignalMap>,
@@ -306,21 +363,60 @@ pub fn stats_for_log(
     from_us: Option<u64>,
     to_us: Option<u64>,
 ) -> Result<StatsReport> {
-    let log = IndexedLog::open_path_timed(path, map, TimeoutFactor::default(), None)?;
+    // Accepted record times lie inside [t_start_us, t_end_us], so an open end
+    // of the window filters nothing, as the default bounds would not.
+    let (lo, hi) = {
+        let a = from_us.unwrap_or(0);
+        let b = to_us.unwrap_or(u64::MAX);
+        (a.min(b), a.max(b))
+    };
+    let mut acc: Vec<StatAcc> = Vec::new();
+    let mut tap = |t_us: u64, _: u32, _: u8, _: bool, _: u8, decoded: &[(usize, f64)]| {
+        if t_us < lo || t_us > hi {
+            return;
+        }
+        for &(slot, value) in decoded {
+            if slot >= acc.len() {
+                acc.resize(slot + 1, StatAcc::EMPTY);
+            }
+            acc[slot].note(value);
+        }
+    };
+    let log = IndexedLog::open_path_tapped(path, map, TimeoutFactor::default(), &mut tap)?;
     let t0_us = from_us.unwrap_or_else(|| log.t_start_us());
     let t1_us = to_us.unwrap_or_else(|| log.t_end_us());
+    // A pre-decoded CSV has no frames, so the tap saw nothing: read each
+    // signal back from the index instead.
+    let tapped = log.format() != crate::scan::LogFormat::DecodedCsv;
     let unit_by_name: BTreeMap<String, String> = log.signals().map(|s| (s.name, s.unit)).collect();
-    let target_names: Vec<String> = if names.is_empty() {
+    let explicit = !names.is_empty();
+    let target_names: Vec<String> = if explicit {
+        names.to_vec()
+    } else {
         log.signals()
             .filter(|s| s.min.is_some())
             .map(|s| s.name)
             .collect()
-    } else {
-        names.to_vec()
     };
     let mut signals = Vec::with_capacity(target_names.len());
     for name in &target_names {
-        let stats = log.stats(name, t0_us, t1_us)?;
+        let stats = match log.signal_slot(name) {
+            Some(slot) if tapped => match acc.get(slot).and_then(StatAcc::stats) {
+                Some(stats) => stats,
+                None if explicit => {
+                    return Err(crate::Error::invalid(format!(
+                        "no samples of {name} in that window"
+                    )))
+                }
+                None => continue,
+            },
+            // Unknown names fail here with the reader's own message.
+            _ => match log.stats(name, t0_us, t1_us) {
+                Ok(stats) => stats,
+                Err(_) if !explicit => continue,
+                Err(err) => return Err(err),
+            },
+        };
         let unit = unit_by_name.get(name).cloned().unwrap_or_default();
         signals.push(NamedStats {
             name: name.clone(),

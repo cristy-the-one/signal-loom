@@ -13,7 +13,7 @@ describe("eachTick", () => {
   });
 
   it("starts at the first tick on or after t0", () => {
-    expect(ticks(500, 2_500)).toEqual([1_000, 2_000]);
+    expect(ticks(600, 2_400)).toEqual([1_000, 1_500, 2_000]);
   });
 
   it("visits a zero-length span once when it sits on a tick, and visits nothing when reversed", () => {

@@ -21,6 +21,31 @@ impl Source {
         }
     }
 
+    /// SHA-256 of the whole recording, lowercase hex, read in 64 KiB chunks.
+    pub(super) fn sha256_hex(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        match self {
+            Self::Memory(bytes) => hasher.update(bytes.as_slice()),
+            Self::Path(path) => {
+                let mut file = File::open(path).map_err(|err| Error::read(path, err))?;
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let n = file.read(&mut buf).map_err(|err| Error::read(path, err))?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+            }
+        }
+        Ok(hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
+    }
+
     pub(super) fn with_reader<T>(
         &self,
         body: impl FnOnce(&mut dyn ReadSeek) -> Result<T>,

@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeView,
   baseName,
   compareName,
   defaultPlotted,
   duration,
   hasData,
   isCompareName,
+  labelForValue,
   oneSecond,
   signalEntries,
   windowFor,
 } from "./model";
+import { state } from "./state";
 import type { SignalInfo, Summary } from "./types";
 
 function signal(partial: Partial<SignalInfo> & Pick<SignalInfo, "name">): SignalInfo {
@@ -164,9 +167,35 @@ describe("windowFor", () => {
     expect(windowFor(9_900_000, 2_000_000, log)).toEqual({ t0: 8_000_000, t1: 10_000_000 });
   });
 
-  it("shows the whole log when the span covers it, and enforces the minimum span", () => {
+  it("shows the whole log when the span covers it, and enforces the 1 ms minimum span", () => {
     expect(windowFor(5_000_000, 50_000_000, log)).toEqual({ t0: 0, t1: 10_000_000 });
-    expect(windowFor(5_000_000, 100, log)).toEqual({ t0: 4_995_000, t1: 5_005_000 });
+    expect(windowFor(5_000_000, 100, log)).toEqual({ t0: 4_999_500, t1: 5_000_500 });
+  });
+});
+
+describe("activeView & labelForValue", () => {
+  it("uses decoupled viewCenter when set and falls back to playhead", () => {
+    const log = summary({ tStartUs: 0, tEndUs: 10_000_000 });
+    state.playhead = 2_000_000;
+    state.span = 2_000_000;
+    state.viewCenter = null;
+    expect(activeView(log)).toEqual({ t0: 1_000_000, t1: 3_000_000 });
+    state.viewCenter = 7_000_000;
+    expect(activeView(log)).toEqual({ t0: 6_000_000, t1: 8_000_000 });
+    state.viewCenter = null;
+  });
+
+  it("resolves integer VAL_ enum labels on signals", () => {
+    const gear = signal({
+      name: "Gear",
+      labels: [
+        { value: 0, label: "Neutral" },
+        { value: 3, label: "3rd" },
+      ],
+    });
+    expect(labelForValue(gear, 3)).toBe("3rd");
+    expect(labelForValue(gear, 3.4)).toBeNull();
+    expect(labelForValue(gear, null)).toBeNull();
   });
 });
 
