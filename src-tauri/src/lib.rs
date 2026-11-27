@@ -263,6 +263,16 @@ fn write_project(state: State<'_, AppState>, path: String, view: ProjectView) ->
     state.read_session(|session| session.write_project(PathBuf::from(path).as_path(), &view))
 }
 
+#[tauri::command(async)]
+fn get_summary(state: State<'_, AppState>) -> Result<loom_core::Summary, Error> {
+    state.read_session(|session| session.summary())
+}
+
+#[tauri::command(async)]
+fn judge_request(state: State<'_, AppState>, request_json: String) -> Result<String, Error> {
+    state.read_session(|session| session.judge_request(&request_json))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -270,6 +280,8 @@ pub fn run() {
         .manage(AppState::new(Engine::new()))
         .invoke_handler(tauri::generate_handler![
             open_sample,
+            get_summary,
+            judge_request,
             begin_open_log,
             begin_open_map,
             begin_add_map,

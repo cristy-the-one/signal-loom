@@ -155,19 +155,42 @@ impl Session {
         path: &Path,
         control: Option<&IndexControl>,
     ) -> Result<Summary> {
+        self.open_path_inner(path, true, control)
+    }
+
+    /// Index `path` against whatever maps are already installed in this session
+    /// (ignoring sibling `.dbc`/`.map.json` files and never setting explicit maps aside).
+    pub fn open_path_keeping_map_controlled(
+        &mut self,
+        path: &Path,
+        control: Option<&IndexControl>,
+    ) -> Result<Summary> {
+        self.open_path_inner(path, false, control)
+    }
+
+    fn open_path_inner(
+        &mut self,
+        path: &Path,
+        auto_map: bool,
+        control: Option<&IndexControl>,
+    ) -> Result<Summary> {
         if !path.is_file() {
             return Err(Error::not_found(format!(
                 "log not found: {}",
                 path.display()
             )));
         }
-        let incoming = match sibling_map(path) {
-            Some(sibling) => Some((read_map_file(&sibling)?, sibling)),
-            None => None,
+        let incoming = if auto_map {
+            match sibling_map(path) {
+                Some(sibling) => Some((read_map_file(&sibling)?, sibling)),
+                None => None,
+            }
+        } else {
+            None
         };
         let map_for_index = incoming.as_ref().map(|(map, _)| map).or(self.maps.map());
         let mut indexed = IndexedLog::open_path_timed(path, map_for_index, self.timeout, control)?;
-        let set_aside = incoming.is_none() && !self.maps.fits(&indexed);
+        let set_aside = auto_map && incoming.is_none() && !self.maps.fits(&indexed);
         if set_aside {
             indexed = IndexedLog::open_path_timed(path, None, self.timeout, control)?;
         }
@@ -268,13 +291,20 @@ impl Session {
                     .signals()
                     .map(|signal| SignalDto {
                         name: signal.name,
+                        defined_name: signal.defined_name,
                         unit: signal.unit,
                         message_name: signal.message_name,
                         message_id: signal.message_id,
+                        channel: signal.channel,
                         min: signal.min,
                         max: signal.max,
                         step: signal.step,
                         from_map: signal.from_map,
+                        labels: signal
+                            .table
+                            .into_iter()
+                            .map(|(value, label)| crate::dto::SignalLabelDto { value, label })
+                            .collect(),
                     })
                     .collect();
                 signals.extend(self.deck.signals());
@@ -298,6 +328,45 @@ impl Session {
                 warnings
             },
         })
+    }
+
+    /// Evaluate a `loom-judge/1` request JSON string against the already-open
+    /// log and signal map without re-indexing or re-hashing the recording,
+    /// returning the rendered `loom-verdict/1` JSON document.
+    pub fn judge_request(&self, request_json: &str) -> Result<String> {
+        let log = self.log()?;
+        let map = self.maps.map().ok_or_else(|| {
+            Error::invalid("no signal map or DBC is loaded; load a DBC before judging")
+        })?;
+        let request = crate::judge::check(request_json, map).map_err(|refusal| {
+            Error::invalid(format!("request refused: {}", refusal.problems.join("; ")))
+        })?;
+        let evaluation = crate::index::evaluate::evaluate(log, map, self.timeout, &request)?;
+        let request_sha256 = maps::sha256_hex(request_json.as_bytes());
+        let dbcs: Vec<crate::judge::VerdictDbc> = if self.maps.sources().is_empty() {
+            vec![crate::judge::VerdictDbc {
+                file: map.name.clone(),
+                sha256: String::new(),
+                channel: 0,
+            }]
+        } else {
+            self.maps.sources().to_vec()
+        };
+        let verdict_log = crate::judge::VerdictLog {
+            file: self.log_label.clone(),
+            sha256: String::new(),
+            t_start_us: log.t_start_us(),
+            t_end_us: log.t_end_us(),
+            frames: log.frame_count(),
+            skipped: log.skipped(),
+            events_truncated: log.events_truncated(),
+        };
+        Ok(crate::judge::render_verdict(
+            &evaluation,
+            &request_sha256,
+            &verdict_log,
+            &dbcs,
+        ))
     }
 
     fn log(&self) -> Result<&IndexedLog> {

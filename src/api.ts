@@ -97,6 +97,23 @@ export function openSample(): Promise<Summary> {
   return http<Summary>("/api/open-sample", { method: "POST" });
 }
 
+export function summary(): Promise<Summary> {
+  if (inTauri()) return invoke<Summary>("get_summary");
+  return http<Summary>("/api/summary");
+}
+
+export async function judge(requestJson: string): Promise<Record<string, unknown>> {
+  if (inTauri()) {
+    const raw = await invoke<string>("judge_request", { requestJson });
+    return JSON.parse(raw) as Record<string, unknown>;
+  }
+  return http<Record<string, unknown>>("/api/judge", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: requestJson,
+  });
+}
+
 export function beginOpen(path: string): Promise<void> {
   if (inTauri()) return invoke<void>("begin_open_log", { path });
   return http<void>("/api/begin-open", {

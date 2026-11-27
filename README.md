@@ -47,9 +47,27 @@ The same UI can run against a localhost copy of the indexer. This is for layout 
 npm run dev:preview
 ```
 
-Vite stays on port 43127 and proxies `/api` to `loom-serve` on `127.0.0.1:43128`. The page shows a **Browser preview** badge. File open uses the browser file picker; the bytes are indexed by the local Rust process.
+Vite stays on port 43127 and proxies `/api` to `loom-serve` on `127.0.0.1:43128`. The page shows a **Browser preview** badge. File open uses the browser file picker; the bytes are indexed by the local Rust process. To pre-open a local multi-gigabyte recording or `.loom` project directly from disk without browser upload limits, pass `--log` (with optional repeatable `--dbc FILE[@CHANNEL]`) or `--project` to `loom-serve`:
+
+```bash
+cargo run -p loom-serve --release -- --log drive.blf --dbc powertrain.dbc@1 --dbc chassis.dbc@2
+```
+
+When the browser preview connects (or reloads), it attaches to the startup scan or open session (`GET /api/summary`) instead of replacing it with the sample, and `POST /api/judge` evaluates `loom-judge/1` requests against the already-indexed recording in memory.
 
 An uploaded project has no folder, so a relative log, map, or compare path in it is not resolved against the engine's working directory. The log is refused. A map or compare log is reported and left unopened.
+
+### CLI inspection & specification judging (`loom-judge`)
+
+`loom-judge` evaluates `loom-judge/1` specifications, dry-checks requests without reading a log, dumps `.dbc` / `.map.json` definitions, and inspects or slices recordings in a single streaming pass:
+
+```bash
+loom-judge --inspect --log drive.blf --dbc vehicle.dbc --no-hash
+loom-judge --stats VehicleSpeed,BrakePressure --log drive.blf --dbc vehicle.dbc
+loom-judge --samples VehicleSpeed --log drive.blf --dbc vehicle.dbc --from-us 0 --to-us 10000000 --max-points 200
+loom-judge --check --dbc vehicle.dbc --request spec.json
+loom-judge --log drive.blf --dbc vehicle.dbc --request - --out - < spec.json
+```
 
 ## What's on the deck
 

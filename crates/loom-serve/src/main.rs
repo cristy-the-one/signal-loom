@@ -17,16 +17,45 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const MAX_BODY: usize = 32 * 1024 * 1024;
 const WORKER_THREADS: usize = 8;
+const VERSION: &str = "loom-serve 0.1.0";
+const USAGE: &str = "\
+usage:
+  loom-serve [--port PORT] [--log FILE [--dbc FILE[@CHANNEL] ...]] [--project FILE]
+  loom-serve --help | --version
+
+options:
+  --port PORT           Loopback HTTP port on 127.0.0.1 (default: 43128)
+  --log FILE            Pre-open a local recording (including multi-GB files) at startup
+  --dbc FILE[@CHANNEL]  Load a Vector .dbc or .map.json (repeatable; channel 0..255)
+  --project FILE        Pre-open a .loom project file at startup";
+
+struct ServeConfig {
+    port: u16,
+    log: Option<PathBuf>,
+    dbcs: Vec<(PathBuf, u8)>,
+    project: Option<PathBuf>,
+}
 
 fn main() {
-    let port = parse_port();
-    let addr = format!("127.0.0.1:{port}");
+    let config = match parse_cli(env::args().skip(1)) {
+        Ok(CliOutcome::Run(cfg)) => cfg,
+        Ok(CliOutcome::Print(text)) => {
+            println!("{text}");
+            return;
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+    };
+    let addr = format!("127.0.0.1:{}", config.port);
     let server = Arc::new(Server::http(&addr).unwrap_or_else(|err| {
         eprintln!("loom-serve could not bind {addr}: {err}");
         std::process::exit(1);
     }));
-    eprintln!("signal-loom engine listening on http://{addr}");
     let engine = Arc::new(Engine::new());
+    start_initial_job(&engine, config);
+    eprintln!("signal-loom engine listening on http://{addr}");
     let mut workers = Vec::with_capacity(WORKER_THREADS);
     for _ in 0..WORKER_THREADS {
         let server = Arc::clone(&server);
@@ -43,21 +72,111 @@ fn main() {
     }
 }
 
-fn parse_port() -> u16 {
-    let mut args = env::args().skip(1);
+enum CliOutcome {
+    Run(ServeConfig),
+    Print(String),
+}
+
+fn parse_cli<I>(args: I) -> Result<CliOutcome, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut port = 43128u16;
+    let mut log = None;
+    let mut dbcs = Vec::new();
+    let mut project = None;
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
-        if arg == "--port" {
-            let Some(value) = args.next() else {
-                eprintln!("--port needs a number");
-                std::process::exit(2);
-            };
-            return value.parse().unwrap_or_else(|_| {
-                eprintln!("bad port {value}");
-                std::process::exit(2);
-            });
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(CliOutcome::Print(USAGE.to_string())),
+            "--version" | "-V" => return Ok(CliOutcome::Print(VERSION.to_string())),
+            "--port" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("--port needs a number\n{USAGE}"))?;
+                port = value
+                    .parse()
+                    .map_err(|_| format!("bad port {value}\n{USAGE}"))?;
+            }
+            "--log" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("--log needs a file path\n{USAGE}"))?;
+                if log.is_some() {
+                    return Err(format!("--log was given twice\n{USAGE}"));
+                }
+                log = Some(PathBuf::from(value));
+            }
+            "--dbc" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("--dbc needs a file path\n{USAGE}"))?;
+                dbcs.push(split_dbc_arg(&value)?);
+            }
+            "--project" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("--project needs a file path\n{USAGE}"))?;
+                if project.is_some() {
+                    return Err(format!("--project was given twice\n{USAGE}"));
+                }
+                project = Some(PathBuf::from(value));
+            }
+            other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
     }
-    43128
+    if project.is_some() && (log.is_some() || !dbcs.is_empty()) {
+        return Err(format!(
+            "--project cannot be combined with --log or --dbc\n{USAGE}"
+        ));
+    }
+    if log.is_none() && !dbcs.is_empty() {
+        return Err(format!("--dbc requires --log\n{USAGE}"));
+    }
+    Ok(CliOutcome::Run(ServeConfig {
+        port,
+        log,
+        dbcs,
+        project,
+    }))
+}
+
+fn split_dbc_arg(arg: &str) -> Result<(PathBuf, u8), String> {
+    if let Some((file, ch)) = arg.rsplit_once('@') {
+        if !file.is_empty() && !ch.is_empty() && ch.bytes().all(|b| b.is_ascii_digit()) {
+            let val: u16 = ch
+                .parse()
+                .map_err(|_| format!("--dbc channel in {arg} is not an integer\n{USAGE}"))?;
+            let ch = u8::try_from(val)
+                .map_err(|_| format!("--dbc channel {val} is not between 0 and 255\n{USAGE}"))?;
+            return Ok((PathBuf::from(file), ch));
+        }
+    }
+    Ok((PathBuf::from(arg), 0))
+}
+
+fn start_initial_job(engine: &Arc<Engine>, config: ServeConfig) {
+    if let Some(project) = config.project {
+        if let Err(err) = engine.begin_project_file(project) {
+            eprintln!("startup --project failed: {err}");
+        }
+        return;
+    }
+    let Some(log_path) = config.log else {
+        return;
+    };
+    let dbcs = config.dbcs;
+    if let Err(err) = engine.begin(move |session, control| {
+        if dbcs.is_empty() {
+            session.open_path_controlled(&log_path, Some(control))?;
+        } else {
+            session.preload_maps(&dbcs)?;
+            session.open_path_keeping_map_controlled(&log_path, Some(control))?;
+        }
+        Ok(())
+    }) {
+        eprintln!("startup job failed: {err}");
+    }
 }
 
 fn dispatch(engine: &Arc<Engine>, request: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -172,6 +291,13 @@ fn route(
         _ => {}
     }
     match (method, path) {
+        (Method::Get, "/api/summary") => json(&engine.read_session(|session| session.summary())?),
+        (Method::Post, "/api/judge") => {
+            let request_text = std::str::from_utf8(&body)
+                .map_err(|_| Error::invalid("judge request body is not UTF-8"))?;
+            let verdict = engine.read_session(|session| session.judge_request(request_text))?;
+            Ok(verdict.into_bytes())
+        }
         (Method::Post, "/api/open-sample") => {
             json(&engine.with_session(|session| session.open_sample())?)
         }
@@ -708,5 +834,113 @@ F 10000 1A0 800C881378640000
         let missing = opened(Some("no_such_compare.slog"));
         assert_eq!(missing["compareOpened"], false);
         assert_eq!(missing["warnings"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cli_parses_help_version_startup_log_dbc_and_rejects_conflicts() {
+        assert!(matches!(
+            parse_cli(["--help".to_string()]).unwrap(),
+            CliOutcome::Print(text) if text.contains("usage:")
+        ));
+        assert!(matches!(
+            parse_cli(["--version".to_string()]).unwrap(),
+            CliOutcome::Print(text) if text == VERSION
+        ));
+        let CliOutcome::Run(cfg) = parse_cli(
+            [
+                "--port",
+                "49000",
+                "--log",
+                "drive.blf",
+                "--dbc",
+                "pt.dbc@1",
+                "--dbc",
+                "body.dbc@2",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(cfg.port, 49000);
+        assert_eq!(cfg.log, Some(PathBuf::from("drive.blf")));
+        assert_eq!(
+            cfg.dbcs,
+            vec![(PathBuf::from("pt.dbc"), 1), (PathBuf::from("body.dbc"), 2)]
+        );
+
+        assert!(parse_cli(["--dbc", "only.dbc"].into_iter().map(str::to_string)).is_err());
+        assert!(parse_cli(
+            ["--project", "a.loom", "--log", "b.blf"]
+                .into_iter()
+                .map(str::to_string)
+        )
+        .is_err());
+        assert!(parse_cli(["--bogus".to_string()]).is_err());
+    }
+
+    #[test]
+    fn startup_log_summary_and_judge_routes_work_without_reindexing() {
+        let empty = Arc::new(Engine::new());
+        assert_eq!(
+            answered(route(&empty, Method::Get, "/api/summary", None, Vec::new())).0,
+            404
+        );
+
+        let engine = Arc::new(Engine::new());
+        start_initial_job(
+            &engine,
+            ServeConfig {
+                port: 43128,
+                log: Some(fixture("judge/brake.asc")),
+                dbcs: vec![(fixture("judge/brake.dbc"), 0)],
+                project: None,
+            },
+        );
+        let status = wait_for_job(&engine);
+        assert_eq!(status["error"], serde_json::Value::Null);
+        assert_eq!(status["summary"]["logLabel"], "brake.asc");
+
+        // Even after `/api/progress` was consumed, `GET /api/summary` returns the live session
+        // with enriched DBC signal metadata (`definedName`, `channel`, `labels`).
+        let (code, summary) = answered(route(
+            &engine,
+            Method::Get,
+            "/api/summary",
+            None,
+            Vec::new(),
+        ));
+        assert_eq!(code, 200);
+        assert_eq!(summary["logLabel"], "brake.asc");
+        let lamp = summary["signals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "BrakeLamp")
+            .expect("BrakeLamp signal");
+        assert_eq!(lamp["definedName"], "BrakeLamp");
+        assert_eq!(lamp["channel"], 0);
+        assert!(lamp.get("labels").is_none());
+
+        let req_bytes = std::fs::read(fixture("judge/request.json")).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixture("judge/expected-verdict.json")).unwrap())
+                .unwrap();
+        let (code, verdict) = answered(route(&engine, Method::Post, "/api/judge", None, req_bytes));
+        assert_eq!(code, 200);
+        assert_eq!(verdict["format"], "loom-verdict/1");
+        assert_eq!(verdict["request_sha256"], expected["request_sha256"]);
+        assert_eq!(verdict["dbc"], expected["dbc"]);
+        assert_eq!(verdict["counts"], expected["counts"]);
+        assert_eq!(verdict["cases"], expected["cases"]);
+
+        let (bad_code, bad_body) = post(
+            &engine,
+            "/api/judge",
+            r#"{"format":"wrong","spec_id":"bad","cases":[]}"#,
+        );
+        assert_eq!(bad_code, 400);
+        assert_eq!(bad_body["kind"], "invalid");
     }
 }

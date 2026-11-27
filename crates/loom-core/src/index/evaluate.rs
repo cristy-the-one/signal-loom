@@ -184,16 +184,17 @@ pub(crate) fn evaluate_path(
         .iter()
         .filter_map(|(&id, threshold)| threshold.map(|_| (id, Vec::new())))
         .collect();
-    let mut tap = |t_us: u64, id: u32, channel: u8, decoded: &[(usize, f64)]| {
-        if let Some(times) = frames.get_mut(&id) {
-            times.push(FrameStamp::pack(t_us, channel));
-        }
-        for &(idx, value) in decoded {
-            if let Some(&slot) = slot_of.get(idx).filter(|&&s| s != usize::MAX) {
-                rows[slot].push((t_us, value));
+    let mut tap =
+        |t_us: u64, id: u32, channel: u8, _extended: bool, _dlc: u8, decoded: &[(usize, f64)]| {
+            if let Some(times) = frames.get_mut(&id) {
+                times.push(FrameStamp::pack(t_us, channel));
             }
-        }
-    };
+            for &(idx, value) in decoded {
+                if let Some(&slot) = slot_of.get(idx).filter(|&&s| s != usize::MAX) {
+                    rows[slot].push((t_us, value));
+                }
+            }
+        };
     let log = IndexedLog::build_with_tap(
         super::source::Source::Path(path.to_path_buf()),
         format,
