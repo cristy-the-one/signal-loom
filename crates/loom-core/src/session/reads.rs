@@ -2,7 +2,7 @@
 
 use super::Session;
 use crate::dto::{BusLoad, FrameDto, PointDto, Query, SeriesDto, StepDir, ValueDto, WindowStats};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::index::{QueryWindow, Series};
 
 impl Session {
@@ -39,7 +39,7 @@ impl Session {
     pub fn stats(&self, name: &str, t0_us: u64, t1_us: u64) -> Result<WindowStats> {
         let log = self.log()?;
         if self.deck.is_math(name) {
-            return stats_of_points(name, &self.deck.math_series(log, name, t0_us, t1_us)?);
+            return self.deck.math_stats(log, name, t0_us, t1_us);
         }
         log.stats(name, t0_us, t1_us)
     }
@@ -104,29 +104,4 @@ fn series_dto(series: Series) -> SeriesDto {
             .map(|(t, v)| PointDto { t, v })
             .collect(),
     }
-}
-
-fn stats_of_points(name: &str, series: &Series) -> Result<WindowStats> {
-    if series.points.is_empty() {
-        return Err(Error::invalid(format!(
-            "no samples of {name} in that window"
-        )));
-    }
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    let mut sum = 0.0;
-    for (_, value) in &series.points {
-        min = min.min(*value);
-        max = max.max(*value);
-        sum += value;
-    }
-    let count = series.points.len() as u64;
-    Ok(WindowStats {
-        count,
-        min,
-        max,
-        avg: sum / count as f64,
-        first: series.points[0].1,
-        last: series.points[series.points.len() - 1].1,
-    })
 }

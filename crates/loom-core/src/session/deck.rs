@@ -116,29 +116,42 @@ impl Deck {
         derived: &[Derived<'_>],
         query: &Query,
     ) -> Result<Vec<Series>> {
+        if derived.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut all_deps: Vec<String> = Vec::new();
+        for (_, compiled) in derived {
+            for dep in compiled.dependencies() {
+                if !all_deps.contains(dep) {
+                    all_deps.push(dep.clone());
+                }
+            }
+        }
         let replay_is_cheap = log.records_in_window(query.t0_us, query.t1_us) <= MATH_RAW_RECORDS;
-        let mut series = Vec::new();
+        let shared_raw = (!all_deps.is_empty() && replay_is_cheap)
+            .then(|| log.samples(&all_deps, query.t0_us, query.t1_us))
+            .and_then(Result::ok);
+        let shared_bucketed = if shared_raw.is_none() && !all_deps.is_empty() {
+            Some(log.query(&QueryWindow {
+                t0_us: query.t0_us,
+                t1_us: query.t1_us,
+                signals: all_deps,
+                max_points: query.max_points,
+            })?)
+        } else {
+            None
+        };
+
+        let mut series = Vec::with_capacity(derived.len());
         for (channel, compiled) in derived {
-            let deps = compiled.dependencies();
-            let raw = replay_is_cheap
-                .then(|| log.samples(deps, query.t0_us, query.t1_us))
-                .and_then(Result::ok);
-            let result = match raw {
-                Some(raw) => {
-                    let mut result = eval_channel(channel, compiled, &raw)?;
-                    result.points =
-                        decimate_points(result.points, query.t0_us, query.t1_us, query.max_points);
-                    result
-                }
-                None => {
-                    let bucketed = log.query(&QueryWindow {
-                        t0_us: query.t0_us,
-                        t1_us: query.t1_us,
-                        signals: deps.to_vec(),
-                        max_points: query.max_points,
-                    })?;
-                    eval_channel(channel, compiled, &bucketed)?
-                }
+            let result = if let Some(raw) = &shared_raw {
+                let mut result = eval_channel(channel, compiled, raw)?;
+                result.points =
+                    decimate_points(result.points, query.t0_us, query.t1_us, query.max_points);
+                result
+            } else {
+                let base = shared_bucketed.as_deref().unwrap_or(&[]);
+                eval_channel(channel, compiled, base)?
             };
             series.push(result);
         }
@@ -161,6 +174,21 @@ impl Deck {
         eval_channel(channel, &compiled, &raw)
     }
 
+    /// Stream window statistics for math channel `name` in O(1) memory.
+    pub(super) fn math_stats(
+        &self,
+        log: &IndexedLog,
+        name: &str,
+        t0_us: u64,
+        t1_us: u64,
+    ) -> Result<crate::dto::WindowStats> {
+        let channel = self
+            .math_channel(name)
+            .ok_or_else(|| Error::not_found(format!("no math channel named {name}")))?;
+        let compiled = compile_math(&self.math, channel)?;
+        log.math_stats(name, &compiled, t0_us, t1_us)
+    }
+
     /// The event lane and any trigger that could not be evaluated: the log's
     /// own events merged with the trigger crossings. Cached per log and
     /// trigger set; a read failure is reported but not cached, so a retry
@@ -177,31 +205,18 @@ impl Deck {
                 label: label.clone(),
             })
             .collect();
-        let mut warnings = Vec::new();
-        let mut cacheable = true;
-        for trigger in &self.triggers {
-            match log.crossings(&trigger.signal, trigger.op, trigger.value) {
-                Ok(hits) => events.extend(
-                    hits.into_iter()
-                        .map(|(t_us, label)| EventDto { t_us, label }),
-                ),
-                Err(err) => {
-                    warnings.push(format!(
-                        "Trigger {} {} {} could not be evaluated: {err}",
-                        trigger.signal,
-                        trigger.op.symbol(),
-                        trigger.value
-                    ));
-                    cacheable &= !log.has_signal(&trigger.signal);
-                }
-            }
-        }
+        let scan = log.crossings_many(&self.triggers);
+        events.extend(
+            scan.hits
+                .into_iter()
+                .map(|(t_us, label)| EventDto { t_us, label }),
+        );
         events.sort_by_key(|event| event.t_us);
         events.truncate(5_000);
-        if cacheable {
-            slot.cache_events(&self.triggers, &events, &warnings);
+        if scan.cacheable {
+            slot.cache_events(&self.triggers, &events, &scan.warnings);
         }
-        (events, warnings)
+        (events, scan.warnings)
     }
 }
 

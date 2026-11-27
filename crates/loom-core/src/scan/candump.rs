@@ -27,15 +27,29 @@ struct Candump {
 
 /// A candump reader that continues at `offset`, with the clock a read from the
 /// top would hold there.
-pub(super) fn reader(reader: &mut dyn ReadSeek, offset: u64) -> Result<TextReader<'_>> {
-    let origin_us = peek_origin(reader)?;
-    let last_us = clock_before(reader, offset, origin_us)?;
+pub(super) fn reader<'a>(
+    reader: &'a mut dyn ReadSeek,
+    offset: u64,
+    at_us: Option<u64>,
+    cached_origin: Option<u64>,
+) -> Result<(TextReader<'a>, u64)> {
+    let origin_us = match cached_origin {
+        Some(origin) => origin,
+        None => peek_origin(reader)?,
+    };
+    let last_us = match at_us {
+        Some(at_us) if offset > 0 => at_us,
+        _ => clock_before(reader, offset, origin_us)?,
+    };
     let parser = Candump {
         origin_us,
         last_us,
         spans: Vec::new(),
     };
-    TextReader::open(reader, Box::new(parser), offset)
+    Ok((
+        TextReader::open(reader, Box::new(parser), offset)?,
+        origin_us,
+    ))
 }
 
 impl LineParser for Candump {

@@ -16,8 +16,8 @@ pub const FILE_MAGIC: &[u8; 4] = b"LOGG";
 pub const OBJECT_MAGIC: &[u8; 4] = b"LOBJ";
 /// Signature, header size, header version, object size, object type.
 pub const OBJECT_HEAD_LEN: usize = 16;
-pub const MAX_OBJECT_LEN: usize = 16 * 1024 * 1024;
-pub const CONTAINER_CAP: usize = 8 * 1024 * 1024;
+pub const MAX_OBJECT_LEN: usize = 32 * 1024 * 1024;
+pub const CONTAINER_CAP: usize = 32 * 1024 * 1024;
 /// A log container's body starts with a header of this size, then the objects.
 const CONTAINER_HEADER_LEN: usize = 16;
 const INFLATE_CHUNK: usize = 64 * 1024;
@@ -105,7 +105,7 @@ fn inflate_into(object: &[u8], out: &mut Vec<u8>) -> Result<()> {
     match method {
         0 => {
             if payload.len() > CONTAINER_CAP {
-                return Err(Error::invalid("BLF container is larger than 8MB"));
+                return Err(Error::invalid("BLF container is larger than 32MB"));
             }
             out.extend_from_slice(payload);
             Ok(())
@@ -121,7 +121,7 @@ fn inflate_into(object: &[u8], out: &mut Vec<u8>) -> Result<()> {
                     break;
                 }
                 if out.len() + n > CONTAINER_CAP {
-                    return Err(Error::invalid("BLF container is larger than 8MB"));
+                    return Err(Error::invalid("BLF container is larger than 32MB"));
                 }
                 out.extend_from_slice(&chunk[..n]);
             }
@@ -147,7 +147,15 @@ pub fn next_inner_checked(
         let Some(rest) = data.get(*at..) else {
             return Ok(None);
         };
-        let Some(rel) = rest.windows(4).position(|word| word == OBJECT_MAGIC) else {
+        let aligned = (4 - (*at % 4)) % 4;
+        let rel = if rest.get(..4) == Some(OBJECT_MAGIC) {
+            Some(0)
+        } else if aligned > 0 && rest.get(aligned..aligned + 4) == Some(OBJECT_MAGIC) {
+            Some(aligned)
+        } else {
+            rest.windows(4).position(|word| word == OBJECT_MAGIC)
+        };
+        let Some(rel) = rel else {
             return Ok(None);
         };
         let cursor = *at + rel;
@@ -168,8 +176,9 @@ pub fn next_inner_checked(
         }
         let object = &data[cursor..cursor + obj_size];
         *at = cursor + obj_size;
+        let inner_off = u32::try_from(cursor).unwrap_or(u32::MAX);
         match decode_object(object) {
-            Ok(Some(rec)) => return Ok(Some(rec.placed(container_off, false))),
+            Ok(Some(rec)) => return Ok(Some(rec.placed_inner(container_off, inner_off, false))),
             Ok(None) => {}
             Err(message) => {
                 return Err(format!("object at container offset {cursor}: {message}"));
@@ -521,6 +530,62 @@ mod tests {
             panic!("expected a frame");
         };
         (id, extended, channel, dlc, data[..dlc as usize].to_vec())
+    }
+
+    #[test]
+    fn mid_container_checkpoints_keep_exact_timestamps_ordinals_and_values() {
+        // 700 frames inside a single LOG_CONTAINER (> CHECKPOINT_EVERY = 256),
+        // with timestamps spaced by 1 ms (well inside the 50 ms reorder window).
+        let map = crate::map::SignalMap::parse(
+            r#"{"name":"blf","version":1,"messages":[
+                {"id":"0x1A0","name":"ECM","signals":[
+                    {"name":"Seq","startBit":0,"bitLength":16,"factor":1}
+                ]}
+            ]}"#,
+        )
+        .unwrap();
+        let mut body = vec![0u8; 16]; // method 0 = uncompressed
+        for seq in 0..700u16 {
+            let mut payload = vec![0u8; 16];
+            payload[0] = 1;
+            payload[3] = 8;
+            payload[4..8].copy_from_slice(&0x1A0u32.to_le_bytes());
+            payload[8..10].copy_from_slice(&seq.to_le_bytes());
+            let mut frame_obj = lobj(CAN_MESSAGE, &payload);
+            // Header flags = 1 (10 µs ticks), timestamp = seq * 100 (= seq * 1_000 µs).
+            frame_obj[16..20].copy_from_slice(&1u32.to_le_bytes());
+            frame_obj[24..32].copy_from_slice(&(u64::from(seq) * 100).to_le_bytes());
+            body.extend_from_slice(&frame_obj);
+        }
+        let bytes = blf_file(&[lobj(LOG_CONTAINER, &body)]);
+        let log = IndexedLog::open_bytes(bytes, Some(&map)).unwrap();
+        assert_eq!(log.frame_count(), 700);
+        assert!(log.checkpoint_count() >= 3);
+
+        // Stepping and reading values past checkpoint 1 (seq 256) and checkpoint 2 (seq 512)
+        // must hit exact ordinals and values without re-clamping earlier container frames.
+        for probe_seq in [0u64, 255, 256, 257, 511, 512, 513, 698] {
+            let t = probe_seq * 1_000;
+            let (next_hit, next_vals) = log.step_frame_with_values(t, true).unwrap().unwrap();
+            assert_eq!(next_hit.ordinal, probe_seq + 1);
+            assert_eq!(next_hit.t_us, (probe_seq + 1) * 1_000);
+            assert_eq!(next_vals[0].value, (probe_seq + 1) as f64);
+
+            let at_vals = log.values_at(t).unwrap();
+            assert_eq!(at_vals[0].value, probe_seq as f64);
+        }
+        let sampled = log.samples(&["Seq".to_string()], 255_000, 260_000).unwrap();
+        assert_eq!(
+            sampled[0].points,
+            vec![
+                (255_000, 255.0),
+                (256_000, 256.0),
+                (257_000, 257.0),
+                (258_000, 258.0),
+                (259_000, 259.0),
+                (260_000, 260.0),
+            ]
+        );
     }
 
     fn fixture(name: &str) -> std::path::PathBuf {

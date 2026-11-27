@@ -48,20 +48,7 @@ impl IndexedLog {
         let mut buckets: Vec<Vec<Option<Bucket>>> = vec![Vec::new(); wanted.len()];
         let mut lead = vec![None; wanted.len()];
 
-        self.replay_wanted(t0, t1, &filter, |step, held| {
-            let Step::Record(rec) = step else {
-                lead.copy_from_slice(held);
-                return true;
-            };
-            self.touch_wanted(rec, &filter, held, |slot, value| {
-                let row = &mut buckets[slot];
-                if row.is_empty() {
-                    row.resize(bucket_count(max_points, lead[slot].is_some()), None);
-                }
-                push_bucket(row, t0, t1, rec.t_us, value);
-            });
-            true
-        })?;
+        self.query_bucketed(t0, t1, max_points, &filter, &mut lead, &mut buckets)?;
 
         let mut series = Vec::with_capacity(wanted.len());
         for (slot, &signal_i) in wanted.iter().enumerate() {
@@ -93,6 +80,118 @@ impl IndexedLog {
             });
         }
         Ok(series)
+    }
+
+    fn query_bucketed(
+        &self,
+        t0: u64,
+        t1: u64,
+        max_points: usize,
+        filter: &SignalFilter,
+        lead: &mut [Option<f64>],
+        buckets: &mut [Vec<Option<Bucket>>],
+    ) -> Result<()> {
+        let mut c_start = self.floor_checkpoint(t0);
+        if c_start > 0 && self.checkpoints[c_start].t_us == t0 {
+            c_start -= 1;
+        }
+        let c_end = self.floor_checkpoint(t1);
+        let wanted = filter.wanted();
+
+        let n_no_lead = bucket_count(max_points, false);
+        let n_with_lead = bucket_count(max_points, true);
+
+        let mut held: Vec<Option<f64>> = wanted
+            .iter()
+            .map(|&idx| self.snapshots.get(c_start, idx))
+            .collect();
+        let mut lead_settled = c_start == 0 && self.checkpoints[0].t_us >= t0;
+        if lead_settled {
+            lead.copy_from_slice(&held);
+        }
+
+        // Partition checkpoint intervals k in c_start..=c_end into:
+        // - `Span`: interior (or full-recording) interval completely inside [t0, t1]
+        //   that maps to a single bucket under both possible bucket counts (`n_no_lead`
+        //   and `n_with_lead`), answered from `self.spans` with 0 disk I/O.
+        // - `Disk`: boundary or bucket-straddling interval replayed from disk.
+        let can_skip_interval = |k: usize, lead_known: bool| -> bool {
+            let start_t = self.checkpoints[k].t_us;
+            let end_t = match self.checkpoints.get(k + 1) {
+                Some(next) => next.t_us,
+                None if t1 >= self.t_end_us => self.t_end_us,
+                None => return false,
+            };
+            if start_t < t0 || end_t > t1 || !lead_known {
+                return false;
+            }
+            let same_for = |count: usize| {
+                bucket_index(count, t0, t1, start_t) == bucket_index(count, t0, t1, end_t)
+            };
+            if n_no_lead == n_with_lead {
+                same_for(n_with_lead)
+            } else {
+                same_for(n_no_lead) && same_for(n_with_lead)
+            }
+        };
+
+        let mut k = c_start;
+        while k <= c_end {
+            if can_skip_interval(k, lead_settled) {
+                for (slot, &sig_idx) in wanted.iter().enumerate() {
+                    if let Some(span) = self.spans.get(k, sig_idx) {
+                        let row = &mut buckets[slot];
+                        if row.is_empty() {
+                            row.resize(bucket_count(max_points, lead[slot].is_some()), None);
+                        }
+                        push_bucket(row, t0, t1, span.min_t, span.min_v);
+                        push_bucket(row, t0, t1, span.max_t, span.max_v);
+                    }
+                }
+                k += 1;
+                continue;
+            }
+
+            // Coalesce contiguous disk-scanned intervals into a single seek + sequential read.
+            let run_start = k;
+            k += 1;
+            if !lead_settled {
+                while k <= c_end && self.checkpoints[k].t_us < t0 {
+                    k += 1;
+                }
+            }
+            while k <= c_end && !can_skip_interval(k, true) {
+                k += 1;
+            }
+            let stop_idx = (k <= c_end).then_some(k);
+            self.scan_checkpoint_range(run_start, stop_idx, t1, |rec| {
+                if rec.t_us < t0 {
+                    self.touch_wanted(rec, filter, &mut held, |_, _| {});
+                    return true;
+                }
+                if !lead_settled {
+                    lead_settled = true;
+                    lead.copy_from_slice(&held);
+                }
+                self.decode_wanted(rec, filter, |slot, value| {
+                    let row = &mut buckets[slot];
+                    if row.is_empty() {
+                        row.resize(bucket_count(max_points, lead[slot].is_some()), None);
+                    }
+                    push_bucket(row, t0, t1, rec.t_us, value);
+                });
+                true
+            })?;
+            if !lead_settled && stop_idx.is_some_and(|idx| self.checkpoints[idx].t_us >= t0) {
+                lead_settled = true;
+                lead.copy_from_slice(&held);
+            }
+        }
+
+        if !lead_settled {
+            lead.copy_from_slice(&held);
+        }
+        Ok(())
     }
 
     pub fn values_at(&self, t_us: u64) -> Result<Vec<HeldValue>> {
@@ -178,14 +277,16 @@ fn bucket_count(max_points: usize, has_lead: bool) -> usize {
     (budget / 2).max(1)
 }
 
-fn push_bucket(buckets: &mut [Option<Bucket>], t0: u64, t1: u64, t: u64, value: f64) {
-    let bucket_count = buckets.len();
+#[inline]
+fn bucket_index(bucket_count: usize, t0: u64, t1: u64, t: u64) -> usize {
     let span = t1.saturating_sub(t0).max(1);
-    let mut index = ((u128::from(t.saturating_sub(t0)) * u128::from(bucket_count as u64))
+    let index = ((u128::from(t.saturating_sub(t0)) * u128::from(bucket_count as u64))
         / u128::from(span)) as usize;
-    if index >= bucket_count {
-        index = bucket_count - 1;
-    }
+    index.min(bucket_count - 1)
+}
+
+fn push_bucket(buckets: &mut [Option<Bucket>], t0: u64, t1: u64, t: u64, value: f64) {
+    let index = bucket_index(buckets.len(), t0, t1, t);
     match &mut buckets[index] {
         None => {
             buckets[index] = Some(Bucket {

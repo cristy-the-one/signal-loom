@@ -31,8 +31,14 @@ impl IndexedLog {
     pub(super) fn scan_from(&self, idx: usize, mut visit: impl FnMut(&Rec) -> bool) -> Result<()> {
         let checkpoint = &self.checkpoints[idx];
         self.source.with_reader(|reader| {
-            let mut scanner =
-                Scanner::resume_at(reader, self.format, checkpoint.offset, checkpoint.t_us)?;
+            let mut scanner = Scanner::resume_indexed(
+                reader,
+                self.format,
+                checkpoint.offset,
+                checkpoint.inner_offset,
+                checkpoint.t_us,
+                self.hints,
+            )?;
             let mut last = Some(checkpoint.t_us);
             while let Some(mut rec) = scanner.next_rec()? {
                 match order_time(&mut last, rec.t_us) {
@@ -44,6 +50,41 @@ impl IndexedLog {
                 }
             }
             Ok(())
+        })
+    }
+
+    /// Replay `[start_idx..end_idx)` from disk: starting at checkpoint `start_idx`
+    /// and stopping once it reaches checkpoint `end_idx` (or `t_us > t1`).
+    pub(super) fn scan_checkpoint_range(
+        &self,
+        start_idx: usize,
+        end_idx: Option<usize>,
+        t1: u64,
+        mut visit: impl FnMut(&Rec) -> bool,
+    ) -> Result<()> {
+        let stop_at = end_idx.and_then(|idx| {
+            self.checkpoints
+                .get(idx)
+                .map(|cp| (cp.offset, cp.inner_offset, cp.frame_ordinal))
+        });
+        let mut ordinal = self.checkpoints[start_idx].frame_ordinal;
+        self.scan_from(start_idx, |rec| {
+            if let Some((stop_off, stop_inner, stop_ord)) = stop_at {
+                if matches!(rec.kind, RecKind::Frame { .. } | RecKind::Sample { .. })
+                    && ordinal >= stop_ord
+                    && rec.offset == stop_off
+                    && rec.inner_offset == stop_inner
+                {
+                    return false;
+                }
+            }
+            if rec.t_us > t1 {
+                return false;
+            }
+            if matches!(rec.kind, RecKind::Frame { .. } | RecKind::Sample { .. }) {
+                ordinal += 1;
+            }
+            visit(rec)
         })
     }
 
@@ -110,11 +151,11 @@ impl IndexedLog {
         filter: &SignalFilter,
         mut visit: impl FnMut(Step<'_>, &mut [Option<f64>]) -> bool,
     ) -> Result<()> {
-        let snap = self.snapshots.get(self.floor_checkpoint(t0));
+        let row = self.floor_checkpoint(t0);
         let mut held: Vec<Option<f64>> = filter
             .wanted()
             .iter()
-            .map(|&idx| snap.and_then(|row| row.get(idx).copied().flatten()))
+            .map(|&idx| self.snapshots.get(row, idx))
             .collect();
         let mut started = false;
         self.scan_window(t0, t1, |phase, rec| match phase {

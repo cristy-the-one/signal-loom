@@ -139,12 +139,87 @@ pub(crate) fn evaluate(
     timeout: TimeoutFactor,
     request: &Request,
 ) -> Result<Evaluation> {
-    let plan = Plan::new(log, map, timeout, request)?;
+    let plan = Plan::from_map(map, timeout, request)?;
+    for target in plan.targets.values() {
+        if log.signals.get(target.idx).map(|s| s.name.as_str()) != Some(target.name.as_str()) {
+            return Err(Error::not_found(format!(
+                "signal {} is not in the indexed log",
+                target.name
+            )));
+        }
+    }
     let data = plan.collect(log)?;
+    evaluate_with_data(log, &plan, &data, request)
+}
+
+/// Index `path` and collect `request`'s samples and cyclic frame timestamps in
+/// the same pass so `loom-judge` does not scan a multi-GB recording twice.
+pub(crate) fn evaluate_path(
+    path: &std::path::Path,
+    map: &SignalMap,
+    timeout: TimeoutFactor,
+    request: &Request,
+) -> Result<(IndexedLog, Evaluation)> {
+    let plan = Plan::from_map(map, timeout, request)?;
+    let format = super::source::sniff_path(path)?;
+    if format == crate::scan::LogFormat::DecodedCsv {
+        let log = IndexedLog::open_path_timed(path, Some(map), timeout, None)?;
+        let eval = evaluate(&log, map, timeout, request)?;
+        return Ok((log, eval));
+    }
+    let wanted: Vec<usize> = plan
+        .targets
+        .values()
+        .map(|target| target.idx)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut slot_of = vec![usize::MAX; map.signals.len()];
+    for (slot, &idx) in wanted.iter().enumerate() {
+        slot_of[idx] = slot;
+    }
+    let mut rows: Vec<Vec<(u64, f64)>> = vec![Vec::new(); wanted.len()];
+    let mut frames: BTreeMap<u32, Vec<FrameStamp>> = plan
+        .thresholds
+        .iter()
+        .filter_map(|(&id, threshold)| threshold.map(|_| (id, Vec::new())))
+        .collect();
+    let mut tap = |t_us: u64, id: u32, channel: u8, decoded: &[(usize, f64)]| {
+        if let Some(times) = frames.get_mut(&id) {
+            times.push(FrameStamp::pack(t_us, channel));
+        }
+        for &(idx, value) in decoded {
+            if let Some(&slot) = slot_of.get(idx).filter(|&&s| s != usize::MAX) {
+                rows[slot].push((t_us, value));
+            }
+        }
+    };
+    let log = IndexedLog::build_with_tap(
+        super::source::Source::Path(path.to_path_buf()),
+        format,
+        Some(map),
+        timeout,
+        None,
+        Some(&mut tap),
+    )?;
+    let data = Data {
+        series: wanted.into_iter().zip(rows).collect(),
+        frames,
+    };
+    let evaluation = evaluate_with_data(&log, &plan, &data, request)?;
+    Ok((log, evaluation))
+}
+
+fn evaluate_with_data(
+    log: &IndexedLog,
+    plan: &Plan,
+    data: &Data,
+    request: &Request,
+) -> Result<Evaluation> {
     let integrity_complete = !log.events_truncated();
     let ctx = Ctx {
         log,
-        data: &data,
+        data,
         t_end_us: log.t_end_us(),
         integrity_complete,
     };
@@ -152,7 +227,7 @@ pub(crate) fn evaluate(
     for case in &request.cases {
         let mut checks = Vec::with_capacity(case.checks.len());
         for check in &case.checks {
-            checks.push(ctx.check(check, &plan)?);
+            checks.push(ctx.check(check, plan)?);
         }
         let verdict = if checks.is_empty() {
             Verdict::NotJudgeable
@@ -177,7 +252,7 @@ pub(crate) fn evaluate(
 
 // ---- resolving what the request names --------------------------------------
 
-/// A resolved signal: its index in the log and what the evaluator needs of it.
+/// A resolved signal: its index in the map/log and what the evaluator needs of it.
 #[derive(Clone)]
 struct Target {
     idx: usize,
@@ -217,12 +292,7 @@ fn key(signal: &SignalRef) -> SignalKey {
 }
 
 impl Plan {
-    fn new(
-        log: &IndexedLog,
-        map: &SignalMap,
-        timeout: TimeoutFactor,
-        request: &Request,
-    ) -> Result<Self> {
+    fn from_map(map: &SignalMap, timeout: TimeoutFactor, request: &Request) -> Result<Self> {
         let mut targets = BTreeMap::new();
         let mut thresholds = BTreeMap::new();
         for case in &request.cases {
@@ -232,13 +302,7 @@ impl Plan {
                     if targets.contains_key(&key(signal)) {
                         continue;
                     }
-                    let mapped = resolve(map, signal)?;
-                    let idx = log.resolve_signal(&mapped.name).ok_or_else(|| {
-                        Error::not_found(format!(
-                            "signal pair ({}, {}) is not in the indexed log",
-                            signal.message, signal.signal
-                        ))
-                    })?;
+                    let (idx, mapped) = resolve(map, signal)?;
                     targets.insert(
                         key(signal),
                         Target {
@@ -276,8 +340,8 @@ impl Plan {
         &self.targets[&key(signal)]
     }
 
-    /// One pass over the whole log, decoding only the signals the request names
-    /// and recording frame timestamps only for cyclic `expect` messages.
+    /// One pass over an already-indexed log, decoding only the signals the
+    /// request names and recording frame timestamps only for cyclic `expect` messages.
     fn collect(&self, log: &IndexedLog) -> Result<Data> {
         let wanted: Vec<usize> = self
             .targets
@@ -288,7 +352,7 @@ impl Plan {
             .collect();
         let filter = super::signal::SignalFilter::new(&log.signals, &wanted);
         let mut rows: Vec<Vec<(u64, f64)>> = vec![Vec::new(); wanted.len()];
-        let mut frames: BTreeMap<u32, Vec<(u64, u8)>> = self
+        let mut frames: BTreeMap<u32, Vec<FrameStamp>> = self
             .thresholds
             .iter()
             .filter_map(|(&id, threshold)| threshold.map(|_| (id, Vec::new())))
@@ -297,7 +361,7 @@ impl Plan {
             log.scan_from(0, |rec| {
                 if let RecKind::Frame { id, channel, .. } = &rec.kind {
                     if let Some(times) = frames.get_mut(id) {
-                        times.push((rec.t_us, *channel));
+                        times.push(FrameStamp::pack(rec.t_us, *channel));
                     }
                 }
                 log.decode_wanted(rec, &filter, |slot, value| {
@@ -311,13 +375,14 @@ impl Plan {
     }
 }
 
-/// The signal a reference names, with the channel rule of plan §3.1: a named
-/// channel first, then channel 0, which applies on every channel.
-fn resolve<'a>(map: &'a SignalMap, signal: &SignalRef) -> Result<&'a MappedSignal> {
-    let pairs = |channel: Option<u8>| -> Vec<&'a MappedSignal> {
+/// The signal a reference names (with its index in `map.signals`), using the
+/// channel rule of plan §3.1: a named channel first, then channel 0.
+fn resolve<'a>(map: &'a SignalMap, signal: &SignalRef) -> Result<(usize, &'a MappedSignal)> {
+    let pairs = |channel: Option<u8>| -> Vec<(usize, &'a MappedSignal)> {
         map.signals
             .iter()
-            .filter(|candidate| {
+            .enumerate()
+            .filter(|(_, candidate)| {
                 candidate.message_name == signal.message
                     && candidate.defined_name == signal.signal
                     && channel.is_none_or(|channel| candidate.channel == channel)
@@ -338,10 +403,10 @@ fn resolve<'a>(map: &'a SignalMap, signal: &SignalRef) -> Result<&'a MappedSigna
         }
     };
     match found.as_slice() {
-        [one] => Ok(one),
-        [] => Err(Error::not_found(format!(
-            "unknown signal pair ({}, {})",
-            signal.message, signal.signal
+        [one] => Ok(*one),
+        [] => Err(Error::not_found(crate::map::unknown_pair_message(
+            &signal.message,
+            &signal.signal,
         ))),
         _ => Err(Error::invalid(format!(
             "signal pair ({}, {}) is ambiguous",
@@ -352,10 +417,28 @@ fn resolve<'a>(map: &'a SignalMap, signal: &SignalRef) -> Result<&'a MappedSigna
 
 // ---- evaluation ----------------------------------------------------------------
 
+/// Compact 8-byte `(t_us, channel)` stamp (56-bit µs covers > 2,280 years).
+#[derive(Clone, Copy)]
+struct FrameStamp(u64);
+
+impl FrameStamp {
+    const TIME_MASK: u64 = (1u64 << 56) - 1;
+
+    #[inline]
+    fn pack(t_us: u64, channel: u8) -> Self {
+        Self((t_us.min(Self::TIME_MASK)) | (u64::from(channel) << 56))
+    }
+
+    #[inline]
+    fn unpack(self) -> (u64, u8) {
+        (self.0 & Self::TIME_MASK, (self.0 >> 56) as u8)
+    }
+}
+
 struct Data {
     series: BTreeMap<usize, Vec<(u64, f64)>>,
-    /// Frame time and channel, per `expect` message id.
-    frames: BTreeMap<u32, Vec<(u64, u8)>>,
+    /// Packed frame time and channel, per cyclic `expect` message id.
+    frames: BTreeMap<u32, Vec<FrameStamp>>,
 }
 
 struct Ctx<'a> {
@@ -465,17 +548,24 @@ impl Ctx<'_> {
     fn problems(&self, target: &Target, threshold: Option<f64>) -> Problems {
         let mut silences = Vec::new();
         if let Some(threshold) = threshold {
-            let times: Vec<u64> = self.data.frames[&target.message_id]
-                .iter()
-                .filter(|(_, channel)| target.on_channel(*channel))
-                .map(|(t, _)| *t)
-                .collect();
             let step = threshold.ceil() as u64;
-            let ends = times.iter().copied().skip(1).chain([self.t_end_us]);
-            for (last, next) in times.iter().copied().zip(ends) {
-                // The indexer's comparison: a gap longer than the threshold.
-                if next.saturating_sub(last) as f64 > threshold {
-                    silences.push((last.saturating_add(step), next));
+            let mut prev: Option<u64> = None;
+            for stamp in &self.data.frames[&target.message_id] {
+                let (t, channel) = stamp.unpack();
+                if !target.on_channel(channel) {
+                    continue;
+                }
+                if let Some(last) = prev {
+                    // The indexer's comparison: a gap longer than the threshold.
+                    if t.saturating_sub(last) as f64 > threshold {
+                        silences.push((last.saturating_add(step), t));
+                    }
+                }
+                prev = Some(t);
+            }
+            if let Some(last) = prev {
+                if self.t_end_us.saturating_sub(last) as f64 > threshold {
+                    silences.push((last.saturating_add(step), self.t_end_us));
                 }
             }
         }

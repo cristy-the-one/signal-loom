@@ -1,6 +1,6 @@
 use super::support::*;
 use crate::index::IndexedLog;
-use crate::scan::{encode_slb1, Rec, RecKind};
+use crate::scan::{encode_slb1, Rec};
 use crate::session::Session;
 use crate::StepDir;
 
@@ -9,38 +9,9 @@ fn binary_roundtrip_matches_text() {
     let map = tiny_map();
     let data = hex_payload_bytes("800C881378640000");
     let records = vec![
-        Rec {
-            offset: 0,
-            t_us: 0,
-            starts_container: false,
-            kind: RecKind::Frame {
-                id: 0x1A0,
-                extended: false,
-                channel: 0,
-                dlc: 8,
-                data,
-            },
-        },
-        Rec {
-            offset: 0,
-            t_us: 5_000,
-            starts_container: false,
-            kind: RecKind::Event {
-                label: "Mark".into(),
-            },
-        },
-        Rec {
-            offset: 0,
-            t_us: 10_000,
-            starts_container: false,
-            kind: RecKind::Frame {
-                id: 0x1A0,
-                extended: false,
-                channel: 0,
-                dlc: 8,
-                data,
-            },
-        },
+        Rec::frame(0, 0x1A0, false, 0, 8, data),
+        Rec::event(5_000, "Mark".into()),
+        Rec::frame(10_000, 0x1A0, false, 0, 8, data),
     ];
     let log = IndexedLog::open_bytes(encode_slb1(&records), Some(&map)).unwrap();
     assert_eq!(log.format().label(), "SLB1");

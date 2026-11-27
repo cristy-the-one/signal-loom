@@ -272,7 +272,7 @@ impl<'a> Parser<'a> {
         self.pos += 1;
         while self
             .peek()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'@')
         {
             self.pos += 1;
         }
@@ -356,5 +356,15 @@ mod tests {
             err.to_string().contains("ended") || err.to_string().contains("expected"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn at_tagged_signal_names_parse_in_math_expressions() {
+        let compiled = compile("abs(BrakePressure@1 - BrakePressure@2_1A0)").unwrap();
+        assert_eq!(
+            compiled.dependencies(),
+            ["BrakePressure@1", "BrakePressure@2_1A0"]
+        );
+        assert_eq!(compiled.eval(&[42.0, 40.5], &mut Vec::new()), Some(1.5));
     }
 }
