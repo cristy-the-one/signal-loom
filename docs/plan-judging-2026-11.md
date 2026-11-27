@@ -226,7 +226,7 @@ check `never BrakeLamp == 1 within [0, 100]` gives that check **fail** at 1040 m
 ```json
 {
   "format": "loom-verdict/1",
-  "tool": "loom-judge 0.1.0",
+  "tool": "loom-judge 0.2.0",
   "request_sha256": "…",
   "log": {"file": "brake.asc", "sha256": "…", "t_start_us": 0, "t_end_us": 10000000,
           "frames": 2000, "skipped": 0, "events_truncated": false},
@@ -305,6 +305,9 @@ SL-03, SL-04 and SL-06 are unrelated to this plan and can go in any time.
 - **One fixture, two copies.** signal-loom owns `fixtures/judge/`. grap-rust keeps a copy under its
   tests with the same `SHA256SUMS`; its tests read the expected verdict from there. Updating the
   contract means updating both, and a mismatch fails CI in grap-rust.
+- **`tool` names the release.** It is `loom-judge <version>` from the workspace version, so every
+  version bump rewrites `expected-verdict.json` and its `SHA256SUMS` line, and grap-rust copies
+  both again. `tool` is provenance only; the format name says what the file means.
 - **No shared code.** Each side implements its half from this document.
 
 ## 9. Decisions — defaults set, owner may change

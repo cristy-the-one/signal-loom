@@ -10,7 +10,8 @@ use crate::index::evaluate::{
 use crate::json_number::json_number;
 
 const FORMAT: &str = "loom-verdict/1";
-const TOOL: &str = "loom-judge 0.1.0";
+/// The producing build, so a verdict says which release wrote it.
+const TOOL: &str = concat!("loom-judge ", env!("CARGO_PKG_VERSION"));
 /// Occurrences kept per check. The counts are never cut down to this.
 const OCCURRENCE_CAP: usize = 50;
 
