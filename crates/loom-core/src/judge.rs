@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ErrorKind, Result};
+use crate::error::Result;
 pub(crate) use crate::index::evaluate::evaluate;
 pub use crate::index::evaluate::{
     CaseOutcome, CheckOutcome, Evaluation, EventKind, Evidence, Occurrence, Reason, Verdict,
@@ -57,12 +57,24 @@ pub enum Kind {
 #[serde(deny_unknown_fields)]
 pub struct Check {
     pub id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "de_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub given: Vec<Condition>,
     pub when: Condition,
     pub expect: Condition,
     pub mode: Mode,
     pub within_ms: [i64; 2],
+}
+
+fn de_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// How the expected condition is judged inside the window.
@@ -342,13 +354,15 @@ fn walk_check(
         }
     }
     if let Some(given) = map.get("given") {
-        match given.as_array() {
-            Some(items) => {
-                for item in items {
-                    walk_condition(item, dbc, problems);
+        if !given.is_null() {
+            match given.as_array() {
+                Some(items) => {
+                    for item in items {
+                        walk_condition(item, dbc, problems);
+                    }
                 }
+                None => problems.push("given must be a list of conditions".to_string()),
             }
-            None => problems.push("given must be a list of conditions".to_string()),
         }
     }
     for key in ["when", "expect"] {
@@ -484,78 +498,53 @@ fn resolve(
     compared: Option<&serde_json::Value>,
     problems: &mut Vec<String>,
 ) {
-    if let Some(channel) = channel {
-        // lookup has no channel argument. The view is one channel's signals,
-        // so the pair rule stays the one in SignalMap::lookup. A signal left
-        // on channel 0 applies on every channel, and is used only when the
-        // named channel has no copy of this pair.
-        let named = on_channel(dbc, channel);
-        let missed = matches!(
-            named.lookup(message, signal),
-            Err(err) if err.kind() == ErrorKind::NotFound
-        );
-        if missed && channel != 0 {
-            let every = on_channel(dbc, 0);
-            decide(&every, message, signal, Some(channel), compared, problems);
-        } else {
-            decide(&named, message, signal, Some(channel), compared, problems);
+    // A signal left on channel 0 applies on every channel, and is used only
+    // when the named channel has no copy of this pair.
+    let found = match channel {
+        None => pairs_on(dbc, message, signal, None),
+        Some(ch) => {
+            let named = pairs_on(dbc, message, signal, Some(ch));
+            if named.is_empty() && ch != 0 {
+                pairs_on(dbc, message, signal, Some(0))
+            } else {
+                named
+            }
         }
-        return;
-    }
-    decide(dbc, message, signal, None, compared, problems);
-}
-
-fn decide(
-    dbc: &SignalMap,
-    message: &str,
-    signal: &str,
-    channel: Option<i64>,
-    compared: Option<&serde_json::Value>,
-    problems: &mut Vec<String>,
-) {
-    match dbc.lookup(message, signal) {
-        Ok(found) => reject_bad_label(&[found], message, signal, compared, problems),
-        Err(err) if err.kind() == ErrorKind::NotFound => {
+    };
+    match found.as_slice() {
+        [one] => reject_bad_label(&[*one], message, signal, compared, problems),
+        [] => {
             let text = match channel {
-                Some(channel) => format!("{err} on channel {channel}"),
-                None => err.to_string(),
+                Some(ch) => format!("unknown signal pair ({message}, {signal}) on channel {ch}"),
+                None => format!("unknown signal pair ({message}, {signal})"),
             };
             problems.push(text);
         }
-        Err(_) => {
-            problems.push(ambiguous(dbc, message, signal));
-            let found = pairs(dbc, message, signal);
+        _ => {
+            problems.push(ambiguous(&found, message, signal));
             reject_bad_label(&found, message, signal, compared, problems);
         }
     }
 }
 
-fn on_channel(dbc: &SignalMap, channel: i64) -> SignalMap {
-    SignalMap {
-        name: String::new(),
-        signals: dbc
-            .signals
-            .iter()
-            .filter(|signal| i64::from(signal.channel) == channel)
-            .cloned()
-            .collect(),
-        messages: Vec::new(),
-        warnings: Vec::new(),
-    }
-}
-
-fn pairs<'a>(dbc: &'a SignalMap, message: &str, signal: &str) -> Vec<&'a MappedSignal> {
+fn pairs_on<'a>(
+    dbc: &'a SignalMap,
+    message: &str,
+    signal: &str,
+    channel: Option<i64>,
+) -> Vec<&'a MappedSignal> {
     dbc.signals
         .iter()
-        .filter(|candidate| candidate.message_name == message && candidate.defined_name == signal)
+        .filter(|candidate| {
+            candidate.message_name == message
+                && candidate.defined_name == signal
+                && channel.is_none_or(|ch| i64::from(candidate.channel) == ch)
+        })
         .collect()
 }
 
-fn ambiguous(dbc: &SignalMap, message: &str, signal: &str) -> String {
-    let mut channels: Vec<u8> = pairs(dbc, message, signal)
-        .into_iter()
-        .map(|candidate| candidate.channel)
-        .collect();
+fn ambiguous(found: &[&MappedSignal], message: &str, signal: &str) -> String {
+    let mut channels: Vec<u8> = found.iter().map(|candidate| candidate.channel).collect();
     channels.sort_unstable();
     let listed = match channels.as_slice() {
         [first, second] => format!("{first} and {second}"),

@@ -2,7 +2,7 @@ use super::checkpoint::{pad_snapshots, push_checkpoint, Checkpoint, CHECKPOINT_E
 use super::checksum::probe_checksums;
 use super::control::{pulse, IndexControl};
 use super::integrity::{Integrity, IntegrityEvent, IntegrityFrame, IntegrityWatch};
-use super::signal::{decode_frame, SignalMeta};
+use super::signal::{decode_frame, MessageSignals, SignalMeta};
 use super::source::Source;
 use super::time::{accept_time, REORDER_TOLERANCE_US};
 use super::IndexedLog;
@@ -30,7 +30,7 @@ pub(super) struct Built {
     pub(super) warnings: Vec<String>,
     pub(super) signals: Vec<SignalMeta>,
     pub(super) name_index: HashMap<String, usize>,
-    pub(super) msg_index: HashMap<u32, Vec<usize>>,
+    pub(super) msg_index: HashMap<u32, MessageSignals>,
     pub(super) message_names: HashMap<u32, String>,
     pub(super) seen_ids: HashSet<u32>,
 }
@@ -39,7 +39,7 @@ impl Built {
     fn new(
         signals: Vec<SignalMeta>,
         name_index: HashMap<String, usize>,
-        msg_index: HashMap<u32, Vec<usize>>,
+        msg_index: HashMap<u32, MessageSignals>,
         message_names: HashMap<u32, String>,
     ) -> Self {
         Self {
@@ -67,13 +67,15 @@ impl Built {
     fn from_map(map: Option<&SignalMap>) -> Self {
         let mut signals = Vec::new();
         let mut name_index = HashMap::new();
-        let mut msg_index: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut msg_index: HashMap<u32, MessageSignals> = HashMap::new();
         let mut message_names = HashMap::new();
         if let Some(map) = map {
             for mapped in &map.signals {
                 let idx = signals.len();
                 name_index.insert(mapped.name.clone(), idx);
-                msg_index.entry(mapped.message_id).or_default().push(idx);
+                let group = msg_index.entry(mapped.message_id).or_default();
+                group.indices.push(idx);
+                group.has_mux |= mapped.mux_switch || mapped.mux_value.is_some();
                 message_names
                     .entry(mapped.message_id)
                     .or_insert_with(|| mapped.message_name.clone());
@@ -122,7 +124,6 @@ impl IndexedLog {
         Ok(Self {
             source,
             format,
-            body: format,
             checkpoints: built.checkpoints,
             snapshots: built.snapshots,
             frame_count: built.frame_count,
@@ -220,8 +221,13 @@ fn scan_framed(
     control: Option<&IndexControl>,
 ) -> Result<Built> {
     let mut built = Built::from_map(map);
-    let checksums = source.with_reader(|reader| probe_checksums(&mut built, reader, format))?;
-    let mut watch = IntegrityWatch::new(map, timeout, checksums);
+    let checksums =
+        source.with_reader(|reader| probe_checksums(&mut built, reader, format, control))?;
+    let has_counters = built
+        .signals
+        .iter()
+        .any(|signal| matches!(signal.integrity, Integrity::Counter { .. }));
+    let mut watch = IntegrityWatch::new(map, timeout, checksums, has_counters);
     let mut pending: Vec<(usize, f64)> = Vec::new();
     let mut built = drive(source, format, built, control, |pass, rec| {
         match &rec.kind {
@@ -236,10 +242,10 @@ fn scan_framed(
                     pass.checkpoint(rec);
                 }
                 pending.clear();
-                if let Some(indices) = pass.built.msg_index.get(id) {
+                if let Some(group) = pass.built.msg_index.get(id) {
                     decode_frame(
                         &pass.built.signals,
-                        indices,
+                        group,
                         *channel,
                         *dlc,
                         data,
@@ -322,9 +328,6 @@ fn ensure_signal(built: &mut Built, name: &str, unit: &str) -> usize {
         table: Vec::new(),
         integrity: Integrity::None,
     });
-    for snap in &mut built.snapshots {
-        snap.push(None);
-    }
     idx
 }
 

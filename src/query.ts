@@ -41,7 +41,7 @@ export async function refresh(): Promise<void> {
   const maxPoints = Math.max(200, Math.min(4000, Math.round(width * 2)));
   try {
     const bus = oneSecond(state.playhead, summary);
-    const [series, frame, held, load] = await Promise.all([
+    const [series, frame, load] = await Promise.all([
       state.plotted.length
         ? api.query({
             t0Us: view.t0,
@@ -52,13 +52,12 @@ export async function refresh(): Promise<void> {
           })
         : Promise.resolve([] as Series[]),
       api.frameAt(state.playhead),
-      api.valuesAt(state.playhead),
       api.busLoad(bus.t0, bus.t1),
     ]);
     if (gen !== dataGen()) return;
     state.series = series;
     state.frame = frame;
-    state.held = held;
+    state.held = frame?.values ?? [];
     state.bus = load;
     state.view = view;
     clearError("query");

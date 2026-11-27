@@ -75,23 +75,17 @@ impl DecodeSpec {
 
     /// Bytes the signal reads. A shorter frame does not carry it.
     pub fn bytes_needed(self) -> usize {
+        let len = u32::from(self.bit_length).max(1);
         match self.endian {
             Endian::Little => {
-                let last = u32::from(self.start_bit) + u32::from(self.bit_length).max(1) - 1;
+                let last = u32::from(self.start_bit) + len - 1;
                 last as usize / 8 + 1
             }
             Endian::Big => {
-                let mut bit = self.start_bit;
-                let mut last = bit / 8;
-                for _ in 1..self.bit_length {
-                    bit = if bit.is_multiple_of(8) {
-                        bit.saturating_add(15)
-                    } else {
-                        bit - 1
-                    };
-                    last = last.max(bit / 8);
-                }
-                usize::from(last) + 1
+                let start_byte = u32::from(self.start_bit / 8);
+                let first_byte_bits = u32::from(self.start_bit % 8) + 1;
+                let extra_bytes = len.saturating_sub(first_byte_bits).div_ceil(8);
+                (start_byte + extra_bytes + 1) as usize
             }
         }
     }
@@ -121,33 +115,42 @@ pub fn sign_extend(value: u64, bits: u16) -> i64 {
 }
 
 fn extract_le(data: &[u8], start_bit: u16, bit_length: u16) -> u64 {
+    let mut rem = u32::from(bit_length);
+    let mut byte_idx = usize::from(start_bit / 8);
+    let mut bit_offset = u32::from(start_bit % 8);
+    let mut out_shift = 0u32;
     let mut value = 0u64;
-    for i in 0..bit_length {
-        let bit_index = u32::from(start_bit) + u32::from(i);
-        let byte = (bit_index / 8) as usize;
-        let bit = (bit_index % 8) as u8;
-        if byte < data.len() && (data[byte] >> bit) & 1 == 1 {
-            value |= 1u64 << i;
-        }
+    while rem > 0 && byte_idx < data.len() {
+        let take = rem.min(8 - bit_offset);
+        let mask = ((1u16 << take) - 1) as u8;
+        let chunk = u64::from((data[byte_idx] >> bit_offset) & mask);
+        value |= chunk << out_shift;
+        out_shift += take;
+        rem -= take;
+        byte_idx += 1;
+        bit_offset = 0;
     }
     value
 }
 
 fn extract_be(data: &[u8], start_bit: u16, bit_length: u16) -> u64 {
+    let mut rem = u32::from(bit_length);
+    let mut byte_idx = usize::from(start_bit / 8);
+    let mut avail = u32::from(start_bit % 8) + 1;
     let mut value = 0u64;
-    let mut bit = start_bit;
-    for _ in 0..bit_length {
-        let byte = (bit / 8) as usize;
-        let b = (bit % 8) as u8;
-        value <<= 1;
-        if byte < data.len() && (data[byte] >> b) & 1 == 1 {
-            value |= 1;
-        }
-        if b == 0 {
-            bit = bit.saturating_add(15);
+    while rem > 0 {
+        let take = rem.min(avail);
+        let chunk = if byte_idx < data.len() {
+            let lsb = avail - take;
+            let mask = ((1u16 << take) - 1) as u8;
+            u64::from((data[byte_idx] >> lsb) & mask)
         } else {
-            bit -= 1;
-        }
+            0
+        };
+        value = (value << take) | chunk;
+        rem -= take;
+        byte_idx += 1;
+        avail = 8;
     }
     value
 }
@@ -221,5 +224,90 @@ mod tests {
         let data = [0x12, 0x34];
         let raw = extract_bits(&data, 7, 16, Endian::Big);
         assert_eq!(raw, 0x1234);
+    }
+
+    #[test]
+    fn byte_wise_extraction_and_bytes_needed_match_bit_by_bit_reference() {
+        fn ref_le(data: &[u8], start_bit: u16, bit_length: u16) -> u64 {
+            let mut value = 0u64;
+            for i in 0..bit_length {
+                let bit_index = u32::from(start_bit) + u32::from(i);
+                let byte = (bit_index / 8) as usize;
+                let bit = (bit_index % 8) as u8;
+                if byte < data.len() && (data[byte] >> bit) & 1 == 1 {
+                    value |= 1u64 << i;
+                }
+            }
+            value
+        }
+
+        fn ref_be(data: &[u8], start_bit: u16, bit_length: u16) -> u64 {
+            let mut value = 0u64;
+            let mut bit = start_bit;
+            for _ in 0..bit_length {
+                let byte = (bit / 8) as usize;
+                let b = (bit % 8) as u8;
+                value <<= 1;
+                if byte < data.len() && (data[byte] >> b) & 1 == 1 {
+                    value |= 1;
+                }
+                bit = if b == 0 {
+                    bit.saturating_add(15)
+                } else {
+                    bit - 1
+                };
+            }
+            value
+        }
+
+        fn ref_be_bytes(start_bit: u16, bit_length: u16) -> usize {
+            let mut bit = start_bit;
+            let mut last = bit / 8;
+            for _ in 1..bit_length {
+                bit = if bit.is_multiple_of(8) {
+                    bit.saturating_add(15)
+                } else {
+                    bit - 1
+                };
+                last = last.max(bit / 8);
+            }
+            usize::from(last) + 1
+        }
+
+        let payload: [u8; 64] = std::array::from_fn(|i| ((i as u8).wrapping_mul(37)) ^ 0xA5);
+        for slice_len in [0usize, 1, 5, 8, 64] {
+            let data = &payload[..slice_len];
+            for start_bit in (0..64u16).chain([448, 455, 504, 511]) {
+                for bit_length in [0u16, 1, 3, 7, 8, 9, 12, 16, 23, 32, 48, 63, 64] {
+                    assert_eq!(
+                        extract_le(data, start_bit, bit_length),
+                        ref_le(data, start_bit, bit_length),
+                        "le start={start_bit} len={bit_length} slice={slice_len}"
+                    );
+                    assert_eq!(
+                        extract_be(data, start_bit, bit_length),
+                        ref_be(data, start_bit, bit_length),
+                        "be start={start_bit} len={bit_length} slice={slice_len}"
+                    );
+                }
+            }
+        }
+        for start_bit in 0..512u16 {
+            for bit_length in 0..=64u16 {
+                let spec = DecodeSpec {
+                    start_bit,
+                    bit_length,
+                    factor: 1.0,
+                    offset: 0.0,
+                    signed: false,
+                    endian: Endian::Big,
+                };
+                assert_eq!(
+                    spec.bytes_needed(),
+                    ref_be_bytes(start_bit, bit_length),
+                    "bytes_needed start={start_bit} len={bit_length}"
+                );
+            }
+        }
     }
 }

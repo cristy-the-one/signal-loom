@@ -1,3 +1,5 @@
+use super::query::HeldValue;
+use super::signal::decode_one;
 use super::IndexedLog;
 use crate::error::Result;
 use crate::project::TriggerOp;
@@ -15,44 +17,63 @@ pub struct FrameHit {
 }
 
 impl IndexedLog {
+    #[cfg(test)]
     pub fn step_frame(&self, t_us: u64, next: bool) -> Result<Option<FrameHit>> {
+        Ok(self.step_frame_with_values(t_us, next)?.map(|(hit, _)| hit))
+    }
+
+    /// Step to the next or previous frame and return the held signal values at
+    /// that frame's timestamp in one checkpoint scan.
+    pub fn step_frame_with_values(
+        &self,
+        t_us: u64,
+        next: bool,
+    ) -> Result<Option<(FrameHit, Vec<HeldValue>)>> {
         if self.checkpoints.is_empty() {
             return Ok(None);
         }
         if next {
             let idx = self.floor_checkpoint(t_us);
             let mut ordinal = self.checkpoints[idx].frame_ordinal;
-            let mut found = None;
+            let mut held = self.snapshot(idx);
+            let mut found: Option<FrameHit> = None;
             self.scan_from(idx, |rec| {
-                let current = ordinal;
-                if is_timed_sample(rec) {
+                if let Some(hit) = &found {
+                    if rec.t_us > hit.t_us {
+                        return false;
+                    }
+                }
+                self.touch(rec, &mut held, |_, _| {});
+                if found.is_none() && is_timed_sample(rec) {
+                    let current = ordinal;
                     ordinal += 1;
                     if rec.t_us > t_us {
                         found = Some(self.hit_from(rec, current));
-                        return false;
                     }
                 }
                 true
             })?;
-            return Ok(found);
+            return Ok(found.map(|hit| (hit, self.held_values(&held))));
         }
 
         let mut idx = self.floor_checkpoint(t_us);
         loop {
             let mut ordinal = self.checkpoints[idx].frame_ordinal;
+            let mut held = self.snapshot(idx);
             let mut last = None;
             self.scan_from(idx, |rec| {
                 if rec.t_us >= t_us {
                     return false;
                 }
+                self.touch(rec, &mut held, |_, _| {});
                 if is_timed_sample(rec) {
                     last = Some(self.hit_from(rec, ordinal));
                     ordinal += 1;
                 }
                 true
             })?;
-            if last.is_some() {
-                return Ok(last);
+            if let Some(hit) = last {
+                return Ok(Some((hit, self.held_values(&held))));
             }
             if idx == 0 {
                 return Ok(None);
@@ -65,15 +86,14 @@ impl IndexedLog {
     /// doing so. At most 200 hits.
     pub fn crossings(&self, name: &str, op: TriggerOp, level: f64) -> Result<Vec<(u64, String)>> {
         let idx = self.require_signal(name)?;
+        if self.checkpoints.is_empty() {
+            return Ok(Vec::new());
+        }
         let label = format!("Trigger {name} {} {level}", op.symbol());
         let mut events = Vec::new();
         let mut armed = true;
-        let mut held = self.snapshot(0);
         self.scan_from(0, |rec| {
-            self.touch(rec, &mut held, |signal, value| {
-                if signal != idx {
-                    return;
-                }
+            if let Some(value) = decode_one(&self.signals, &self.msg_index, rec, idx) {
                 let hot = op.holds(value, level);
                 if hot && armed {
                     events.push((rec.t_us, label.clone()));
@@ -81,7 +101,7 @@ impl IndexedLog {
                 } else if !hot {
                     armed = true;
                 }
-            });
+            }
             events.len() < 200
         })?;
         Ok(events)

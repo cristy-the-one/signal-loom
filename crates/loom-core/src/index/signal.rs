@@ -2,7 +2,49 @@ use super::integrity::Integrity;
 use super::IndexedLog;
 use crate::decode::DecodeSpec;
 use crate::error::{Error, Result};
-use crate::scan::FrameData;
+use crate::scan::{FrameData, Rec, RecKind};
+use std::collections::HashMap;
+
+/// Signals declared on one CAN message id.
+#[derive(Default)]
+pub(super) struct MessageSignals {
+    pub(super) indices: Vec<usize>,
+    pub(super) has_mux: bool,
+}
+
+/// A subset of signals to decode during a replay. Unrelated CAN messages are
+/// skipped before inspecting any signal metadata.
+pub(super) struct SignalFilter {
+    wanted: Vec<usize>,
+    by_msg: HashMap<u32, (bool, Vec<(usize, usize)>)>,
+    by_sample: HashMap<usize, Vec<usize>>,
+}
+
+impl SignalFilter {
+    pub(super) fn new(signals: &[SignalMeta], wanted: &[usize]) -> Self {
+        let mut by_msg: HashMap<u32, (bool, Vec<(usize, usize)>)> = HashMap::new();
+        let mut by_sample: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (slot, &idx) in wanted.iter().enumerate() {
+            let signal = &signals[idx];
+            if let Some(id) = signal.message_id {
+                let entry = by_msg.entry(id).or_insert_with(|| (false, Vec::new()));
+                entry.0 |= signal.mux_value.is_some();
+                entry.1.push((idx, slot));
+            } else {
+                by_sample.entry(idx).or_default().push(slot);
+            }
+        }
+        Self {
+            wanted: wanted.to_vec(),
+            by_msg,
+            by_sample,
+        }
+    }
+
+    pub(super) fn wanted(&self) -> &[usize] {
+        &self.wanted
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct SignalMeta {
@@ -78,32 +120,49 @@ impl IndexedLog {
     }
 }
 
-/// Decode one frame's signals for a message. The mux switch and the selected
-/// branch compare raw values, and a frame too short for a signal leaves it held.
-pub(super) fn decode_frame(
+fn carried_spec(signal: &SignalMeta, channel: u8, dlc: u8) -> Option<DecodeSpec> {
+    let on_channel = signal.channel == 0 || channel == 0 || signal.channel == channel;
+    if !on_channel {
+        return None;
+    }
+    signal
+        .spec
+        .filter(|spec| spec.bytes_needed() <= usize::from(dlc))
+}
+
+fn mux_switch_value(
     signals: &[SignalMeta],
     indices: &[usize],
     channel: u8,
     dlc: u8,
     data: &FrameData,
-    mut emit: impl FnMut(usize, f64),
-) {
-    let carried = |signal: &SignalMeta| {
-        let on_channel = signal.channel == 0 || channel == 0 || signal.channel == channel;
-        let spec = signal
-            .spec
-            .filter(|spec| spec.bytes_needed() <= usize::from(dlc));
-        spec.filter(|_| on_channel)
-    };
-    let switch = indices.iter().find_map(|&idx| {
+) -> Option<u32> {
+    indices.iter().find_map(|&idx| {
         let signal = &signals[idx];
         signal
             .mux_switch
-            .then(|| carried(signal))
+            .then(|| carried_spec(signal, channel, dlc))
             .flatten()
             .and_then(|spec| spec.switch_value(data))
-    });
-    for &idx in indices {
+    })
+}
+
+/// Decode one frame's signals for a message. The mux switch and the selected
+/// branch compare raw values, and a frame too short for a signal leaves it held.
+pub(super) fn decode_frame(
+    signals: &[SignalMeta],
+    group: &MessageSignals,
+    channel: u8,
+    dlc: u8,
+    data: &FrameData,
+    mut emit: impl FnMut(usize, f64),
+) {
+    let switch = if group.has_mux {
+        mux_switch_value(signals, &group.indices, channel, dlc, data)
+    } else {
+        None
+    };
+    for &idx in &group.indices {
         let signal = &signals[idx];
         if signal
             .mux_value
@@ -111,8 +170,96 @@ pub(super) fn decode_frame(
         {
             continue;
         }
-        if let Some(spec) = carried(signal) {
+        if let Some(spec) = carried_spec(signal, channel, dlc) {
             emit(idx, spec.decode(data));
         }
+    }
+}
+
+impl IndexedLog {
+    /// Decode only the signals in `filter` from `rec`, reporting `(slot, value)`.
+    pub(super) fn decode_wanted(
+        &self,
+        rec: &Rec,
+        filter: &SignalFilter,
+        mut emit: impl FnMut(usize, f64),
+    ) {
+        match &rec.kind {
+            RecKind::Frame {
+                id,
+                dlc,
+                data,
+                channel,
+                ..
+            } => {
+                let Some((needs_mux, entries)) = filter.by_msg.get(id) else {
+                    return;
+                };
+                let switch = if *needs_mux {
+                    self.msg_index.get(id).and_then(|group| {
+                        mux_switch_value(&self.signals, &group.indices, *channel, *dlc, data)
+                    })
+                } else {
+                    None
+                };
+                for &(idx, slot) in entries {
+                    let signal = &self.signals[idx];
+                    if signal
+                        .mux_value
+                        .is_some_and(|expected| switch != Some(expected))
+                    {
+                        continue;
+                    }
+                    if let Some(spec) = carried_spec(signal, *channel, *dlc) {
+                        emit(slot, spec.decode(data));
+                    }
+                }
+            }
+            RecKind::Sample { name, value, .. } => {
+                if let Some(idx) = self.resolve_signal(name) {
+                    if let Some(slots) = filter.by_sample.get(&idx) {
+                        for &slot in slots {
+                            emit(slot, *value);
+                        }
+                    }
+                }
+            }
+            RecKind::Event { .. } => {}
+        }
+    }
+}
+
+/// Decode one signal from `rec`, skipping every other message and signal.
+pub(super) fn decode_one(
+    signals: &[SignalMeta],
+    msg_index: &HashMap<u32, MessageSignals>,
+    rec: &Rec,
+    idx: usize,
+) -> Option<f64> {
+    let signal = &signals[idx];
+    match &rec.kind {
+        RecKind::Frame {
+            id,
+            dlc,
+            data,
+            channel,
+            ..
+        } => {
+            if signal.message_id != Some(*id) {
+                return None;
+            }
+            let spec = carried_spec(signal, *channel, *dlc)?;
+            if let Some(expected) = signal.mux_value {
+                let switch = msg_index.get(id).and_then(|group| {
+                    mux_switch_value(signals, &group.indices, *channel, *dlc, data)
+                });
+                if switch != Some(expected) {
+                    return None;
+                }
+            }
+            Some(spec.decode(data))
+        }
+        RecKind::Sample { name, value, .. } => (signal.name == *name).then_some(*value),
+        RecKind::Event { .. } => None,
     }
 }

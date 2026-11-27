@@ -1,5 +1,6 @@
 use super::query::Series;
-use super::replay::Step;
+use super::replay::{Phase, Step};
+use super::signal::{decode_one, SignalFilter};
 use super::time::ordered_range;
 use super::IndexedLog;
 use crate::error::{Error, Result};
@@ -27,25 +28,24 @@ impl IndexedLog {
         if self.checkpoints.is_empty() {
             return Ok(series);
         }
+        let filter = SignalFilter::new(&self.signals, &wanted);
         let mut total = 0usize;
-        self.replay(t0, t1, |step, held| {
+        self.replay_wanted(t0, t1, &filter, |step, held| {
             let Step::Record(rec) = step else {
-                for (out, idx) in series.iter_mut().zip(&wanted) {
-                    if let Some(value) = held.get(*idx).copied().flatten() {
+                for (out, value) in series.iter_mut().zip(held.iter().copied()) {
+                    if let Some(value) = value {
                         out.points.push((t0, value));
                     }
                 }
                 return true;
             };
-            self.touch(rec, held, |signal, value| {
-                if let Some(pos) = wanted.iter().position(|&idx| idx == signal) {
-                    let points = &mut series[pos].points;
-                    if points.last().is_some_and(|(t, _)| *t == rec.t_us) {
-                        points.pop();
-                    }
-                    points.push((rec.t_us, value));
-                    total += 1;
+            self.touch_wanted(rec, &filter, held, |slot, value| {
+                let points = &mut series[slot].points;
+                if points.last().is_some_and(|(t, _)| *t == rec.t_us) {
+                    points.pop();
                 }
+                points.push((rec.t_us, value));
+                total += 1;
             });
             total <= MAX_WINDOW_SAMPLES
         })?;
@@ -59,6 +59,11 @@ impl IndexedLog {
 
     pub fn stats(&self, name: &str, t0_us: u64, t1_us: u64) -> Result<crate::dto::WindowStats> {
         let idx = self.require_signal(name)?;
+        if self.checkpoints.is_empty() {
+            return Err(Error::invalid(format!(
+                "no samples of {name} in that window"
+            )));
+        }
         let (t0, t1) = ordered_range(t0_us, t1_us);
         let mut count = 0u64;
         let mut sum = 0.0f64;
@@ -66,12 +71,9 @@ impl IndexedLog {
         let mut max = f64::NEG_INFINITY;
         let mut first = None;
         let mut last = None;
-        self.replay(t0, t1, |step, held| {
-            let Step::Record(rec) = step else {
-                return true;
-            };
-            self.touch(rec, held, |signal, value| {
-                if signal == idx {
+        self.scan_window(t0, t1, |phase, rec| {
+            if phase == Phase::Window {
+                if let Some(value) = decode_one(&self.signals, &self.msg_index, rec, idx) {
                     count += 1;
                     sum += value;
                     min = min.min(value);
@@ -81,7 +83,7 @@ impl IndexedLog {
                     }
                     last = Some(value);
                 }
-            });
+            }
             true
         })?;
         if count == 0 {

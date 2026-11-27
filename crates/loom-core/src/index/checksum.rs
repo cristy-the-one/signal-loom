@@ -1,6 +1,7 @@
 use super::build::{note_warn, Built};
+use super::control::IndexControl;
 use super::integrity::Integrity;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::scan::{LogFormat, ReadSeek, RecKind, Scanner};
 use std::collections::HashMap;
 
@@ -16,6 +17,29 @@ pub(crate) enum ChecksumAlgo {
     Crc8H2F,
 }
 
+const CRC_J1850_TABLE: [u8; 256] = crc8_table(0x1D);
+const CRC_8H2F_TABLE: [u8; 256] = crc8_table(0x2F);
+
+const fn crc8_table(poly: u8) -> [u8; 256] {
+    let mut table = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u8;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 0x80 != 0 {
+                (crc << 1) ^ poly
+            } else {
+                crc << 1
+            };
+            bit += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+}
+
 impl ChecksumAlgo {
     /// XOR first: it is what a mostly-good short log falls back to.
     const ALL: [ChecksumAlgo; 4] = [Self::Xor, Self::Sum, Self::CrcJ1850, Self::Crc8H2F];
@@ -29,23 +53,16 @@ impl ChecksumAlgo {
         match self {
             Self::Xor => bytes.fold(0, |acc, byte| acc ^ byte),
             Self::Sum => bytes.fold(0u8, |acc, byte| acc.wrapping_add(byte)),
-            Self::CrcJ1850 => crc8(bytes, 0x1D),
-            Self::Crc8H2F => crc8(bytes, 0x2F),
+            Self::CrcJ1850 => crc8(bytes, &CRC_J1850_TABLE),
+            Self::Crc8H2F => crc8(bytes, &CRC_8H2F_TABLE),
         }
     }
 }
 
-fn crc8(bytes: impl Iterator<Item = u8>, poly: u8) -> u8 {
+fn crc8(bytes: impl Iterator<Item = u8>, table: &[u8; 256]) -> u8 {
     let mut crc = 0xFFu8;
     for byte in bytes {
-        crc ^= byte;
-        for _ in 0..8 {
-            crc = if crc & 0x80 != 0 {
-                (crc << 1) ^ poly
-            } else {
-                crc << 1
-            };
-        }
+        crc = table[usize::from(crc ^ byte)];
     }
     crc ^ 0xFF
 }
@@ -76,6 +93,7 @@ pub(super) fn probe_checksums(
     built: &mut Built,
     reader: &mut dyn ReadSeek,
     format: LogFormat,
+    control: Option<&IndexControl>,
 ) -> Result<HashMap<usize, ChecksumAlgo>> {
     let mut seen: HashMap<usize, Vec<u8>> = built
         .signals
@@ -94,14 +112,17 @@ pub(super) fn probe_checksums(
         if records > CHECKSUM_PROBE_RECORDS {
             break;
         }
+        if records.is_multiple_of(64) && control.is_some_and(IndexControl::is_cancelled) {
+            return Err(Error::cancelled("indexing cancelled"));
+        }
         let RecKind::Frame { id, dlc, data, .. } = &rec.kind else {
             continue;
         };
-        let Some(indices) = built.msg_index.get(id) else {
+        let Some(group) = built.msg_index.get(id) else {
             continue;
         };
         let width = usize::from(*dlc).min(data.len());
-        for idx in indices {
+        for idx in &group.indices {
             let Some(masks) = seen
                 .get_mut(idx)
                 .filter(|masks| masks.len() < CHECKSUM_PROBE)

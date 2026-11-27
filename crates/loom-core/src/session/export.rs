@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 use crate::index::{csv_header, truncation_note, Export, IndexedLog, EXPORT_ROW_CAP};
 use crate::project;
 use std::collections::BTreeSet;
+use std::fmt::Write;
 use std::path::Path;
 
 impl Session {
@@ -88,14 +89,14 @@ fn export_math_csv(
     let mut cursors = vec![0usize; columns.len()];
     let mut rows = 0usize;
     for t in times.into_iter().take(cap) {
-        out.push_str(&t.to_string());
+        let _ = write!(out, "{t}");
         for (series, cursor) in columns.iter().zip(cursors.iter_mut()) {
             out.push(',');
             while *cursor < series.points.len() && series.points[*cursor].0 < t {
                 *cursor += 1;
             }
             if let Some((_, value)) = series.points.get(*cursor).filter(|(stamp, _)| *stamp == t) {
-                out.push_str(&format!("{value:.6}"));
+                let _ = write!(out, "{value:.6}");
             }
         }
         out.push('\n');

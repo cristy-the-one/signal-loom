@@ -127,12 +127,14 @@ export function drawPlot(
 }
 
 export function heldValue(points: Point[], t: number): number | null {
-  let value: number | null = null;
-  for (const point of points) {
-    if (point.t > t) break;
-    value = point.v;
+  let lo = 0;
+  let hi = points.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (points[mid].t <= t) lo = mid + 1;
+    else hi = mid;
   }
-  return value;
+  return lo > 0 ? points[lo - 1].v : null;
 }
 
 export function timeOnPlot(

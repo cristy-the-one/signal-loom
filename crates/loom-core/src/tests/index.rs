@@ -26,6 +26,54 @@ F 40000 1A0 800C000000000000
 }
 
 #[test]
+fn step_frame_with_values_matches_values_at_across_duplicate_stamps_and_checkpoints() {
+    let mut text = String::from("SLOGv1\n");
+    for i in 0..300u64 {
+        let t = i * 10_000;
+        let rpm = ((i + 1) * 4) as u16;
+        let speed = ((i + 1) * 10) as u16;
+        let b = rpm.to_le_bytes();
+        let s = speed.to_le_bytes();
+        text.push_str(&format!(
+            "F {t} 1A0 {:02X}{:02X}{:02X}{:02X}00000000\n",
+            b[0], b[1], s[0], s[1]
+        ));
+        if i % 50 == 0 {
+            // Second frame at the exact same timestamp updates the held value.
+            let rpm2 = rpm + 4;
+            let b2 = rpm2.to_le_bytes();
+            text.push_str(&format!(
+                "F {t} 1A0 {:02X}{:02X}{:02X}{:02X}00000000\n",
+                b2[0], b2[1], s[0], s[1]
+            ));
+        }
+    }
+    let log = IndexedLog::open_bytes(text.into_bytes(), Some(&tiny_map())).unwrap();
+    for t in [
+        0, 5_000, 500_000, 2_550_000, 2_560_000, 2_990_000, 3_500_000,
+    ] {
+        for next in [false, true] {
+            let stepped = log.step_frame_with_values(t, next).unwrap();
+            match stepped {
+                None => assert!(log.step_frame(t, next).unwrap().is_none()),
+                Some((hit, values)) => {
+                    let expected = log.values_at(hit.t_us).unwrap();
+                    let left: Vec<_> = values
+                        .iter()
+                        .map(|v| (&v.name, v.value, &v.label))
+                        .collect();
+                    let right: Vec<_> = expected
+                        .iter()
+                        .map(|v| (&v.name, v.value, &v.label))
+                        .collect();
+                    assert_eq!(left, right, "t={t} next={next} hit={}", hit.t_us);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn query_window_stays_bounded_on_a_large_log() {
     let mut text = String::from("SLOGv1\n");
     text.reserve(100_000 * 32);

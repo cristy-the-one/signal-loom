@@ -194,29 +194,42 @@ pub(super) fn parse_time(token: Option<&str>) -> std::result::Result<u64, String
 
 /// Hex digits, with spaces and `_` ignored, as a payload of up to 64 bytes.
 pub(super) fn parse_payload(text: &str) -> std::result::Result<(FrameData, u8), String> {
-    let digits = || {
-        text.chars()
-            .filter(|c| !c.is_ascii_whitespace() && *c != '_')
-    };
-    if !digits().all(|c| c.is_ascii_hexdigit()) {
-        return Err(format!(
-            "bad payload hex '{}'",
-            digits().collect::<String>()
-        ));
+    let mut data = [0u8; MAX_DATA];
+    let mut nibbles = 0usize;
+    let mut high = 0u8;
+    for &byte in text.as_bytes() {
+        if byte.is_ascii_whitespace() || byte == b'_' {
+            continue;
+        }
+        let Some(digit) = hex_nibble(byte) else {
+            let cleaned: String = text
+                .chars()
+                .filter(|c| !c.is_ascii_whitespace() && *c != '_')
+                .collect();
+            return Err(format!("bad payload hex '{cleaned}'"));
+        };
+        if nibbles < MAX_DATA * 2 {
+            if nibbles.is_multiple_of(2) {
+                high = digit;
+            } else {
+                data[nibbles / 2] = (high << 4) | digit;
+            }
+        }
+        nibbles += 1;
     }
-    let count = digits().count();
-    if count > MAX_DATA * 2 || count % 2 == 1 {
+    if nibbles > MAX_DATA * 2 || !nibbles.is_multiple_of(2) {
         return Err("payload must be an even number of hex digits, at most 64 bytes".into());
     }
-    let dlc = count / 2;
-    let mut data = [0u8; MAX_DATA];
-    let mut nibbles = digits().filter_map(|c| c.to_digit(16));
-    for slot in &mut data[..dlc] {
-        if let (Some(high), Some(low)) = (nibbles.next(), nibbles.next()) {
-            *slot = (high * 16 + low) as u8;
-        }
+    Ok((data, (nibbles / 2) as u8))
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
-    Ok((data, dlc as u8))
 }
 
 /// A payload shorter than its declared length is skipped, not kept as a shorter frame.

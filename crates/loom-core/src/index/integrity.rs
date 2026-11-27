@@ -80,6 +80,7 @@ pub(super) struct IntegrityWatch {
     cycles: HashMap<u32, u64>,
     timeout_factor: f64,
     checksums: HashMap<usize, ChecksumAlgo>,
+    has_counters: bool,
     /// Previous frame time of one message on one channel. The cycle time stays
     /// keyed by id: two channels of the same message share it.
     last_seen: HashMap<(u8, u32), u64>,
@@ -91,6 +92,7 @@ impl IntegrityWatch {
         map: Option<&SignalMap>,
         timeout: TimeoutFactor,
         checksums: HashMap<usize, ChecksumAlgo>,
+        has_counters: bool,
     ) -> Self {
         let cycles = map
             .map(|map| {
@@ -104,6 +106,7 @@ impl IntegrityWatch {
             cycles,
             timeout_factor: timeout.get(),
             checksums,
+            has_counters,
             last_seen: HashMap::new(),
             last_counter: HashMap::new(),
         }
@@ -125,35 +128,41 @@ impl IntegrityWatch {
             }
             self.last_seen.insert(key, frame.t_us);
         }
-        let Some(indices) = built.msg_index.get(&frame.id) else {
+        if self.checksums.is_empty() && !self.has_counters {
+            return;
+        }
+        let Some(group) = built.msg_index.get(&frame.id) else {
             return;
         };
         // Checksums first, as an ECU checks them: a frame that fails its checksum
         // is rejected, so its counter neither raises an event nor moves the reference.
-        let width = (frame.dlc as usize).min(frame.data.len());
         let mut raised: Vec<IntegrityEvent> = Vec::new();
-        for &idx in indices {
-            let signal = &built.signals[idx];
-            // Same channel rule as `decode_frame`: a channel-0 signal or frame
-            // meets every channel, and otherwise the channels must match.
-            let on_channel =
-                signal.channel == 0 || frame.channel == 0 || signal.channel == frame.channel;
-            if !on_channel {
-                continue;
-            }
-            let Integrity::Checksum { byte } = signal.integrity else {
-                continue;
-            };
-            if byte >= width {
-                continue;
-            }
-            if let Some(algo) = self.checksums.get(&idx) {
-                if algo.compute_iter(covered_bytes(frame.data, width, byte)) != frame.data[byte] {
-                    raised.push(integrity_event(&frame, IntegrityKind::Checksum, signal));
+        if !self.checksums.is_empty() {
+            let width = (frame.dlc as usize).min(frame.data.len());
+            for &idx in &group.indices {
+                let signal = &built.signals[idx];
+                // Same channel rule as `decode_frame`: a channel-0 signal or frame
+                // meets every channel, and otherwise the channels must match.
+                let on_channel =
+                    signal.channel == 0 || frame.channel == 0 || signal.channel == frame.channel;
+                if !on_channel {
+                    continue;
+                }
+                let Integrity::Checksum { byte } = signal.integrity else {
+                    continue;
+                };
+                if byte >= width {
+                    continue;
+                }
+                if let Some(algo) = self.checksums.get(&idx) {
+                    if algo.compute_iter(covered_bytes(frame.data, width, byte)) != frame.data[byte]
+                    {
+                        raised.push(integrity_event(&frame, IntegrityKind::Checksum, signal));
+                    }
                 }
             }
         }
-        if raised.is_empty() {
+        if raised.is_empty() && self.has_counters {
             for &(idx, _) in frame.decoded {
                 let signal = &built.signals[idx];
                 let (Integrity::Counter { bits }, Some(spec)) = (signal.integrity, signal.spec)
@@ -252,26 +261,13 @@ fn note_integrity(built: &mut Built, label: &str, event: IntegrityEvent) {
 
 impl super::IndexedLog {
     /// Checksum and counter events, in the order they were recorded.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the judge reads this; no other loom-core caller yet"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn integrity_events(&self) -> &[IntegrityEvent] {
         &self.integrity_events
     }
 
     /// Checksum and counter events for the signal `signal` on `message_id`,
     /// in the order they were recorded.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the judge reads this; no other loom-core caller yet"
-        )
-    )]
     pub(crate) fn integrity_events_for<'a>(
         &'a self,
         message_id: u32,

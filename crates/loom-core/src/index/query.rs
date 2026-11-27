@@ -1,4 +1,5 @@
 use super::replay::Step;
+use super::signal::SignalFilter;
 use super::time::ordered_range;
 use super::IndexedLog;
 use crate::error::Result;
@@ -43,26 +44,21 @@ impl IndexedLog {
                 .filter_map(|name| self.resolve_signal(name))
                 .collect()
         };
+        let filter = SignalFilter::new(&self.signals, &wanted);
         let mut buckets: Vec<Vec<Option<Bucket>>> = vec![Vec::new(); wanted.len()];
         let mut lead = vec![None; wanted.len()];
-        let mut slot_of: Vec<Option<usize>> = vec![None; self.signals.len()];
-        for (slot, &signal) in wanted.iter().enumerate() {
-            slot_of[signal] = Some(slot);
-        }
 
-        self.replay(t0, t1, |step, held| {
+        self.replay_wanted(t0, t1, &filter, |step, held| {
             let Step::Record(rec) = step else {
-                capture_lead(held, &wanted, &mut lead);
+                lead.copy_from_slice(held);
                 return true;
             };
-            self.touch(rec, held, |signal, value| {
-                if let Some(slot) = slot_of.get(signal).copied().flatten() {
-                    let row = &mut buckets[slot];
-                    if row.is_empty() {
-                        row.resize(bucket_count(max_points, lead[slot].is_some()), None);
-                    }
-                    push_bucket(row, t0, t1, rec.t_us, value);
+            self.touch_wanted(rec, &filter, held, |slot, value| {
+                let row = &mut buckets[slot];
+                if row.is_empty() {
+                    row.resize(bucket_count(max_points, lead[slot].is_some()), None);
                 }
+                push_bucket(row, t0, t1, rec.t_us, value);
             });
             true
         })?;
@@ -109,8 +105,11 @@ impl IndexedLog {
             }
             true
         })?;
-        Ok(self
-            .signals
+        Ok(self.held_values(&held))
+    }
+
+    pub(super) fn held_values(&self, held: &[Option<f64>]) -> Vec<HeldValue> {
+        self.signals
             .iter()
             .enumerate()
             .filter_map(|(i, signal)| {
@@ -129,7 +128,7 @@ impl IndexedLog {
                         }),
                 })
             })
-            .collect())
+            .collect()
     }
 
     /// An upper bound on the frames a replay of `[t0, t1]` reads, from the
@@ -147,12 +146,6 @@ impl IndexedLog {
             None => self.frame_count,
         };
         end.saturating_sub(start)
-    }
-}
-
-fn capture_lead(held: &[Option<f64>], wanted: &[usize], lead: &mut [Option<f64>]) {
-    for (slot, &signal_i) in wanted.iter().enumerate() {
-        lead[slot] = held.get(signal_i).copied().flatten();
     }
 }
 

@@ -29,7 +29,7 @@ use crate::map::{SignalMap, TimeoutFactor};
 use crate::scan::{sniff, LogFormat};
 use checkpoint::Checkpoint;
 use integrity::IntegrityEvent;
-use signal::SignalMeta;
+use signal::{MessageSignals, SignalMeta};
 use source::{sniff_path, Source};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -46,10 +46,9 @@ pub(crate) use query::{decimate_points, QueryWindow, Series};
 /// nearest checkpoint and downsamples that window.
 pub struct IndexedLog {
     source: Source,
-    /// Format shown to the user. A BLF stays a BLF; containers are inflated one at a time.
+    /// Format shown to the user and read by the scanner on resume.
+    /// A BLF stays a BLF; containers are inflated one at a time.
     format: LogFormat,
-    /// Format the scanner reads on resume. Same as `format`.
-    body: LogFormat,
     checkpoints: Vec<Checkpoint>,
     snapshots: Vec<Vec<Option<f64>>>,
     frame_count: u64,
@@ -61,20 +60,12 @@ pub struct IndexedLog {
     events: Vec<(u64, String)>,
     /// Checksum and counter events, beside the labels in `events`. A timeout
     /// is not recorded here. Crate-visible only; the labelled list is unchanged.
-    /// Read by `integrity_events`, which the judge calls. Nothing else does yet.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the judge reads this; no other loom-core caller yet"
-        )
-    )]
     integrity_events: Vec<IntegrityEvent>,
     skipped: u64,
     warnings: Vec<String>,
     signals: Vec<SignalMeta>,
     name_index: HashMap<String, usize>,
-    msg_index: HashMap<u32, Vec<usize>>,
+    msg_index: HashMap<u32, MessageSignals>,
     message_names: HashMap<u32, String>,
     /// Every CAN id that has at least one frame in the log.
     seen_ids: HashSet<u32>,
