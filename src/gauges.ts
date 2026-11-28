@@ -534,8 +534,8 @@ export function drawWidgets(
         break;
       case "bar": {
         const bx = layout.cx - BAR_W / 2;
-        const barColor = r.warnFrom != null && r.value != null && r.value >= r.warnFrom ? RED : r.color;
-        barGauge(ctx, bx, layout.barY, BAR_W, layout.barH, r.value, r.min, r.max, barColor, r.label, r.decimals);
+        const hot = r.warnFrom != null && r.value != null && r.value >= r.warnFrom;
+        barGauge(ctx, bx, layout.barY, BAR_W, layout.barH, r.value, r.min, r.max, hot ? RED : r.color, r.label, r.decimals, hot);
         break;
       }
       case "value":
@@ -651,18 +651,27 @@ function arcGauge(
   const shown = value ?? min;
   const u = Math.min(1, Math.max(0, (shown - min) / (max - min)));
   const hot = !empty && redFrom != null && value != null && value >= redFrom;
+  if (hot) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(255, 90, 69, 0.32)";
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, start, start + sweep * u);
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.strokeStyle = empty ? "rgba(180, 200, 210, 0.25)" : hot ? RED : color;
   ctx.beginPath();
   ctx.arc(cx, cy, radius, start, start + sweep * u);
   ctx.stroke();
   const ang = start + sweep * u;
-  ctx.strokeStyle = empty ? "rgba(231,238,243,0.35)" : TEXT;
+  ctx.strokeStyle = empty ? "rgba(231,238,243,0.35)" : hot ? RED : TEXT;
   ctx.lineWidth = 1.2;
   ctx.beginPath();
   ctx.moveTo(cx + Math.cos(ang) * 6, cy + Math.sin(ang) * 6);
   ctx.lineTo(cx + Math.cos(ang) * (radius - 1), cy + Math.sin(ang) * (radius - 1));
   ctx.stroke();
-  ctx.fillStyle = empty ? TEXT_FAINT : TEXT;
+  ctx.fillStyle = empty ? TEXT_FAINT : hot ? "#ff9e8f" : TEXT;
   ctx.font = `500 12px ${MONO}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -724,9 +733,10 @@ function barGauge(
   color: string,
   label: string,
   decimals = 0,
+  hot = false,
 ): void {
-  ctx.fillStyle = WELL;
-  ctx.strokeStyle = RULE;
+  ctx.fillStyle = hot ? "rgba(255, 90, 69, 0.14)" : WELL;
+  ctx.strokeStyle = hot ? RED : RULE;
   ctx.lineWidth = 1;
   ctx.beginPath();
   roundRect(ctx, x, y, width, height, 2);

@@ -16,7 +16,16 @@ export const TRACE_STYLE_META: Record<TraceStyle, { label: string; short: string
   heat: { label: "Heat strip", short: "Heat", desc: "Continuous min-to-max color strip" },
 };
 
-const HOUSEKEEPING_RE = /checksum|counter|crc|alive/i;
+const CHECKSUM_RE = /checksum|crc|\bchk\b/i;
+const HOUSEKEEPING_RE = /checksum|crc|\bchk\b|counter|alive/i;
+
+export function isChecksumSignal(name: string): boolean {
+  return CHECKSUM_RE.test(name);
+}
+
+export function isHousekeepingSignal(name: string): boolean {
+  return HOUSEKEEPING_RE.test(name);
+}
 
 /** Pick the concrete visualization style for a signal, honoring any manual override. */
 export function resolveTraceStyle(
@@ -83,11 +92,13 @@ function canShareScale(signals: string[], lookup: (name: string) => SignalInfo |
   shared: boolean;
   unit: string;
 } {
-  if (signals.length <= 1) {
-    const u = lookup(signals[0] ?? "")?.unit?.trim() ?? "";
+  const real = signals.filter((s) => !isChecksumSignal(s));
+  const pool = real.length > 0 ? real : signals;
+  if (pool.length <= 1) {
+    const u = lookup(pool[0] ?? "")?.unit?.trim() ?? "";
     return { shared: true, unit: u };
   }
-  const units = signals.map((name) => lookup(name)?.unit?.trim() ?? "");
+  const units = pool.map((name) => lookup(name)?.unit?.trim() ?? "");
   const first = units[0];
   const sameUnit = units.every((u) => u.toLowerCase() === first.toLowerCase());
   return { shared: sameUnit, unit: sameUnit ? first : "" };
@@ -96,8 +107,8 @@ function canShareScale(signals: string[], lookup: (name: string) => SignalInfo |
 /**
  * Partition `visible` base signal names into horizontal scope tracks according to `mode`:
  * - `overlay`: analog signals share one track; ribbon signals (`state`/`flag`/`heat`) each get a compact lane beneath
- * - `split`: one track per signal
- * - `grouped`: manual `customLanes[name]` (`1..N`) overrides, otherwise auto-grouped by unit / message (ribbons get compact lanes)
+ * - `split`: one track per signal (checksum signals fold into their parent message's track if present rather than taking a separate lane)
+ * - `grouped`: manual `customLanes[name]` (`1..N`) overrides, otherwise auto-grouped by unit / message (ribbons get compact lanes; checksums never spawn a standalone lane when other signals are plotted)
  */
 export function buildLaneSpecs(
   visible: readonly string[],
@@ -146,7 +157,10 @@ export function buildLaneSpecs(
   }
 
   if (mode === "split") {
-    return visible.map((name, idx) => {
+    const nonChecksum = visible.filter((n) => !isChecksumSignal(n));
+    const checksums = visible.filter((n) => isChecksumSignal(n));
+    const primary = nonChecksum.length > 0 ? nonChecksum : visible;
+    const specs: SignalLaneSpec[] = primary.map((name, idx) => {
       const unit = lookup(name)?.unit?.trim() ?? "";
       const compact = isRibbonStyle(styleOf(name));
       return {
@@ -159,11 +173,27 @@ export function buildLaneSpecs(
         compact,
       };
     });
+    if (nonChecksum.length > 0) {
+      for (const chk of checksums) {
+        const msg = lookup(chk)?.messageName;
+        const target =
+          (msg ? specs.find((s) => lookup(s.signals[0])?.messageName === msg && !s.compact) : undefined) ??
+          specs.find((s) => !s.compact) ??
+          specs[specs.length - 1];
+        if (target) target.signals.push(chk);
+      }
+    }
+    return specs;
   }
 
   const buckets = new Map<string, string[]>();
+  const deferredChecksums: string[] = [];
   for (const name of visible) {
     const manual = customLanes[name];
+    if (isChecksumSignal(name) && !(manual && manual > 0)) {
+      deferredChecksums.push(name);
+      continue;
+    }
     const ribbon = isRibbonStyle(styleOf(name));
     const key = manual && manual > 0 ? `manual:${manual}` : autoGroupKey(name, lookup(name), ribbon);
     const list = buckets.get(key);
@@ -171,22 +201,50 @@ export function buildLaneSpecs(
     else buckets.set(key, [name]);
   }
 
+  // Fold checksums into their parent message's lane (or an existing analog lane) instead of spawning a dedicated checksum lane.
+  for (const chk of deferredChecksums) {
+    if (buckets.size === 0) {
+      const key = autoGroupKey(chk, lookup(chk), false);
+      buckets.set(key, [chk]);
+      continue;
+    }
+    const msg = lookup(chk)?.messageName;
+    let targetKey: string | null = null;
+    if (msg) {
+      for (const [key, list] of buckets) {
+        if (!key.startsWith("ribbon:") && list.some((s) => lookup(s)?.messageName === msg)) {
+          targetKey = key;
+          break;
+        }
+      }
+    }
+    if (!targetKey) {
+      for (const key of buckets.keys()) {
+        if (!key.startsWith("ribbon:")) targetKey = key;
+      }
+    }
+    targetKey ??= [...buckets.keys()][buckets.size - 1];
+    buckets.get(targetKey)!.push(chk);
+  }
+
   let index = 0;
   const specs: SignalLaneSpec[] = [];
   for (const [key, signals] of buckets) {
     index += 1;
     const badge = `T${index}`;
-    const compact = signals.every((sig) => isRibbonStyle(styleOf(sig)));
+    const realSignals = signals.filter((s) => !isChecksumSignal(s));
+    const displaySignals = realSignals.length > 0 ? realSignals : signals;
+    const compact = displaySignals.every((sig) => isRibbonStyle(styleOf(sig)));
     const { shared, unit } = canShareScale(signals, lookup);
     let title: string;
-    if (signals.length === 1) {
-      title = unit ? `${signals[0]} (${unit})` : signals[0];
+    if (displaySignals.length === 1) {
+      title = unit ? `${displaySignals[0]} (${unit})` : displaySignals[0];
     } else if (unit) {
-      title = `${badge} · ${unit} (${signals.length})`;
+      title = `${badge} · ${unit} (${displaySignals.length})`;
     } else if (key.startsWith("msg:")) {
-      title = `${badge} · ${key.slice(4)} (${signals.length})`;
+      title = `${badge} · ${key.slice(4)} (${displaySignals.length})`;
     } else {
-      title = `${badge} · ${signals.join(", ")}`;
+      title = `${badge} · ${displaySignals.join(", ")}`;
     }
     specs.push({
       id: key,
@@ -199,6 +257,41 @@ export function buildLaneSpecs(
     });
   }
   return specs;
+}
+
+/** Sort `specs` according to user-arranged `order` of lane ids, preserving natural order for unseen lanes. */
+export function orderLaneSpecs(
+  specs: readonly SignalLaneSpec[],
+  order: readonly string[],
+): SignalLaneSpec[] {
+  if (specs.length <= 1 || order.length === 0) return [...specs];
+  const rank = new Map<string, number>();
+  order.forEach((id, i) => rank.set(id, i));
+  const indexed = specs.map((spec, natural) => ({
+    spec,
+    natural,
+    pos: rank.get(spec.id) ?? Number.POSITIVE_INFINITY,
+  }));
+  indexed.sort((a, b) => a.pos - b.pos || a.natural - b.natural);
+  return indexed.map(({ spec }, idx) => {
+    const badge = `T${idx + 1}`;
+    const title = spec.title.replace(/^T\d+\s·/, `${badge} ·`);
+    return { ...spec, badge, title };
+  });
+}
+
+/** Return a new ordered list of lane ids after moving `fromIndex` to insertion slot `insertIndex`. */
+export function reorderLaneIds(
+  ids: readonly string[],
+  fromIndex: number,
+  insertIndex: number,
+): string[] {
+  if (fromIndex < 0 || fromIndex >= ids.length) return [...ids];
+  const next = [...ids];
+  const [moved] = next.splice(fromIndex, 1);
+  const target = insertIndex > fromIndex ? insertIndex - 1 : insertIndex;
+  next.splice(Math.max(0, Math.min(next.length, target)), 0, moved);
+  return next;
 }
 
 /**

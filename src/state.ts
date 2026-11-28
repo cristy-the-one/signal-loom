@@ -42,14 +42,20 @@ interface State {
   viewCenter: number | null;
   /** Active Shift+drag box-zoom selection on the plot, if any. */
   boxZoom: View | null;
-  /** Plotted signal temporarily soloed from the scope legend, if any. */
+  /** Plotted signal or lane id currently in focus (others stay visible, dimmed). */
   solo: string | null;
+  /** Focused lane id (`SignalLaneSpec.id`), if the user focused a whole lane/group. */
+  focusedLane: string | null;
+  /** Custom user-arranged order of lane ids (`SignalLaneSpec.id`). */
+  laneOrder: string[];
   /** Scope track layout: single overlay, split per-signal tracks, or grouped tracks. */
   laneMode: LaneMode;
   /** Manual signal -> track group number (`1..N`) overrides used in `grouped` mode. */
   signalLanes: Record<string, number>;
   /** Per-signal scope visualization style override (`auto`, `step`, `line`, `area`, `state`, `flag`, `heat`). */
   signalStyles: Record<string, TraceStyle>;
+  /** Per-signal custom trace color override (`#rrggbb`). */
+  signalColors: Record<string, string>;
   frame: FrameHit | null;
   overview: Point[] | null;
   overviewName: string | null;
@@ -57,6 +63,13 @@ interface State {
   bus: BusLoad | null;
   hoverT: number | null;
   hoverX: number;
+  hoverY: number;
+  /** Index of the lane currently under the mouse pointer, or -1. */
+  hoverLane: number;
+  /** True when the 2-level lane hover magnifier feature is toggled active. */
+  laneLoupe: boolean;
+  /** True once the hover dwell delay has elapsed and the lazy lane magnifier is shown. */
+  laneLoupeOpen: boolean;
   cursorA: number | null;
   cursorB: number | null;
   cursorText: string;
@@ -72,6 +85,12 @@ interface State {
   clusterWidgets: ClusterWidget[];
   /** True once the user edits/reorders/adds/removes gadgets (so saves persist `clusterWidgets`). */
   clusterCustomized: boolean;
+  /** True when the left sidebar is collapsed to an edge handle (hover to peek, click to pin). */
+  railCollapsed: boolean;
+  /** True when the cluster strip is hidden to maximize vertical plot space. */
+  clusterHidden: boolean;
+  /** True when checksum/CRC/alive-counter housekeeping signals are hidden from the signal rail. */
+  hideHousekeeping: boolean;
   tab: RailTab;
 }
 
@@ -94,9 +113,12 @@ export const state: State = {
   viewCenter: null,
   boxZoom: null,
   solo: null,
+  focusedLane: null,
+  laneOrder: [],
   laneMode: "overlay",
   signalLanes: {},
   signalStyles: {},
+  signalColors: {},
   frame: null,
   overview: null,
   overviewName: null,
@@ -104,6 +126,10 @@ export const state: State = {
   bus: null,
   hoverT: null,
   hoverX: 0,
+  hoverY: 0,
+  hoverLane: -1,
+  laneLoupe: true,
+  laneLoupeOpen: false,
   cursorA: null,
   cursorB: null,
   cursorText: "",
@@ -116,6 +142,9 @@ export const state: State = {
   cluster: {},
   clusterWidgets: defaultClusterWidgets(),
   clusterCustomized: false,
+  railCollapsed: false,
+  clusterHidden: false,
+  hideHousekeeping: false,
   tab: "marks",
 };
 

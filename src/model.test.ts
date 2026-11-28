@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   activeView,
   baseName,
+  colorFor,
   compareName,
+  defaultColorFor,
   defaultPlotted,
   duration,
   hasData,
@@ -196,6 +198,23 @@ describe("activeView & labelForValue", () => {
     expect(labelForValue(gear, 3)).toBe("3rd");
     expect(labelForValue(gear, 3.4)).toBeNull();
     expect(labelForValue(gear, null)).toBeNull();
+  });
+});
+
+describe("colorFor", () => {
+  it("applies custom per-signal overrides (including compare traces) while keeping defaultColorFor intact", () => {
+    state.summary = summary({ signals: [signal({ name: "VehicleSpeed", messageName: "IC" })] });
+    state.signalColors = {};
+    const auto = defaultColorFor("VehicleSpeed");
+    expect(colorFor("VehicleSpeed")).toBe(auto);
+
+    state.signalColors = { VehicleSpeed: "#ff8cc6" };
+    expect(colorFor("VehicleSpeed")).toBe("#ff8cc6");
+    expect(colorFor(compareName("VehicleSpeed"))).toBe("#ff8cc6");
+    expect(defaultColorFor("VehicleSpeed")).toBe(auto);
+
+    state.signalColors = {};
+    state.summary = null;
   });
 });
 

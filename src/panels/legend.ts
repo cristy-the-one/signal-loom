@@ -12,6 +12,7 @@ import { refresh, refreshOverview, setPlotted } from "../query";
 import { renderDirty } from "../readout";
 import { draw, renderChrome, state } from "../state";
 import type { TraceStyle } from "../types";
+import { closeColorPicker, openColorPicker } from "./color-picker";
 
 let legendKey: string | null = null;
 let styleMenuSignal: string | null = null;
@@ -88,6 +89,7 @@ export function renderLegend(mathValues?: ReadonlyMap<string, number>): void {
   if (state.plotted.length === 0) {
     els.legend.hidden = true;
     closeStyleMenu();
+    closeColorPicker();
     if (legendKey !== "") {
       legendKey = "";
       els.legend.replaceChildren();
@@ -97,12 +99,16 @@ export function renderLegend(mathValues?: ReadonlyMap<string, number>): void {
   els.legend.hidden = false;
 
   const heldByName = new Map(state.held.map((item) => [item.name, item]));
+  const specs = buildLaneSpecs(state.plotted, state.laneMode, state.signalLanes, signalNamed, state.signalStyles);
   const badgeByName = new Map<string, string>();
   if (state.laneMode === "grouped") {
-    for (const spec of buildLaneSpecs(state.plotted, "grouped", state.signalLanes, signalNamed, state.signalStyles)) {
+    for (const spec of specs) {
       for (const sig of spec.signals) badgeByName.set(sig, spec.badge);
     }
   }
+  const focusedLaneSignals = state.focusedLane
+    ? new Set(specs.find((s) => s.id === state.focusedLane)?.signals ?? [])
+    : null;
 
   const rows = state.plotted.map((name) => {
     const signal = signalNamed(name);
@@ -121,8 +127,10 @@ export function renderLegend(mathValues?: ReadonlyMap<string, number>): void {
     const styleOverride = state.signalStyles[name];
     const resolvedStyle = resolveTraceStyle(signal, styleOverride);
     const stylePinned = styleOverride != null && styleOverride !== "auto";
-    const isSolo = state.solo === name;
-    const isDim = state.solo != null && state.solo !== name;
+    const isSolo = state.solo === name || (focusedLaneSignals != null && focusedLaneSignals.has(name));
+    const isDim =
+      (state.solo != null && state.solo !== name) ||
+      (focusedLaneSignals != null && focusedLaneSignals.size > 0 && !focusedLaneSignals.has(name));
     return {
       name,
       color: colorFor(name),
@@ -164,14 +172,26 @@ export function renderLegend(mathValues?: ReadonlyMap<string, number>): void {
       item.className = "legend-item";
       if (row.isSolo) item.classList.add("is-solo");
       if (row.isDim) item.classList.add("is-dim");
-      item.title = row.isSolo ? `Click to show all plotted signals` : `Click to solo ${row.name}`;
+      item.title = row.isSolo
+        ? `Click to clear focus (Esc)`
+        : `Click to focus ${row.name} (dims other signals without hiding them)`;
       item.addEventListener("click", () => {
+        state.focusedLane = null;
         state.solo = state.solo === row.name ? null : row.name;
         draw();
       });
 
-      const swatch = document.createElement("i");
+      const swatch = document.createElement("button");
+      swatch.type = "button";
+      swatch.className = "legend-swatch";
       swatch.style.background = row.color;
+      swatch.title = `Change color for ${row.name}`;
+      swatch.setAttribute("aria-label", `Change color for ${row.name}`);
+      swatch.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closeStyleMenu();
+        openColorPicker(row.name, swatch);
+      });
       const label = document.createElement("span");
       label.className = "name";
       label.textContent = row.name;
@@ -205,6 +225,8 @@ export function renderLegend(mathValues?: ReadonlyMap<string, number>): void {
         laneBtn.addEventListener("click", (event) => {
           event.stopPropagation();
           state.signalLanes = cycleSignalLane(row.name, state.plotted, state.signalLanes);
+          state.dirty = true;
+          renderDirty();
           draw();
         });
         item.append(laneBtn);

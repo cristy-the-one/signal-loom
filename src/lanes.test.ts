@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { buildLaneSpecs, cycleSignalLane, isRibbonStyle, laneModeLabel, nextLaneMode, resolveTraceStyle } from "./lanes";
+import {
+  buildLaneSpecs,
+  cycleSignalLane,
+  isChecksumSignal,
+  isRibbonStyle,
+  laneModeLabel,
+  nextLaneMode,
+  orderLaneSpecs,
+  reorderLaneIds,
+  resolveTraceStyle,
+} from "./lanes";
 import type { SignalInfo } from "./types";
 
 function sig(name: string, unit = "", messageName = "ECM"): SignalInfo {
@@ -152,5 +162,50 @@ describe("semantic trace styles & compact ribbon lanes", () => {
     expect(specs).toHaveLength(2);
     expect(specs[0]).toMatchObject({ signals: ["EngineRPM", "VehicleSpeed"], compact: false });
     expect(specs[1]).toMatchObject({ signals: ["Gear"], compact: true });
+  });
+
+  it("folds checksum signals instead of spawning a separate checksum lane", () => {
+    expect(isChecksumSignal("FastChecksum")).toBe(true);
+    expect(isChecksumSignal("BrakeCRC")).toBe(true);
+    expect(isChecksumSignal("EngineRPM")).toBe(false);
+
+    const map = new Map<string, SignalInfo>([
+      ["EngineRPM", sig("EngineRPM", "rpm", "ECM_Fast")],
+      ["FastChecksum", { ...sig("FastChecksum", "", "ECM_Fast"), min: 0, max: 255, step: 1 }],
+      ["VehicleSpeed", sig("VehicleSpeed", "km/h", "Wheels")],
+    ]);
+
+    const grouped = buildLaneSpecs(
+      ["EngineRPM", "FastChecksum", "VehicleSpeed"],
+      "grouped",
+      {},
+      (n) => map.get(n),
+    );
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0].signals).toEqual(["EngineRPM", "FastChecksum"]);
+    expect(grouped[0].title).toBe("EngineRPM (rpm)");
+    expect(grouped[1].signals).toEqual(["VehicleSpeed"]);
+
+    const split = buildLaneSpecs(
+      ["EngineRPM", "FastChecksum", "VehicleSpeed"],
+      "split",
+      {},
+      (n) => map.get(n),
+    );
+    expect(split).toHaveLength(2);
+    expect(split[0].signals).toEqual(["EngineRPM", "FastChecksum"]);
+  });
+
+  it("reorders lanes and re-badges T1..TN in visual order", () => {
+    const specs = buildLaneSpecs(["WheelFL", "EngineRPM", "BrakeLamp"], "split", {}, lookup);
+    const ids = specs.map((s) => s.id);
+    const moved = reorderLaneIds(ids, 2, 0);
+    expect(moved).toEqual(["split:BrakeLamp", "split:WheelFL", "split:EngineRPM"]);
+    const ordered = orderLaneSpecs(specs, moved);
+    expect(ordered.map((s) => ({ id: s.id, badge: s.badge }))).toEqual([
+      { id: "split:BrakeLamp", badge: "T1" },
+      { id: "split:WheelFL", badge: "T2" },
+      { id: "split:EngineRPM", badge: "T3" },
+    ]);
   });
 });

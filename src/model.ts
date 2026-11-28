@@ -80,12 +80,20 @@ export function isCompareName(trace: string): boolean {
   return trace.endsWith(COMPARE_SUFFIX);
 }
 
-export function colorFor(name: string): string {
+/** Automatic ECU-family color for `name` (ignoring any manual user override). */
+export function defaultColorFor(name: string): string {
   const base = baseName(name);
   const entry = state.summary ? signalEntries(state.summary).get(base) : undefined;
   if (!entry) return familyColor(base, "", 0);
   entry.color ??= familyColor(base, entry.signal.messageName ?? "", entry.index);
   return entry.color;
+}
+
+export function colorFor(name: string): string {
+  const base = baseName(name);
+  const override = state.signalColors[base];
+  if (override) return override;
+  return defaultColorFor(base);
 }
 
 /** The plotted names (or the soloed one when active), each followed by its compare-drive trace when present. */

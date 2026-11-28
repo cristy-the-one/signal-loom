@@ -44,6 +44,12 @@ export interface Trace {
   min: number;
   max: number;
   dashed?: boolean;
+  /** Subtle low-opacity rendering (e.g. checksums folded into a parent signal's lane). */
+  muted?: boolean;
+  /** Dimmed when another signal or lane is focused (still visible for timing context). */
+  dimmed?: boolean;
+  /** Highlighted when explicitly focused in a shared lane. */
+  focused?: boolean;
   /** Where the fetched data ends; the trace stops here rather than holding its last value to the edge. */
   endT?: number;
   /** Semantic rendering style for this trace. Defaults to `"step"`. */
@@ -53,12 +59,15 @@ export interface Trace {
 }
 
 export interface PlotLane {
+  id?: string;
   title: string;
   traces: Trace[];
   sharedScale: boolean;
   scaleMin: number;
   scaleMax: number;
   compact?: boolean;
+  focused?: boolean;
+  dimmed?: boolean;
 }
 
 export interface PlotOverlay {
@@ -66,9 +75,13 @@ export interface PlotOverlay {
   cursorA: number | null;
   cursorB: number | null;
   boxZoom?: { t0: number; t1: number } | null;
+  hoverPillIndex?: number;
+  dragLaneIndex?: number;
+  dropLaneIndex?: number | null;
+  loupeLaneIndex?: number;
 }
 
-const PAD = { left: 8, right: 12, top: 12, bottom: 22 };
+const PAD = { left: 8, right: 12, top: 8, bottom: 20 };
 
 function yForTrace(value: number, trace: Trace, top: number, height: number): number {
   const range = trace.max - trace.min;
@@ -103,8 +116,8 @@ function computeLaneRects(lanes: PlotLane[], plotH: number, laneGap: number): La
     compactH = Math.max(20, avail / n);
     normalH = 0;
   } else {
-    const desiredCompact = Math.min(38, Math.max(26, Math.floor(avail * 0.14)));
-    const maxCompactBudget = avail * 0.55;
+    const desiredCompact = Math.min(34, Math.max(24, Math.floor(avail * 0.12)));
+    const maxCompactBudget = avail * 0.5;
     compactH = Math.min(desiredCompact, Math.max(20, maxCompactBudget / compactCount));
     normalH = Math.max(24, (avail - compactH * compactCount) / normalCount);
   }
@@ -116,6 +129,365 @@ function computeLaneRects(lanes: PlotLane[], plotH: number, laneGap: number): La
     y += height + laneGap;
     return rect;
   });
+}
+
+interface PillRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function pillRectFor(rect: LaneRect, multiLane: boolean): PillRect | null {
+  if (!multiLane || !rect.lane.title || rect.height < 18) return null;
+  const primaryTraces = rect.lane.traces.filter((t) => !t.muted && !t.dashed);
+  const dotPad = primaryTraces.length === 1 ? 10 : 0;
+  const gripPad = 12;
+  const approxTextW = rect.lane.title.length * 6.2;
+  const w = Math.ceil(approxTextW + 12 + dotPad + gripPad);
+  const h = 17;
+  const y = rect.lane.compact ? rect.top + Math.max(2, Math.floor((rect.height - h) / 2)) : rect.top + 3;
+  return { x: PAD.left + 4, y, w, h };
+}
+
+function laneLayoutForCanvas(canvas: HTMLCanvasElement, lanes: PlotLane[]): LaneRect[] {
+  const rect = canvas.getBoundingClientRect();
+  const plotH = Math.max(1, rect.height - PAD.top - PAD.bottom);
+  const multiLane = lanes.length > 1;
+  const laneGap = multiLane ? Math.min(5, Math.max(2, Math.floor(plotH / (lanes.length * 16)))) : 0;
+  return computeLaneRects(lanes, plotH, laneGap);
+}
+
+/** Index of the lane whose frosted title pill is under `(clientX, clientY)`, or -1. */
+export function lanePillAt(
+  canvas: HTMLCanvasElement,
+  clientX: number,
+  clientY: number,
+  lanes: PlotLane[],
+): number {
+  if (lanes.length <= 1) return -1;
+  const bounds = canvas.getBoundingClientRect();
+  const x = clientX - bounds.left;
+  const y = clientY - bounds.top;
+  const rects = laneLayoutForCanvas(canvas, lanes);
+  for (let i = 0; i < rects.length; i += 1) {
+    const pill = pillRectFor(rects[i], true);
+    if (!pill) continue;
+    if (x >= pill.x - 2 && x <= pill.x + pill.w + 8 && y >= pill.y - 2 && y <= pill.y + pill.h + 2) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Index of the lane vertically containing `clientY`, or -1 when outside the plot lanes. */
+export function laneAt(
+  canvas: HTMLCanvasElement,
+  clientY: number,
+  lanes: PlotLane[],
+): number {
+  if (lanes.length === 0) return -1;
+  const bounds = canvas.getBoundingClientRect();
+  const y = clientY - bounds.top;
+  const rects = laneLayoutForCanvas(canvas, lanes);
+  for (let i = 0; i < rects.length; i += 1) {
+    if (y >= rects[i].top - 2 && y <= rects[i].top + rects[i].height + 2) return i;
+  }
+  return -1;
+}
+
+/** Viewport clientY at the vertical center of lane `index`, or null if out of range. */
+export function laneCenterClientY(
+  canvas: HTMLCanvasElement,
+  index: number,
+  lanes: PlotLane[],
+): number | null {
+  if (index < 0 || index >= lanes.length) return null;
+  const bounds = canvas.getBoundingClientRect();
+  const rects = laneLayoutForCanvas(canvas, lanes);
+  const r = rects[index];
+  return r ? bounds.top + r.top + r.height / 2 : null;
+}
+
+export interface LaneLoupeWindow {
+  factor: number;
+  t0: number;
+  t1: number;
+}
+
+/**
+ * Compute two nested zoom-in windows (4× and 16× deeper than `view`) centered on `focusT`,
+ * allowing micro-inspection well past the normal 1 ms plot zoom floor.
+ */
+export function computeLaneLoupeWindows(
+  view: { t0: number; t1: number },
+  focusT: number,
+  domain: { t0: number; t1: number },
+): [LaneLoupeWindow, LaneLoupeWindow] {
+  const viewSpan = Math.max(1, view.t1 - view.t0);
+  const domSpan = Math.max(1, domain.t1 - domain.t0);
+  const clampedFocus = clamp(focusT, domain.t0, domain.t1);
+
+  const make = (factor: number, minUs: number): LaneLoupeWindow => {
+    const span = Math.min(domSpan, Math.max(minUs, viewSpan / factor));
+    let t0 = clampedFocus - span / 2;
+    let t1 = t0 + span;
+    if (t0 < domain.t0) {
+      t0 = domain.t0;
+      t1 = Math.min(domain.t1, t0 + span);
+    }
+    if (t1 > domain.t1) {
+      t1 = domain.t1;
+      t0 = Math.max(domain.t0, t1 - span);
+    }
+    const actualFactor = Math.max(1, Math.round(viewSpan / Math.max(1, t1 - t0)));
+    return { factor: actualFactor, t0, t1 };
+  };
+
+  return [make(4, 40), make(16, 10)];
+}
+
+function slicePointsForWindow(points: Point[], t0: number, t1: number): Point[] {
+  if (points.length === 0) return [];
+  // Find the latest sample at or before t0 so step/line continuity enters cleanly from the left edge.
+  let lo = 0;
+  let hi = points.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (points[mid].t <= t0) lo = mid + 1;
+    else hi = mid;
+  }
+  const start = Math.max(0, lo - 1);
+
+  lo = start;
+  hi = points.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (points[mid].t <= t1) lo = mid + 1;
+    else hi = mid;
+  }
+  const end = Math.min(points.length, lo + 1);
+  return points.slice(start, end);
+}
+
+/** Draw one magnified tier of a hovered lane or lane group with automatic local Y-zoom and time ticks. */
+export function drawLaneLoupe(
+  canvas: HTMLCanvasElement,
+  lane: PlotLane,
+  win: { t0: number; t1: number },
+  focusT: number,
+  playhead: number,
+  options?: { innerBracket?: { t0: number; t1: number }; showSampleDots?: boolean },
+): void {
+  const fitted = fitCanvas(canvas);
+  if (!fitted) return;
+  const { ctx, w, h } = fitted;
+  ctx.fillStyle = "#080c10";
+  ctx.fillRect(0, 0, w, h);
+
+  const padX = 6;
+  const padTop = 18;
+  const padBot = 14;
+  const plotW = Math.max(1, w - padX * 2);
+  const plotH = Math.max(1, h - padTop - padBot);
+  const span = Math.max(1, win.t1 - win.t0);
+  const xOf = (t: number) => padX + ((t - win.t0) / span) * plotW;
+
+  // Subtle vertical & horizontal guide lines
+  ctx.strokeStyle = "rgba(180, 200, 215, 0.08)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i += 1) {
+    const gx = Math.round(padX + (plotW * i) / 4) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(gx, padTop);
+    ctx.lineTo(gx, padTop + plotH);
+    ctx.stroke();
+  }
+  if (!lane.compact) {
+    for (let j = 1; j <= 3; j += 1) {
+      const gy = Math.round(padTop + (plotH * j) / 4) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(padX, gy);
+      ctx.lineTo(padX + plotW, gy);
+      ctx.stroke();
+    }
+  }
+
+  // Highlight the footprint of Level 2 inside Level 1
+  if (options?.innerBracket) {
+    const bx0 = clamp(xOf(options.innerBracket.t0), padX, padX + plotW);
+    const bx1 = clamp(xOf(options.innerBracket.t1), padX, padX + plotW);
+    const bw = Math.max(2, bx1 - bx0);
+    ctx.fillStyle = "rgba(62, 198, 255, 0.11)";
+    ctx.fillRect(bx0, padTop, bw, plotH);
+    ctx.strokeStyle = "rgba(62, 198, 255, 0.55)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx0 + 0.5, padTop + 0.5, Math.max(1, bw - 1), Math.max(1, plotH - 1));
+  }
+
+  // Slice traces to the magnified window while keeping each trace's stable lane Y-scale,
+  // so sliding horizontally never causes vertical Y-scale jumps and L1/L2 match the main plot 1:1.
+  const slicedTraces = lane.traces.map((t) => ({
+    ...t,
+    dimmed: false,
+    points: slicePointsForWindow(t.points, win.t0, win.t1),
+  }));
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(padX, padTop, plotW, plotH);
+  ctx.clip();
+
+  if (lane.compact && slicedTraces.length > 0) {
+    const count = slicedTraces.length;
+    const subGap = count > 1 ? 2 : 0;
+    const subH = Math.max(10, (plotH - subGap * (count - 1)) / count);
+    slicedTraces.forEach((trace, idx) => {
+      drawTrace(ctx, trace, win, plotW, padTop + idx * (subH + subGap), subH, padX, false);
+    });
+  } else {
+    for (const trace of slicedTraces) {
+      if (trace.muted) drawTrace(ctx, trace, win, plotW, padTop, plotH, padX, false);
+    }
+    for (const trace of slicedTraces) {
+      if (!trace.muted) {
+        drawTrace(ctx, trace, win, plotW, padTop, plotH, padX, Boolean(options?.showSampleDots));
+      }
+    }
+  }
+  ctx.restore();
+
+  // Stable lane Y scale readout on the right edge when shared-scale analog
+  if (!lane.compact && lane.sharedScale && slicedTraces.length > 0) {
+    ctx.font = `9px ${MONO}`;
+    ctx.textAlign = "right";
+    ctx.fillStyle = "rgba(155, 175, 190, 0.85)";
+    ctx.textBaseline = "top";
+    ctx.fillText(formatValue(lane.scaleMax), padX + plotW - 2, padTop + 1);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(formatValue(lane.scaleMin), padX + plotW - 2, padTop + plotH - 1);
+  }
+
+  // Playhead line if inside the magnified window
+  if (playhead >= win.t0 && playhead <= win.t1) {
+    const px = xOf(playhead);
+    ctx.strokeStyle = PLAYHEAD;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px + 0.5, padTop);
+    ctx.lineTo(px + 0.5, padTop + plotH);
+    ctx.stroke();
+  }
+
+  // Pointer focus hairline + live sample dots
+  if (focusT >= win.t0 && focusT <= win.t1) {
+    const fx = xOf(focusT);
+    ctx.strokeStyle = "rgba(231, 238, 243, 0.7)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.moveTo(fx + 0.5, padTop);
+    ctx.lineTo(fx + 0.5, padTop + plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (const trace of slicedTraces) {
+      if (trace.muted) continue;
+      const value = heldValue(trace.points, focusT);
+      if (value == null) continue;
+      const style = trace.style ?? "step";
+      const y = isRibbonStyle(style) ? padTop + plotH / 2 : yForTrace(value, trace, padTop, plotH);
+      ctx.fillStyle = isRibbonStyle(style) ? TEXT : trace.color;
+      ctx.beginPath();
+      ctx.arc(fx, y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Compact bottom time axis (start / center / end)
+  ctx.font = `9px ${MONO}`;
+  ctx.fillStyle = TEXT_MUTED;
+  ctx.textBaseline = "bottom";
+  ctx.textAlign = "left";
+  ctx.fillText(formatTimeForSpan(win.t0, span), padX, h - 1);
+  ctx.textAlign = "right";
+  ctx.fillText(formatTimeForSpan(win.t1, span), padX + plotW, h - 1);
+}
+
+/** Insertion slot (`0..lanes.length`) for a vertical lane drag at `clientY`. */
+export function laneDropIndexAt(
+  canvas: HTMLCanvasElement,
+  clientY: number,
+  lanes: PlotLane[],
+): number {
+  if (lanes.length === 0) return 0;
+  const bounds = canvas.getBoundingClientRect();
+  const y = clientY - bounds.top;
+  const rects = laneLayoutForCanvas(canvas, lanes);
+  for (let i = 0; i < rects.length; i += 1) {
+    if (y < rects[i].top + rects[i].height / 2) return i;
+  }
+  return rects.length;
+}
+
+function drawFrostedLabel(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  text: string,
+  accentColor: string | null,
+  options?: { focused?: boolean; dimmed?: boolean; hovered?: boolean; draggable?: boolean },
+): void {
+  ctx.save();
+  ctx.font = `500 10px ${MONO}`;
+  const gripPad = options?.draggable ? 12 : 0;
+  const dotPad = accentColor ? 10 : 0;
+  const textW = ctx.measureText(text).width;
+  const padX = 6;
+  const pillW = Math.ceil(textW + padX * 2 + dotPad + gripPad);
+  const pillH = 17;
+
+  if (options?.dimmed) ctx.globalAlpha = 0.56;
+
+  // Translucent frosted backing on top of the signal
+  ctx.fillStyle = options?.focused
+    ? "rgba(28, 24, 16, 0.84)"
+    : options?.hovered
+      ? "rgba(20, 30, 40, 0.86)"
+      : "rgba(14, 21, 28, 0.76)";
+  ctx.strokeStyle = options?.focused
+    ? "rgba(230, 162, 60, 0.85)"
+    : options?.hovered
+      ? "rgba(230, 162, 60, 0.55)"
+      : "rgba(180, 210, 232, 0.24)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  roundRect(ctx, x + 0.5, y + 0.5, pillW, pillH, 3);
+  ctx.fill();
+  ctx.stroke();
+
+  // Subtle top frosted highlight
+  ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
+  ctx.fillRect(x + 2, y + 1, Math.max(0, pillW - 4), 1);
+
+  // Subtle 2x3 grip dots when draggable
+  if (options?.draggable) {
+    ctx.fillStyle = options.hovered || options.focused ? AMBER : "rgba(155, 175, 190, 0.55)";
+    for (let r = 0; r < 3; r += 1) {
+      ctx.fillRect(x + 5, y + 4 + r * 3.5, 1.5, 1.5);
+      ctx.fillRect(x + 8, y + 4 + r * 3.5, 1.5, 1.5);
+    }
+  }
+
+  if (accentColor) {
+    ctx.fillStyle = accentColor;
+    ctx.fillRect(x + padX + gripPad, y + 5.5, 5, 6);
+  }
+
+  ctx.fillStyle = options?.focused ? "#fff4dc" : "#e7eef3";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, x + padX + gripPad + dotPad, y + pillH / 2 + 0.5);
+  ctx.restore();
 }
 
 export function drawPlot(
@@ -155,7 +527,7 @@ export function drawPlot(
         ];
   const multiLane = effectiveLanes.length > 1;
   const laneGap = multiLane
-    ? Math.min(6, Math.max(2, Math.floor(plotH / (effectiveLanes.length * 14))))
+    ? Math.min(5, Math.max(2, Math.floor(plotH / (effectiveLanes.length * 16))))
     : 0;
   const rects = computeLaneRects(effectiveLanes, plotH, laneGap);
 
@@ -180,7 +552,7 @@ export function drawPlot(
     for (let k = 0; k < rects.length; k += 1) {
       const { lane, top: laneTop, height: laneH } = rects[k];
       if (lane.compact) {
-        ctx.fillStyle = "rgba(18, 25, 32, 0.55)";
+        ctx.fillStyle = "rgba(18, 25, 32, 0.52)";
         ctx.fillRect(PAD.left, laneTop, plotW, laneH);
       } else if (k % 2 === 1) {
         ctx.fillStyle = "rgba(255, 255, 255, 0.015)";
@@ -219,52 +591,86 @@ export function drawPlot(
 
   for (let k = 0; k < rects.length; k += 1) {
     const { lane, top: laneTop, height: laneH } = rects[k];
+    const isDragged = overlay.dragLaneIndex === k;
     ctx.save();
     ctx.beginPath();
     ctx.rect(PAD.left, laneTop, plotW, laneH);
     ctx.clip();
 
-    if (lane.compact && lane.traces.length > 0) {
-      // Split compact ribbon traces evenly vertically inside the lane (e.g. Drive A + Drive B compare).
-      const headerReserve = multiLane && lane.title && laneH >= 30 ? 11 : 0;
-      const bodyTop = laneTop + headerReserve;
-      const bodyH = Math.max(12, laneH - headerReserve);
-      const count = lane.traces.length;
-      const subGap = count > 1 ? 2 : 0;
-      const subH = Math.max(8, (bodyH - subGap * (count - 1)) / count);
-      lane.traces.forEach((trace, idx) => {
-        drawTrace(ctx, trace, view, plotW, bodyTop + idx * (subH + subGap), subH);
-      });
-    } else {
-      for (const trace of lane.traces) {
-        drawTrace(ctx, trace, view, plotW, laneTop, laneH);
-      }
+    if (lane.focused) {
+      ctx.fillStyle = "rgba(230, 162, 60, 0.055)";
+      ctx.fillRect(PAD.left, laneTop, plotW, laneH);
+      ctx.fillStyle = AMBER;
+      ctx.fillRect(PAD.left, laneTop + 1, 2.5, Math.max(0, laneH - 2));
+    } else if (multiLane && overlay.loupeLaneIndex === k) {
+      ctx.fillStyle = "rgba(62, 198, 255, 0.05)";
+      ctx.fillRect(PAD.left, laneTop, plotW, laneH);
+      ctx.fillStyle = CYAN;
+      ctx.fillRect(PAD.left, laneTop + 1, 2, Math.max(0, laneH - 2));
     }
 
-    if (multiLane && lane.title && laneH >= 20) {
-      ctx.font = `10px ${MONO}`;
-      ctx.textAlign = "left";
-      ctx.textBaseline = "top";
-      const labelText = lane.title;
-      if (lane.compact) {
-        const tw = ctx.measureText(labelText).width;
-        ctx.fillStyle = "rgba(9, 12, 15, 0.78)";
-        ctx.fillRect(PAD.left + 2, laneTop + 1, tw + 8, 12);
+    const laneAlpha = isDragged ? 0.35 : lane.dimmed ? 0.26 : 1;
+    ctx.save();
+    ctx.globalAlpha = laneAlpha;
+    if (lane.compact && lane.traces.length > 0) {
+      // Ribbon fills the full compact lane height; frosted label renders cleanly on top.
+      const count = lane.traces.length;
+      const subGap = count > 1 ? 2 : 0;
+      const subH = Math.max(8, (laneH - subGap * (count - 1)) / count);
+      lane.traces.forEach((trace, idx) => {
+        drawTrace(ctx, trace, view, plotW, laneTop + idx * (subH + subGap), subH);
+      });
+    } else {
+      // Draw muted/dimmed traces behind primary focused traces
+      for (const trace of lane.traces) {
+        if (trace.muted || trace.dimmed) drawTrace(ctx, trace, view, plotW, laneTop, laneH);
       }
-      ctx.fillStyle = lane.traces.length === 1 ? lane.traces[0].color : "rgba(231, 238, 243, 0.78)";
-      ctx.fillText(labelText, PAD.left + 5, laneTop + 2);
+      for (const trace of lane.traces) {
+        if (!trace.muted && !trace.dimmed) drawTrace(ctx, trace, view, plotW, laneTop, laneH);
+      }
+    }
+    ctx.restore();
+
+    // Always draw frosted translucent lane label ON TOP of the signal
+    if (multiLane && lane.title && laneH >= 18) {
+      const primaryTraces = lane.traces.filter((t) => !t.muted && !t.dashed);
+      const accent = primaryTraces.length === 1 ? primaryTraces[0].color : null;
+      const pillY = lane.compact ? laneTop + Math.max(2, Math.floor((laneH - 17) / 2)) : laneTop + 3;
+      drawFrostedLabel(ctx, PAD.left + 4, pillY, lane.title, accent, {
+        focused: lane.focused,
+        dimmed: lane.dimmed,
+        hovered: overlay.hoverPillIndex === k,
+        draggable: true,
+      });
     }
 
     if (!lane.compact && lane.sharedScale && lane.traces.length > 0 && laneH >= 32) {
       ctx.font = `10px ${MONO}`;
       ctx.textAlign = "right";
-      ctx.fillStyle = "rgba(139, 154, 166, 0.76)";
+      ctx.fillStyle = lane.dimmed ? "rgba(139, 154, 166, 0.32)" : "rgba(139, 154, 166, 0.82)";
       ctx.textBaseline = "top";
       ctx.fillText(formatValue(lane.scaleMax), PAD.left + plotW - 4, laneTop + 3);
       ctx.textBaseline = "bottom";
       ctx.fillText(formatValue(lane.scaleMin), PAD.left + plotW - 4, laneTop + laneH - 2);
     }
     ctx.restore();
+  }
+
+  // Horizontal amber insertion bar while dragging a lane to reorder
+  if (overlay.dropLaneIndex != null && rects.length > 1) {
+    const idx = Math.max(0, Math.min(rects.length, overlay.dropLaneIndex));
+    const lineY =
+      idx === 0
+        ? PAD.top + 1
+        : idx >= rects.length
+          ? rects[rects.length - 1].top + rects[rects.length - 1].height - 1
+          : Math.round(rects[idx].top - laneGap / 2);
+    ctx.strokeStyle = AMBER;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(PAD.left, lineY);
+    ctx.lineTo(PAD.left + plotW, lineY);
+    ctx.stroke();
   }
 
   if (overlay.boxZoom) {
@@ -394,21 +800,23 @@ function drawTrace(
   plotW: number,
   laneTop: number,
   laneH: number,
+  padLeft = PAD.left,
+  showSampleDots = false,
 ): void {
   const style = trace.style ?? "step";
   if (style === "state") {
-    drawStateRibbon(ctx, trace, view, plotW, laneTop, laneH);
+    drawStateRibbon(ctx, trace, view, plotW, laneTop, laneH, padLeft);
     return;
   }
   if (style === "flag") {
-    drawFlagRibbon(ctx, trace, view, plotW, laneTop, laneH);
+    drawFlagRibbon(ctx, trace, view, plotW, laneTop, laneH, padLeft);
     return;
   }
   if (style === "heat") {
-    drawHeatStrip(ctx, trace, view, plotW, laneTop, laneH);
+    drawHeatStrip(ctx, trace, view, plotW, laneTop, laneH, padLeft);
     return;
   }
-  drawWaveformTrace(ctx, trace, view, plotW, laneTop, laneH, style);
+  drawWaveformTrace(ctx, trace, view, plotW, laneTop, laneH, style, padLeft, showSampleDots);
 }
 
 function drawWaveformTrace(
@@ -419,12 +827,14 @@ function drawWaveformTrace(
   laneTop: number,
   laneH: number,
   style: "step" | "line" | "area",
+  padLeft = PAD.left,
+  showSampleDots = false,
 ): void {
   const points = trace.points;
   if (points.length === 0) return;
   const span = Math.max(1, view.t1 - view.t0);
   const yOf = (v: number) => yForTrace(v, trace, laneTop, laneH);
-  const xOf = (t: number) => PAD.left + ((t - view.t0) / span) * plotW;
+  const xOf = (t: number) => padLeft + ((t - view.t0) / span) * plotW;
   const last = points[points.length - 1];
   const tailX = xOf(Math.max(last.t, Math.min(view.t1, trace.endT ?? view.t1)));
 
@@ -447,7 +857,7 @@ function drawWaveformTrace(
     }
   };
 
-  if (style === "area" && !trace.dashed) {
+  if (style === "area" && !trace.dashed && !trace.muted) {
     const baseVal = trace.min < 0 && trace.max > 0 ? 0 : trace.min;
     const baseY = clamp(yOf(baseVal), laneTop, laneTop + laneH);
     buildPath();
@@ -456,21 +866,34 @@ function drawWaveformTrace(
     ctx.closePath();
     ctx.save();
     ctx.fillStyle = trace.color;
-    ctx.globalAlpha = 0.2;
+    ctx.globalAlpha = ctx.globalAlpha * (trace.dimmed ? 0.06 : 0.2);
     ctx.fill();
     ctx.restore();
   }
 
   buildPath();
+  ctx.save();
   ctx.strokeStyle = trace.color;
-  ctx.globalAlpha = trace.dashed ? 0.8 : 1;
-  ctx.lineWidth = trace.dashed ? 1.15 : 1.5;
+  const traceAlpha = trace.muted ? 0.34 : trace.dimmed ? 0.22 : trace.dashed ? 0.8 : 1;
+  ctx.globalAlpha = ctx.globalAlpha * traceAlpha;
+  ctx.lineWidth = trace.muted ? 1 : trace.focused ? 2 : trace.dashed ? 1.15 : 1.5;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
-  ctx.setLineDash(trace.dashed ? [5, 3] : []);
+  ctx.setLineDash(trace.muted ? [2, 3] : trace.dashed ? [5, 3] : []);
   ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.globalAlpha = 1;
+
+  // In deep micro-magnifier view, mark individual CAN sample vertices when sparse enough to read cleanly.
+  if (showSampleDots && points.length <= 48 && !trace.muted) {
+    ctx.setLineDash([]);
+    ctx.fillStyle = trace.color;
+    for (const pt of points) {
+      if (pt.t < view.t0 || pt.t > view.t1) continue;
+      ctx.beginPath();
+      ctx.arc(xOf(pt.t), yOf(pt.v), 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
 }
 
 interface RibbonSegment {
@@ -518,13 +941,14 @@ function drawStateRibbon(
   plotW: number,
   laneTop: number,
   laneH: number,
+  padLeft = PAD.left,
 ): void {
   const segs = buildSegments(trace, view, true);
   if (segs.length === 0) return;
   const span = Math.max(1, view.t1 - view.t0);
-  const xOf = (t: number) => PAD.left + ((t - view.t0) / span) * plotW;
+  const xOf = (t: number) => padLeft + ((t - view.t0) / span) * plotW;
 
-  const bandH = Math.min(26, Math.max(12, laneH - 6));
+  const bandH = Math.min(24, Math.max(12, laneH - 4));
   const bandY = laneTop + (laneH - bandH) / 2;
   const labelMap = new Map<number, string>((trace.labels ?? []).map((l) => [l.value, l.label]));
 
@@ -574,13 +998,14 @@ function drawFlagRibbon(
   plotW: number,
   laneTop: number,
   laneH: number,
+  padLeft = PAD.left,
 ): void {
   const segs = buildSegments(trace, view, false);
   if (segs.length === 0) return;
   const span = Math.max(1, view.t1 - view.t0);
-  const xOf = (t: number) => PAD.left + ((t - view.t0) / span) * plotW;
+  const xOf = (t: number) => padLeft + ((t - view.t0) / span) * plotW;
 
-  const bandH = Math.min(20, Math.max(10, laneH - 8));
+  const bandH = Math.min(20, Math.max(10, laneH - 6));
   const bandY = laneTop + (laneH - bandH) / 2;
   const lowY = bandY + bandH - 2;
 
@@ -590,9 +1015,8 @@ function drawFlagRibbon(
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
 
-  // Subtle baseline track
   ctx.fillStyle = "rgba(180, 200, 210, 0.12)";
-  ctx.fillRect(PAD.left, lowY, plotW, 2);
+  ctx.fillRect(padLeft, lowY, plotW, 2);
 
   const labelMap = new Map<number, string>((trace.labels ?? []).map((l) => [l.value, l.label]));
   const onLabel = labelMap.get(1) ?? "ON";
@@ -616,7 +1040,6 @@ function drawFlagRibbon(
 
 function heatColor(u: number): string {
   const c = clamp(u, 0, 1);
-  // 5-stop perceptual ramp: deep blue -> cyan -> green -> amber -> red
   const stops = [
     [22, 56, 83],
     [42, 183, 202],
@@ -642,13 +1065,14 @@ function drawHeatStrip(
   plotW: number,
   laneTop: number,
   laneH: number,
+  padLeft = PAD.left,
 ): void {
   const segs = buildSegments(trace, view, false);
   if (segs.length === 0) return;
   const span = Math.max(1, view.t1 - view.t0);
-  const xOf = (t: number) => PAD.left + ((t - view.t0) / span) * plotW;
+  const xOf = (t: number) => padLeft + ((t - view.t0) / span) * plotW;
   const range = trace.max - trace.min || 1;
-  const bandH = Math.min(20, Math.max(10, laneH - 8));
+  const bandH = Math.min(20, Math.max(10, laneH - 6));
   const bandY = laneTop + (laneH - bandH) / 2;
 
   ctx.save();

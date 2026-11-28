@@ -170,8 +170,24 @@ export interface ProjectFile {
   cluster?: Record<string, string>;
   /** Custom ordered cluster widgets. */
   clusterWidgets?: ClusterWidget[];
+  /** True when the cluster widgets list was explicitly customized (including an empty strip). */
+  clusterCustomized?: boolean;
   /** Per-signal scope trace visualization style overrides. */
   signalStyles?: Record<string, TraceStyle>;
+  /** Per-signal custom trace colors (`#rrggbb`). */
+  signalColors?: Record<string, string>;
+  /** Scope track layout mode (`overlay`, `split`, `grouped`). */
+  laneMode?: "overlay" | "split" | "grouped";
+  /** Manual signal -> track group overrides used in `grouped` mode. */
+  signalLanes?: Record<string, number>;
+  /** User-arranged vertical order of lane ids. */
+  laneOrder?: string[];
+  /** Whether the left sidebar was collapsed. */
+  railCollapsed?: boolean;
+  /** Whether the cluster strip was hidden. */
+  clusterHidden?: boolean;
+  /** Whether checksum/counter signals were hidden in the Signals list. */
+  hideHousekeeping?: boolean;
 }
 
 /**
@@ -180,7 +196,22 @@ export interface ProjectFile {
  */
 export type ProjectView = Pick<
   ProjectFile,
-  "view" | "bookmarks" | "notes" | "cursorAUs" | "cursorBUs" | "cluster" | "clusterWidgets" | "signalStyles"
+  | "view"
+  | "bookmarks"
+  | "notes"
+  | "cursorAUs"
+  | "cursorBUs"
+  | "cluster"
+  | "clusterWidgets"
+  | "clusterCustomized"
+  | "signalStyles"
+  | "signalColors"
+  | "laneMode"
+  | "signalLanes"
+  | "laneOrder"
+  | "railCollapsed"
+  | "clusterHidden"
+  | "hideHousekeeping"
 >;
 
 export interface ProjectOpen {
