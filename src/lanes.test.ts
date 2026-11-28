@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildLaneSpecs, cycleSignalLane, laneModeLabel, nextLaneMode } from "./lanes";
+import { buildLaneSpecs, cycleSignalLane, isRibbonStyle, laneModeLabel, nextLaneMode, resolveTraceStyle } from "./lanes";
 import type { SignalInfo } from "./types";
 
 function sig(name: string, unit = "", messageName = "ECM"): SignalInfo {
@@ -111,5 +111,46 @@ describe("cycleSignalLane", () => {
     expect(step3).toEqual({ A: 3 });
     const reset = cycleSignalLane("A", plotted, step3);
     expect(reset).toEqual({});
+  });
+});
+
+describe("semantic trace styles & compact ribbon lanes", () => {
+  it("auto-detects state ribbons for enums/small ints and flag ribbons for booleans", () => {
+    const enumSig: SignalInfo = {
+      ...sig("DriveMode", "", "Body"),
+      min: 0,
+      max: 3,
+      step: 1,
+      labels: [
+        { value: 0, label: "ECO" },
+        { value: 1, label: "SPORT" },
+      ],
+    };
+    const boolSig: SignalInfo = { ...sig("AbsActive", "", "ABS"), min: 0, max: 1, step: 1 };
+    const gearSig: SignalInfo = { ...sig("Gear", "", "Body"), min: 0, max: 6, step: 1 };
+    const analogSig = sig("EngineRPM", "rpm", "ECM");
+
+    expect(resolveTraceStyle(enumSig)).toBe("state");
+    expect(resolveTraceStyle(boolSig)).toBe("flag");
+    expect(resolveTraceStyle(gearSig)).toBe("state");
+    expect(resolveTraceStyle(analogSig)).toBe("step");
+    expect(resolveTraceStyle(enumSig, "step")).toBe("step");
+    expect(resolveTraceStyle(analogSig, "area")).toBe("area");
+    expect(isRibbonStyle("state")).toBe(true);
+    expect(isRibbonStyle("flag")).toBe(true);
+    expect(isRibbonStyle("heat")).toBe(true);
+    expect(isRibbonStyle("area")).toBe(false);
+  });
+
+  it("gives enum/flag signals compact lanes below the analog overlay in overlay mode", () => {
+    const map = new Map<string, SignalInfo>([
+      ["EngineRPM", sig("EngineRPM", "rpm", "ECM")],
+      ["VehicleSpeed", sig("VehicleSpeed", "km/h", "ECM")],
+      ["Gear", { ...sig("Gear", "", "Body"), min: 0, max: 6, step: 1 }],
+    ]);
+    const specs = buildLaneSpecs(["EngineRPM", "Gear", "VehicleSpeed"], "overlay", {}, (n) => map.get(n));
+    expect(specs).toHaveLength(2);
+    expect(specs[0]).toMatchObject({ signals: ["EngineRPM", "VehicleSpeed"], compact: false });
+    expect(specs[1]).toMatchObject({ signals: ["Gear"], compact: true });
   });
 });

@@ -53,7 +53,17 @@ function syncAutocomplete(summary: Summary | null): void {
 function buildSignalRow(signal: SignalInfo): HTMLElement {
   const row = document.createElement("label");
   row.className = hasData(signal) ? "sig" : "sig is-empty";
-  if (!hasData(signal)) row.title = "No frame in this log carries this signal";
+  if (!hasData(signal)) {
+    row.title = "No frame in this log carries this signal";
+  } else {
+    row.draggable = true;
+    row.title = "Click to plot · Drag onto the cluster bar to add a gadget";
+    row.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("text/x-signal", signal.name);
+      event.dataTransfer?.setData("text/plain", signal.name);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
+    });
+  }
   const input = document.createElement("input");
   input.type = "checkbox";
   input.checked = state.plotted.includes(signal.name);

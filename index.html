@@ -83,13 +83,15 @@
               <div id="note-list" class="mark-list"></div>
             </div>
             <div id="panel-math" hidden>
-              <form id="math-form" class="stack-form">
-                <input id="math-name" type="text" maxlength="64" placeholder="Name" autocomplete="off" />
-                <input id="math-expr" type="text" placeholder="WheelFL - WheelFR" autocomplete="off" />
-                <input id="math-unit" type="text" maxlength="16" placeholder="Unit" autocomplete="off" />
-                <button type="submit">Add channel</button>
-              </form>
-              <p class="hint">abs() and lp(signal, alpha). Example: lp(EngineRPM, 0.2)</p>
+              <div class="math-rail-bar">
+                <button type="button" id="btn-math-new" class="primary-btn">+ New math channel</button>
+                <div class="math-quick-row">
+                  <button type="button" id="math-quick-diff" title="Subtract two signals (A − B)">A − B</button>
+                  <button type="button" id="math-quick-lp" title="Low-pass smooth filter">Smooth</button>
+                  <button type="button" id="math-quick-deriv" title="Rate of change (d/dt)">d/dt</button>
+                  <button type="button" id="math-quick-scale" title="Scale &amp; offset (unit conversion)">Scale</button>
+                </div>
+              </div>
               <div id="math-list" class="mark-list"></div>
             </div>
             <div id="panel-alerts" hidden>
@@ -148,7 +150,11 @@
         <main class="viewport" id="viewport">
           <div class="viewport-body" id="viewport-body">
             <div class="cluster-strip">
-              <canvas id="gauges" aria-label="Cluster gauges. Click a gauge or lamp to assign a signal."></canvas>
+              <canvas id="gauges" aria-label="Cluster gadgets. Click a gadget to customize, or drag to reorder."></canvas>
+              <div class="cluster-actions">
+                <button type="button" id="btn-cluster-add" title="Add a new gadget to the cluster">+ Add</button>
+                <button type="button" id="btn-cluster-reset" title="Restore default cluster gadgets">Reset</button>
+              </div>
             </div>
             <div class="bus-strip">
               <canvas id="bus" aria-label="Bus load and message rate"></canvas>
@@ -223,10 +229,98 @@
         </ul>
       </form>
     </dialog>
-    <div id="slot-chooser" class="slot-chooser" hidden>
-      <span class="title" id="slot-title">Gauge</span>
-      <select id="slot-signal" aria-label="Signal shown in this gauge"></select>
+    <div id="widget-editor" class="widget-editor" hidden>
+      <div class="we-head">
+        <span class="title">Customize gadget</span>
+        <div class="we-head-btns">
+          <button type="button" id="widget-move-left" class="icon-btn" title="Move left">◀</button>
+          <button type="button" id="widget-move-right" class="icon-btn" title="Move right">▶</button>
+          <button type="button" id="widget-dup" class="icon-btn" title="Duplicate">⧉</button>
+          <button type="button" id="widget-remove" class="icon-btn danger-btn" title="Remove gadget">✕</button>
+          <button type="button" id="widget-close" class="icon-btn" title="Close">×</button>
+        </div>
+      </div>
+      <div class="we-section">
+        <span class="we-label">Style</span>
+        <div id="widget-kind-row" class="seg-row"></div>
+      </div>
+      <div class="we-section">
+        <label class="we-label" for="widget-label">Label</label>
+        <input id="widget-label" type="text" maxlength="32" placeholder="Auto" autocomplete="off" />
+      </div>
+      <div class="we-section">
+        <span class="we-label">Color</span>
+        <div id="widget-colors" class="color-row"></div>
+      </div>
+      <div id="widget-scale-row" class="we-grid-3">
+        <label class="we-mini"><span>Min</span><input id="widget-min" type="number" step="any" placeholder="auto" /></label>
+        <label class="we-mini"><span>Max</span><input id="widget-max" type="number" step="any" placeholder="auto" /></label>
+        <label class="we-mini"><span>Warn</span><input id="widget-warn" type="number" step="any" placeholder="off" /></label>
+      </div>
+      <div id="widget-lamp-row" class="we-grid-2" hidden>
+        <label class="we-mini"><span>Lit when</span><select id="widget-lamp-op"></select></label>
+        <label class="we-mini"><span>Threshold</span><input id="widget-lamp-val" type="number" step="any" value="0.5" /></label>
+      </div>
+      <div id="widget-dec-row" class="we-inline-field">
+        <label class="we-label" for="widget-dec">Decimals</label>
+        <input id="widget-dec" type="number" min="0" max="6" step="1" placeholder="auto" />
+      </div>
+      <div class="we-section">
+        <label class="we-label" for="widget-sig-search">Signal</label>
+        <input id="widget-sig-search" type="search" placeholder="Filter signals…" autocomplete="off" />
+        <div id="widget-sig-list" class="picker-list"></div>
+      </div>
     </div>
+    <div id="style-menu" class="style-menu" hidden></div>
+    <dialog id="math-dialog" class="math-dialog">
+      <form id="math-form" method="dialog">
+        <header>
+          <h2 id="math-dialog-title">New Math Channel</h2>
+          <button type="button" id="math-close" class="icon-btn" aria-label="Close">×</button>
+        </header>
+        <div class="math-studio">
+          <div class="math-main">
+            <div class="math-id-row">
+              <label class="we-mini">
+                <span>Channel name</span>
+                <input id="math-name" type="text" maxlength="64" placeholder="e.g. WheelSlip" autocomplete="off" />
+              </label>
+              <label class="we-mini is-unit">
+                <span>Unit</span>
+                <input id="math-unit" type="text" maxlength="16" placeholder="km/h, %, °C…" autocomplete="off" />
+              </label>
+            </div>
+            <div class="math-recipe-box">
+              <label class="we-label" for="math-recipe">Guided builder</label>
+              <select id="math-recipe" aria-label="Formula recipe"></select>
+              <div id="math-recipe-fields" class="math-recipe-fields" hidden></div>
+            </div>
+            <div class="math-expr-wrap">
+              <div class="math-expr-head">
+                <label class="we-label" for="math-expr">Formula</label>
+                <span class="math-expr-tip">Type for autocomplete (Ctrl+Space) or click signals &amp; chips</span>
+              </div>
+              <textarea id="math-expr" rows="3" spellcheck="false" placeholder="e.g. abs(WheelFL - WheelFR) or lp(EngineRPM, 0.2)"></textarea>
+              <div id="math-ac" class="math-ac" hidden></div>
+            </div>
+            <div class="math-palette">
+              <div id="math-ops" class="chip-row"></div>
+              <div id="math-fns" class="chip-row"></div>
+            </div>
+            <div id="math-preview" class="math-preview">Pick a recipe, click signals, or type a formula.</div>
+          </div>
+          <aside class="math-sigs">
+            <div class="we-label">Insert signal</div>
+            <input id="math-sig-filter" type="search" placeholder="Search signals…" autocomplete="off" />
+            <div id="math-sig-list" class="math-sig-list"></div>
+          </aside>
+        </div>
+        <footer class="math-footer">
+          <button type="button" id="math-cancel">Cancel</button>
+          <button type="submit" id="math-submit" class="primary-btn">Add channel</button>
+        </footer>
+      </form>
+    </dialog>
     <datalist id="signal-names"></datalist>
     <input id="file-log" type="file" hidden accept=".slog,.slbin,.csv,.txt,.log,.asc,.blf" />
     <input id="file-map" type="file" hidden accept=".dbc,.json,application/json" />

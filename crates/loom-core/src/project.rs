@@ -43,6 +43,38 @@ pub struct ProjectFile {
     /// Cluster slot (`speed`, `lamp1`, …) to the signal shown in it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cluster: BTreeMap<String, String>,
+    /// Custom cluster widgets: ordered gadgets with kind, signal, label, scale and style.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cluster_widgets: Vec<ClusterWidget>,
+    /// Per-signal plot visualization style override (`step`, `line`, `area`, `state`, `flag`, `heat`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub signal_styles: BTreeMap<String, String>,
+}
+
+/// One customizable gadget on the instrument cluster strip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterWidget {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warn_from: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lamp_op: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lamp_threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +264,57 @@ fn keeps_cluster_slot(slot: &str, signal: &str) -> bool {
     slot.len() <= 16 && !signal.trim().is_empty() && signal.len() <= 128
 }
 
+fn valid_widget_kind(kind: &str) -> bool {
+    matches!(kind, "arc" | "bar" | "digit" | "value" | "lamp")
+}
+
+fn valid_lamp_op(op: &str) -> bool {
+    matches!(op, ">" | ">=" | "<" | "<=" | "==" | "!=")
+}
+
+fn valid_signal_style(style: &str) -> bool {
+    matches!(
+        style,
+        "auto" | "step" | "line" | "area" | "state" | "flag" | "heat"
+    )
+}
+
+fn tidy_widget(widget: &mut ClusterWidget) -> bool {
+    if widget.id.trim().is_empty() || widget.id.len() > 48 || !valid_widget_kind(&widget.kind) {
+        return false;
+    }
+    widget.id = widget.id.trim().to_string();
+    widget.signal = widget
+        .signal
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .map(str::to_string);
+    widget.label = widget
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(32).collect());
+    widget.color = widget
+        .color
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| s.len() <= 24 && s.starts_with('#'))
+        .map(str::to_string);
+    widget.min = widget.min.filter(|v| v.is_finite());
+    widget.max = widget.max.filter(|v| v.is_finite());
+    widget.decimals = widget.decimals.map(|d| d.min(6));
+    widget.warn_from = widget.warn_from.filter(|v| v.is_finite());
+    widget.lamp_op = widget
+        .lamp_op
+        .as_deref()
+        .filter(|op| valid_lamp_op(op))
+        .map(str::to_string);
+    widget.lamp_threshold = widget.lamp_threshold.filter(|v| v.is_finite());
+    true
+}
+
 impl ProjectFile {
     /// Read a project as a user opens one. A math channel or trigger that does
     /// not parse or does not validate is dropped and reported, so one bad entry
@@ -253,6 +336,10 @@ impl ProjectFile {
         project
             .cluster
             .retain(|slot, signal| keeps_cluster_slot(slot, signal));
+        project.cluster_widgets.retain_mut(tidy_widget);
+        project.signal_styles.retain(|sig, style| {
+            !sig.trim().is_empty() && sig.len() <= 128 && valid_signal_style(style)
+        });
         if let Some(problem) = project.shape_problems().into_iter().next() {
             return Err(Error::invalid(problem.reason));
         }
@@ -320,6 +407,13 @@ impl ProjectFile {
                 Item::Project,
                 "Cluster",
                 "project assigns more than 32 cluster slots",
+            ));
+        }
+        if self.cluster_widgets.len() > 32 {
+            problems.push(Problem::new(
+                Item::Project,
+                "Cluster",
+                "project defines more than 32 cluster widgets",
             ));
         }
         problems
@@ -677,5 +771,43 @@ mod tests {
             assert!(TimeoutFactor::new(bad).is_err(), "{bad}");
         }
         assert_eq!(TimeoutFactor::default().get(), 2.5);
+    }
+
+    #[test]
+    fn custom_cluster_widgets_and_signal_styles_round_trip_and_sanitize() {
+        let raw = r##"{
+            "format": "signal-loom",
+            "version": 1,
+            "logPath": "drive.slog",
+            "view": { "playheadUs": 0, "spanUs": 1000000, "plotted": ["Gear"] },
+            "clusterWidgets": [
+                { "id": "w1", "kind": "value", "signal": "BatteryVoltage", "label": " BATT ", "color": "#3ec6ff", "decimals": 2 },
+                { "id": "w2", "kind": "lamp", "signal": "CoolantTemp", "label": "HOT", "lampOp": ">=", "lampThreshold": 105.0 },
+                { "id": "bad", "kind": "unknown_kind", "signal": "Gear" }
+            ],
+            "signalStyles": {
+                "Gear": "state",
+                "EngineRPM": "area",
+                "Bogus": "rainbow"
+            }
+        }"##;
+        let parsed = ProjectFile::parse(raw).unwrap();
+        assert_eq!(parsed.cluster_widgets.len(), 2);
+        assert_eq!(parsed.cluster_widgets[0].label.as_deref(), Some("BATT"));
+        assert_eq!(parsed.cluster_widgets[1].lamp_op.as_deref(), Some(">="));
+        assert_eq!(parsed.signal_styles.len(), 2);
+        assert_eq!(
+            parsed.signal_styles.get("Gear").map(String::as_str),
+            Some("state")
+        );
+        assert_eq!(
+            parsed.signal_styles.get("EngineRPM").map(String::as_str),
+            Some("area")
+        );
+
+        let encoded = parsed.to_json().unwrap();
+        let reparsed = ProjectFile::parse(&encoded).unwrap();
+        assert_eq!(reparsed.cluster_widgets, parsed.cluster_widgets);
+        assert_eq!(reparsed.signal_styles, parsed.signal_styles);
     }
 }

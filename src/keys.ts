@@ -45,7 +45,7 @@ function onKey(event: KeyboardEvent): void {
     void loadSample();
     return;
   }
-  if (els.help.open) return;
+  if (els.help.open || els.mathDialog.open) return;
   if (typingTarget(event.target)) return;
   if (event.key === "?" || (event.shiftKey && event.key === "/")) {
     event.preventDefault();

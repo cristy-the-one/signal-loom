@@ -17,6 +17,8 @@ fn projects_are_written_only_as_loom_files() {
         cursor_a_us: project.cursor_a_us,
         cursor_b_us: project.cursor_b_us,
         cluster: project.cluster.clone(),
+        cluster_widgets: project.cluster_widgets.clone(),
+        signal_styles: project.signal_styles.clone(),
     };
     assert!(session
         .write_project(&dir.join("startup.bat"), &view)

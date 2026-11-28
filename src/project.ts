@@ -1,11 +1,11 @@
-import type { ClusterBindings } from "./gauges";
+import { defaultClusterWidgets, serializeClusterWidgets, type ClusterBindings } from "./gauges";
 import { els } from "./dom";
 import { clamp } from "./format";
 import { MIN_SPAN, defaultPlotted, duration, hasData } from "./model";
 import { refresh, refreshCursors, refreshOverview } from "./query";
 import { bumpDataGen, renderChrome, state } from "./state";
 import { clearError, setError } from "./status";
-import type { ProjectOpen, ProjectView, Summary } from "./types";
+import type { ProjectOpen, ProjectView, Summary, TraceStyle } from "./types";
 
 /** Forgets everything the deck holds for the old log: math, triggers, notes, cursors, compare drive, readings. */
 export function resetDeck(): void {
@@ -22,6 +22,7 @@ export function resetDeck(): void {
   state.boxZoom = null;
   state.solo = null;
   state.signalLanes = {};
+  state.signalStyles = {};
   state.held = [];
   state.bus = null;
   els.compareOffset.value = "0";
@@ -100,6 +101,14 @@ export function applyProject(opened: ProjectOpen, path: string | null): void {
   state.comparePath = opened.project.comparePath ?? null;
   state.compareOffsetUs = opened.project.compareOffsetUs ?? 0;
   state.cluster = (opened.project.cluster ?? {}) as ClusterBindings;
+  if (opened.project.clusterWidgets && opened.project.clusterWidgets.length > 0) {
+    state.clusterWidgets = opened.project.clusterWidgets.map((w) => ({ ...w }));
+    state.clusterCustomized = true;
+  } else {
+    state.clusterWidgets = defaultClusterWidgets(state.cluster);
+    state.clusterCustomized = Object.keys(state.cluster).length > 0;
+  }
+  state.signalStyles = { ...(opened.project.signalStyles ?? {}) };
   state.compareOn = opened.compareOpened;
   els.compareOffset.value = String(state.compareOffsetUs / 1000);
   clearError();
@@ -112,6 +121,10 @@ export function applyProject(opened: ProjectOpen, path: string | null): void {
 
 /** What the UI owns of the project. The engine fills in the deck it holds when it saves. */
 export function currentView(): ProjectView {
+  const signalStyles: Record<string, TraceStyle> = {};
+  for (const [name, style] of Object.entries(state.signalStyles)) {
+    if (style && style !== "auto") signalStyles[name] = style;
+  }
   return {
     bookmarks: state.bookmarks,
     view: {
@@ -123,5 +136,7 @@ export function currentView(): ProjectView {
     cursorAUs: state.cursorA,
     cursorBUs: state.cursorB,
     cluster: state.cluster as Record<string, string>,
+    clusterWidgets: state.clusterCustomized ? serializeClusterWidgets(state.clusterWidgets) : [],
+    signalStyles,
   };
 }

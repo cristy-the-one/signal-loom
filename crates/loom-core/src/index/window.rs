@@ -113,9 +113,9 @@ impl IndexedLog {
         let deps = compiled.dependencies();
         let (t0, t1) = ordered_range(t0_us, t1_us);
         if deps.is_empty() {
-            let mut lp_state = Vec::new();
+            let mut eval_state = crate::analyze::EvalState::default();
             if !self.checkpoints.is_empty() {
-                if let Some(value) = compiled.eval(&[], &mut lp_state) {
+                if let Some(value) = compiled.eval_at(t0, &[], &mut eval_state) {
                     return Ok(crate::dto::WindowStats {
                         count: 1,
                         min: value,
@@ -143,7 +143,7 @@ impl IndexedLog {
         let mut vars = vec![0.0; deps.len()];
         let mut ready = vec![false; deps.len()];
         let mut ready_count = 0usize;
-        let mut lp_state = Vec::new();
+        let mut eval_state = crate::analyze::EvalState::default();
         let mut count = 0u64;
         let mut sum = 0.0f64;
         let mut min = f64::INFINITY;
@@ -151,8 +151,8 @@ impl IndexedLog {
         let mut first = None;
         let mut last = None;
 
-        let mut push_eval = |compiled: &crate::analyze::Compiled, vars: &[f64]| {
-            if let Some(value) = compiled.eval(vars, &mut lp_state) {
+        let mut push_eval = |compiled: &crate::analyze::Compiled, t_us: u64, vars: &[f64]| {
+            if let Some(value) = compiled.eval_at(t_us, vars, &mut eval_state) {
                 count += 1;
                 sum += value;
                 min = min.min(value);
@@ -191,7 +191,7 @@ impl IndexedLog {
                     if let Some(prev_t) = cur_t {
                         if rec.t_us > prev_t {
                             if cur_dirty && ready_count == deps.len() {
-                                push_eval(compiled, &vars);
+                                push_eval(compiled, prev_t, &vars);
                             }
                             cur_t = Some(rec.t_us);
                             cur_dirty = false;
@@ -199,7 +199,7 @@ impl IndexedLog {
                     } else if had_t0_lead && rec.t_us > t0 {
                         // Emit the t0 lead step before advancing past t0.
                         if ready_count == deps.len() {
-                            push_eval(compiled, &vars);
+                            push_eval(compiled, t0, &vars);
                         }
                         cur_t = Some(rec.t_us);
                     } else {
@@ -218,12 +218,12 @@ impl IndexedLog {
             true
         })?;
 
-        if cur_t.is_some() {
+        if let Some(t) = cur_t {
             if cur_dirty && ready_count == deps.len() {
-                push_eval(compiled, &vars);
+                push_eval(compiled, t, &vars);
             }
         } else if had_t0_lead && ready_count == deps.len() {
-            push_eval(compiled, &vars);
+            push_eval(compiled, t0, &vars);
         }
 
         if count == 0 {

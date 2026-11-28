@@ -3,16 +3,18 @@ import { defineConfig } from "vite";
 import process from "node:process";
 
 const host = process.env.TAURI_DEV_HOST;
+const uiPort = Number(process.env.LOOM_UI_PORT) || 43127;
+const enginePort = Number(process.env.LOOM_ENGINE_PORT) || 43128;
 
 export default defineConfig(() => ({
   clearScreen: false,
   server: {
-    port: 43127,
+    port: uiPort,
     strictPort: true,
     host: host || "127.0.0.1",
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:43128",
+        target: `http://127.0.0.1:${enginePort}`,
         changeOrigin: true,
       },
     },

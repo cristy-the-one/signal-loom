@@ -1,9 +1,10 @@
-import type { ClusterBindings } from "./gauges";
+import { defaultClusterWidgets, type ClusterBindings } from "./gauges";
 import type { RailTab } from "./dom";
 import type { LaneMode } from "./lanes";
 import type {
   Bookmark,
   BusLoad,
+  ClusterWidget,
   FrameHit,
   MathChannel,
   Note,
@@ -11,6 +12,7 @@ import type {
   Series,
   Summary,
   ThresholdTrigger,
+  TraceStyle,
   ValueRead,
 } from "./types";
 
@@ -46,6 +48,8 @@ interface State {
   laneMode: LaneMode;
   /** Manual signal -> track group number (`1..N`) overrides used in `grouped` mode. */
   signalLanes: Record<string, number>;
+  /** Per-signal scope visualization style override (`auto`, `step`, `line`, `area`, `state`, `flag`, `heat`). */
+  signalStyles: Record<string, TraceStyle>;
   frame: FrameHit | null;
   overview: Point[] | null;
   overviewName: string | null;
@@ -62,8 +66,12 @@ interface State {
   compareOn: boolean;
   comparePath: string | null;
   compareOffsetUs: number;
-  /** Signals the user put in the cluster's gauges and lamps. */
+  /** Legacy cluster bindings kept for backward compatibility. */
   cluster: ClusterBindings;
+  /** Ordered customizable cluster gadgets. */
+  clusterWidgets: ClusterWidget[];
+  /** True once the user edits/reorders/adds/removes gadgets (so saves persist `clusterWidgets`). */
+  clusterCustomized: boolean;
   tab: RailTab;
 }
 
@@ -88,6 +96,7 @@ export const state: State = {
   solo: null,
   laneMode: "overlay",
   signalLanes: {},
+  signalStyles: {},
   frame: null,
   overview: null,
   overviewName: null,
@@ -105,6 +114,8 @@ export const state: State = {
   comparePath: null,
   compareOffsetUs: 0,
   cluster: {},
+  clusterWidgets: defaultClusterWidgets(),
+  clusterCustomized: false,
   tab: "marks",
 };
 

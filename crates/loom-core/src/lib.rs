@@ -35,6 +35,6 @@ pub use error::{Error, ErrorBody, ErrorKind, Result};
 pub use index::{Export, IndexControl};
 pub use jobs::Engine;
 pub use map::SignalMap;
-pub use project::{write_as, Bookmark, ProjectFile, ViewState, PROJECT_FORMAT};
+pub use project::{write_as, Bookmark, ClusterWidget, ProjectFile, ViewState, PROJECT_FORMAT};
 pub use project::{MathChannel, Note, ThresholdTrigger, TriggerOp};
 pub use session::{ProjectView, Session};
