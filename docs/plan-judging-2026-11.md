@@ -226,7 +226,7 @@ check `never BrakeLamp == 1 within [0, 100]` gives that check **fail** at 1040 m
 ```json
 {
   "format": "loom-verdict/1",
-  "tool": "loom-judge 0.3.0",
+  "tool": "loom-judge 0.4.0",
   "request_sha256": "…",
   "log": {"file": "brake.asc", "sha256": "…", "t_start_us": 0, "t_end_us": 10000000,
           "frames": 2000, "skipped": 0, "events_truncated": false},
