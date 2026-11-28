@@ -261,19 +261,25 @@ export function bindFiles(): void {
   onFile(els.fileProject, (file) => void ingestFile(file));
 
   let dragDepth = 0;
+  const hasFiles = (event: DragEvent) =>
+    Boolean(event.dataTransfer?.types && Array.from(event.dataTransfer.types).includes("Files"));
   window.addEventListener("dragenter", (event) => {
+    if (!hasFiles(event)) return;
     event.preventDefault();
     dragDepth += 1;
     els.drop.hidden = false;
   });
   window.addEventListener("dragover", (event) => {
+    if (!hasFiles(event)) return;
     event.preventDefault();
   });
-  window.addEventListener("dragleave", () => {
+  window.addEventListener("dragleave", (event) => {
+    if (!hasFiles(event)) return;
     dragDepth = Math.max(0, dragDepth - 1);
     if (dragDepth === 0) els.drop.hidden = true;
   });
   window.addEventListener("drop", (event) => {
+    if (!hasFiles(event)) return;
     event.preventDefault();
     dragDepth = 0;
     els.drop.hidden = true;

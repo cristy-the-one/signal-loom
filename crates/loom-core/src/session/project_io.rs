@@ -41,9 +41,33 @@ pub struct ProjectView {
     /// Custom ordered cluster widgets.
     #[serde(default)]
     pub cluster_widgets: Vec<ClusterWidget>,
+    /// True when the cluster strip was explicitly customized (even if emptied).
+    #[serde(default)]
+    pub cluster_customized: bool,
     /// Per-signal plot style overrides.
     #[serde(default)]
     pub signal_styles: BTreeMap<String, String>,
+    /// Per-signal custom trace colors.
+    #[serde(default)]
+    pub signal_colors: BTreeMap<String, String>,
+    /// Scope track layout mode (`overlay`, `split`, `grouped`).
+    #[serde(default)]
+    pub lane_mode: Option<String>,
+    /// Manual signal -> track group overrides.
+    #[serde(default)]
+    pub signal_lanes: BTreeMap<String, u16>,
+    /// User-arranged vertical order of lane ids.
+    #[serde(default)]
+    pub lane_order: Vec<String>,
+    /// Whether the left sidebar was collapsed.
+    #[serde(default)]
+    pub rail_collapsed: bool,
+    /// Whether the cluster strip was hidden.
+    #[serde(default)]
+    pub cluster_hidden: bool,
+    /// Whether checksum/counter signals were hidden in the list.
+    #[serde(default)]
+    pub hide_housekeeping: bool,
 }
 
 enum MapLoad {
@@ -255,7 +279,15 @@ impl Session {
             timeout_factor: Some(self.timeout.get()),
             cluster: view.cluster.clone(),
             cluster_widgets: view.cluster_widgets.clone(),
+            cluster_customized: view.cluster_customized,
             signal_styles: view.signal_styles.clone(),
+            signal_colors: view.signal_colors.clone(),
+            lane_mode: view.lane_mode.clone(),
+            signal_lanes: view.signal_lanes.clone(),
+            lane_order: view.lane_order.clone(),
+            rail_collapsed: view.rail_collapsed,
+            cluster_hidden: view.cluster_hidden,
+            hide_housekeeping: view.hide_housekeeping,
         })
     }
 }
@@ -816,5 +848,65 @@ mod tests {
         session
             .load_project_json(&project, Some(&fixtures()))
             .unwrap();
+    }
+
+    #[test]
+    fn saved_layout_colors_groups_and_cluster_widgets_round_trip_through_session() {
+        let dir = scratch("layout-roundtrip");
+        let session = cluster_session();
+        let view: ProjectView = serde_json::from_str(
+            r##"{
+                "view": { "playheadUs": 120000, "spanUs": 500000, "plotted": ["VehicleSpeed", "EngineRPM"] },
+                "clusterWidgets": [
+                    { "id": "w1", "kind": "arc", "signal": "EngineRPM", "color": "#ff5a45", "warnFrom": 7200 },
+                    { "id": "w2", "kind": "lamp", "signal": "CoolantTemp", "color": "#7ddea5", "lampOp": ">", "lampThreshold": 90 }
+                ],
+                "clusterCustomized": true,
+                "signalStyles": { "VehicleSpeed": "area" },
+                "signalColors": { "VehicleSpeed": "#ff8cc6", "EngineRPM": "#7ddea5" },
+                "laneMode": "grouped",
+                "signalLanes": { "VehicleSpeed": 2, "EngineRPM": 1 },
+                "laneOrder": ["manual:2", "manual:1"],
+                "railCollapsed": true,
+                "clusterHidden": false,
+                "hideHousekeeping": true
+            }"##,
+        )
+        .unwrap();
+        let target = dir.join("layout.loom");
+        session.write_project(&target, &view).unwrap();
+
+        let mut reopened = Session::new();
+        let opened = reopened.load_project_file(&target).unwrap();
+        assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+        assert_eq!(opened.project.cluster_widgets.len(), 2);
+        assert_eq!(
+            opened.project.cluster_widgets[0].color.as_deref(),
+            Some("#ff5a45")
+        );
+        assert!(opened.project.cluster_customized);
+        assert_eq!(
+            opened
+                .project
+                .signal_colors
+                .get("VehicleSpeed")
+                .map(String::as_str),
+            Some("#ff8cc6")
+        );
+        assert_eq!(
+            opened
+                .project
+                .signal_colors
+                .get("EngineRPM")
+                .map(String::as_str),
+            Some("#7ddea5")
+        );
+        assert_eq!(opened.project.lane_mode.as_deref(), Some("grouped"));
+        assert_eq!(opened.project.signal_lanes.get("VehicleSpeed"), Some(&2));
+        assert_eq!(opened.project.lane_order, vec!["manual:2", "manual:1"]);
+        assert!(opened.project.rail_collapsed);
+        assert!(!opened.project.cluster_hidden);
+        assert!(opened.project.hide_housekeeping);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

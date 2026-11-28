@@ -122,6 +122,19 @@ jobs:
         with:
           path: installers
 
+      - name: Prepare release body
+        shell: bash
+        run: |
+          notes="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "${notes}" ]; then
+            cp "${notes}" release-body.md
+          else
+            cat > release-body.md <<EOF
+          Unsigned Signal Loom ${GITHUB_REF_NAME} installers: Windows (NSIS), Linux (deb, AppImage) and macOS (dmg, Apple silicon and Intel).
+          They carry no Authenticode or Apple Developer ID signature, so Windows SmartScreen and macOS Gatekeeper will warn before the first run.
+          EOF
+          fi
+
       - name: Attach every installer to one draft release
         uses: softprops/action-gh-release@v2
         with:
@@ -129,8 +142,6 @@ jobs:
           prerelease: false
           tag_name: ${{ github.ref_name }}
           name: Signal Loom ${{ github.ref_name }}
-          body: |
-            Unsigned Signal Loom ${{ github.ref_name }} installers: Windows (NSIS), Linux (deb, AppImage) and macOS (dmg, Apple silicon and Intel).
-            They carry no Authenticode or Apple Developer ID signature, so Windows SmartScreen and macOS Gatekeeper will warn before the first run.
+          body_path: release-body.md
           files: installers/**/*
           fail_on_unmatched_files: true

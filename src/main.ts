@@ -23,9 +23,41 @@ import { bindTransport } from "./transport";
 import type { IndexStatus } from "./types";
 import "./styles.css";
 
+function bindWindowControls(): void {
+  if (!api.inTauri()) {
+    els.winControls.hidden = true;
+    return;
+  }
+  els.winControls.hidden = false;
+  void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+    const win = getCurrentWindow();
+    const syncMaxIcon = async () => {
+      try {
+        const maxed = await win.isMaximized();
+        els.winMax.textContent = maxed ? "❐" : "☐";
+        els.winMax.title = maxed ? "Restore window" : "Maximize window";
+        els.winMax.setAttribute("aria-label", maxed ? "Restore window" : "Maximize window");
+      } catch {
+        // Ignore if window handle is unavailable
+      }
+    };
+    void syncMaxIcon();
+    void win.onResized(() => void syncMaxIcon());
+    els.winMin.addEventListener("click", () => void win.minimize());
+    els.winMax.addEventListener("click", () => void win.toggleMaximize());
+    els.winClose.addEventListener("click", () => void win.close());
+    els.topbar.addEventListener("dblclick", (event) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("button, input, label, select, a")) return;
+      void win.toggleMaximize();
+    });
+  });
+}
+
 function bind(): void {
   bindRenderers({ paint, chrome: paintChrome });
   els.runtime.textContent = api.inTauri() ? "Desktop" : "Browser preview";
+  bindWindowControls();
   bindFiles();
   bindKeys();
   bindTabs();

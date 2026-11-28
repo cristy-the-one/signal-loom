@@ -46,9 +46,37 @@ pub struct ProjectFile {
     /// Custom cluster widgets: ordered gadgets with kind, signal, label, scale and style.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cluster_widgets: Vec<ClusterWidget>,
+    /// True when `cluster_widgets` reflects explicit user customization (including an intentionally empty strip).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cluster_customized: bool,
     /// Per-signal plot visualization style override (`step`, `line`, `area`, `state`, `flag`, `heat`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub signal_styles: BTreeMap<String, String>,
+    /// Per-signal custom trace color (`#rrggbb`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub signal_colors: BTreeMap<String, String>,
+    /// Scope track layout mode (`overlay`, `split`, `grouped`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_mode: Option<String>,
+    /// Manual signal -> track group number (`1..=64`) overrides used in `grouped` mode.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub signal_lanes: BTreeMap<String, u16>,
+    /// User-arranged vertical order of lane ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lane_order: Vec<String>,
+    /// Whether the left sidebar was collapsed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub rail_collapsed: bool,
+    /// Whether the cluster gadgets strip was hidden.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cluster_hidden: bool,
+    /// Whether checksum/counter signals were hidden in the Signals list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_housekeeping: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// One customizable gadget on the instrument cluster strip.
@@ -279,6 +307,17 @@ fn valid_signal_style(style: &str) -> bool {
     )
 }
 
+fn valid_hex_color(color: &str) -> bool {
+    let hex = color.trim();
+    matches!(hex.len(), 4 | 7 | 9)
+        && hex.starts_with('#')
+        && hex[1..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn valid_lane_mode(mode: &str) -> bool {
+    matches!(mode, "overlay" | "split" | "grouped")
+}
+
 fn tidy_widget(widget: &mut ClusterWidget) -> bool {
     if widget.id.trim().is_empty() || widget.id.len() > 48 || !valid_widget_kind(&widget.kind) {
         return false;
@@ -340,6 +379,37 @@ impl ProjectFile {
         project.signal_styles.retain(|sig, style| {
             !sig.trim().is_empty() && sig.len() <= 128 && valid_signal_style(style)
         });
+        project.signal_colors.retain(|sig, color| {
+            let trimmed = color.trim();
+            if sig.trim().is_empty() || sig.len() > 128 || !valid_hex_color(trimmed) {
+                return false;
+            }
+            *color = trimmed.to_string();
+            true
+        });
+        project.lane_mode = project
+            .lane_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| valid_lane_mode(m))
+            .map(str::to_string);
+        project.signal_lanes.retain(|sig, lane| {
+            !sig.trim().is_empty() && sig.len() <= 128 && (1..=64).contains(lane)
+        });
+        let mut seen_lanes = std::collections::HashSet::new();
+        project.lane_order.retain_mut(|id| {
+            let trimmed = id.trim();
+            if trimmed.is_empty() || trimmed.len() > 160 {
+                return false;
+            }
+            let normalized = trimmed.to_string();
+            if !seen_lanes.insert(normalized.clone()) {
+                return false;
+            }
+            *id = normalized;
+            true
+        });
+        project.lane_order.truncate(256);
         if let Some(problem) = project.shape_problems().into_iter().next() {
             return Err(Error::invalid(problem.reason));
         }
@@ -809,5 +879,55 @@ mod tests {
         let reparsed = ProjectFile::parse(&encoded).unwrap();
         assert_eq!(reparsed.cluster_widgets, parsed.cluster_widgets);
         assert_eq!(reparsed.signal_styles, parsed.signal_styles);
+    }
+
+    #[test]
+    fn layout_colors_groups_and_lane_order_round_trip_and_sanitize() {
+        let raw = r##"{
+            "format": "signal-loom",
+            "version": 1,
+            "logPath": "drive.slog",
+            "view": { "playheadUs": 0, "spanUs": 1000000, "plotted": ["VehicleSpeed", "EngineRPM"] },
+            "clusterCustomized": true,
+            "signalColors": {
+                "VehicleSpeed": " #ff5a45 ",
+                "EngineRPM": "#3ec6ff",
+                "BadColor": "not-a-color"
+            },
+            "laneMode": "grouped",
+            "signalLanes": {
+                "VehicleSpeed": 1,
+                "EngineRPM": 2,
+                "Zero": 0,
+                "TooHigh": 99
+            },
+            "laneOrder": ["manual:2", "manual:1", "manual:2", "  "],
+            "railCollapsed": true,
+            "clusterHidden": false,
+            "hideHousekeeping": true
+        }"##;
+        let parsed = ProjectFile::parse(raw).unwrap();
+        assert!(parsed.cluster_customized);
+        assert_eq!(parsed.signal_colors.len(), 2);
+        assert_eq!(
+            parsed.signal_colors.get("VehicleSpeed").map(String::as_str),
+            Some("#ff5a45")
+        );
+        assert_eq!(parsed.lane_mode.as_deref(), Some("grouped"));
+        assert_eq!(parsed.signal_lanes.len(), 2);
+        assert_eq!(parsed.signal_lanes.get("EngineRPM"), Some(&2));
+        assert_eq!(parsed.lane_order, vec!["manual:2", "manual:1"]);
+        assert!(parsed.rail_collapsed);
+        assert!(!parsed.cluster_hidden);
+        assert!(parsed.hide_housekeeping);
+
+        let encoded = parsed.to_json().unwrap();
+        let reparsed = ProjectFile::parse(&encoded).unwrap();
+        assert_eq!(reparsed.signal_colors, parsed.signal_colors);
+        assert_eq!(reparsed.lane_mode, parsed.lane_mode);
+        assert_eq!(reparsed.signal_lanes, parsed.signal_lanes);
+        assert_eq!(reparsed.lane_order, parsed.lane_order);
+        assert_eq!(reparsed.rail_collapsed, parsed.rail_collapsed);
+        assert_eq!(reparsed.hide_housekeeping, parsed.hide_housekeeping);
     }
 }

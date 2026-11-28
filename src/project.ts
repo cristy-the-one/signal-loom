@@ -1,11 +1,17 @@
 import { defaultClusterWidgets, serializeClusterWidgets, type ClusterBindings } from "./gauges";
 import { els } from "./dom";
 import { clamp } from "./format";
+import { LANE_MODES, type LaneMode } from "./lanes";
 import { MIN_SPAN, defaultPlotted, duration, hasData } from "./model";
+import { setClusterHidden, setRailCollapsed } from "./panels/signals";
 import { refresh, refreshCursors, refreshOverview } from "./query";
 import { bumpDataGen, renderChrome, state } from "./state";
 import { clearError, setError } from "./status";
 import type { ProjectOpen, ProjectView, Summary, TraceStyle } from "./types";
+
+function isLaneMode(value: unknown): value is LaneMode {
+  return typeof value === "string" && (LANE_MODES as readonly string[]).includes(value);
+}
 
 /** Forgets everything the deck holds for the old log: math, triggers, notes, cursors, compare drive, readings. */
 export function resetDeck(): void {
@@ -21,8 +27,11 @@ export function resetDeck(): void {
   state.viewCenter = null;
   state.boxZoom = null;
   state.solo = null;
+  state.focusedLane = null;
+  state.laneOrder = [];
   state.signalLanes = {};
   state.signalStyles = {};
+  state.signalColors = {};
   state.held = [];
   state.bus = null;
   els.compareOffset.value = "0";
@@ -80,7 +89,11 @@ export function applyProject(opened: ProjectOpen, path: string | null): void {
   state.viewCenter = null;
   state.boxZoom = null;
   state.solo = null;
-  state.signalLanes = {};
+  state.focusedLane = null;
+  state.laneMode = isLaneMode(opened.project.laneMode) ? opened.project.laneMode : "overlay";
+  state.laneOrder = [...(opened.project.laneOrder ?? [])];
+  state.signalLanes = { ...(opened.project.signalLanes ?? {}) };
+  state.signalColors = { ...(opened.project.signalColors ?? {}) };
   state.span = opened.project.view.spanUs || duration(opened.summary);
   state.plotted = opened.project.view.plotted.filter((name) =>
     opened.summary.signals.some((signal) => signal.name === name),
@@ -101,14 +114,20 @@ export function applyProject(opened: ProjectOpen, path: string | null): void {
   state.comparePath = opened.project.comparePath ?? null;
   state.compareOffsetUs = opened.project.compareOffsetUs ?? 0;
   state.cluster = (opened.project.cluster ?? {}) as ClusterBindings;
-  if (opened.project.clusterWidgets && opened.project.clusterWidgets.length > 0) {
-    state.clusterWidgets = opened.project.clusterWidgets.map((w) => ({ ...w }));
+  const hasSavedWidgets =
+    Boolean(opened.project.clusterCustomized) ||
+    (opened.project.clusterWidgets != null && opened.project.clusterWidgets.length > 0);
+  if (hasSavedWidgets) {
+    state.clusterWidgets = (opened.project.clusterWidgets ?? []).map((w) => ({ ...w }));
     state.clusterCustomized = true;
   } else {
     state.clusterWidgets = defaultClusterWidgets(state.cluster);
     state.clusterCustomized = Object.keys(state.cluster).length > 0;
   }
   state.signalStyles = { ...(opened.project.signalStyles ?? {}) };
+  state.hideHousekeeping = Boolean(opened.project.hideHousekeeping);
+  setRailCollapsed(Boolean(opened.project.railCollapsed), false);
+  setClusterHidden(Boolean(opened.project.clusterHidden), false);
   state.compareOn = opened.compareOpened;
   els.compareOffset.value = String(state.compareOffsetUs / 1000);
   clearError();
@@ -125,6 +144,14 @@ export function currentView(): ProjectView {
   for (const [name, style] of Object.entries(state.signalStyles)) {
     if (style && style !== "auto") signalStyles[name] = style;
   }
+  const signalColors: Record<string, string> = {};
+  for (const [name, color] of Object.entries(state.signalColors)) {
+    if (color && /^#[0-9a-f]{3,8}$/i.test(color.trim())) signalColors[name] = color.trim();
+  }
+  const signalLanes: Record<string, number> = {};
+  for (const [name, lane] of Object.entries(state.signalLanes)) {
+    if (Number.isInteger(lane) && lane > 0) signalLanes[name] = lane;
+  }
   return {
     bookmarks: state.bookmarks,
     view: {
@@ -137,6 +164,14 @@ export function currentView(): ProjectView {
     cursorBUs: state.cursorB,
     cluster: state.cluster as Record<string, string>,
     clusterWidgets: state.clusterCustomized ? serializeClusterWidgets(state.clusterWidgets) : [],
+    clusterCustomized: state.clusterCustomized,
     signalStyles,
+    signalColors,
+    laneMode: state.laneMode,
+    signalLanes,
+    laneOrder: [...state.laneOrder],
+    railCollapsed: state.railCollapsed,
+    clusterHidden: state.clusterHidden,
+    hideHousekeeping: state.hideHousekeeping,
   };
 }

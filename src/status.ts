@@ -36,7 +36,7 @@ export function setNotice(message: string): void {
   noticeTimer = setTimeout(() => {
     els.notice.hidden = true;
     els.notice.textContent = "";
-  }, 6000);
+  }, 3200);
 }
 
 export function paintBusy(label?: string): void {

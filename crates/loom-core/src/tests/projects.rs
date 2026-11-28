@@ -18,7 +18,15 @@ fn projects_are_written_only_as_loom_files() {
         cursor_b_us: project.cursor_b_us,
         cluster: project.cluster.clone(),
         cluster_widgets: project.cluster_widgets.clone(),
+        cluster_customized: project.cluster_customized,
         signal_styles: project.signal_styles.clone(),
+        signal_colors: project.signal_colors.clone(),
+        lane_mode: project.lane_mode.clone(),
+        signal_lanes: project.signal_lanes.clone(),
+        lane_order: project.lane_order.clone(),
+        rail_collapsed: project.rail_collapsed,
+        cluster_hidden: project.cluster_hidden,
+        hide_housekeeping: project.hide_housekeeping,
     };
     assert!(session
         .write_project(&dir.join("startup.bat"), &view)

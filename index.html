@@ -8,21 +8,21 @@
   </head>
   <body>
     <div class="app">
-      <header class="topbar">
-        <div class="brand">
-          <svg class="mark" viewBox="0 0 28 28" aria-hidden="true">
+      <header class="topbar" id="topbar" data-tauri-drag-region>
+        <div class="brand" data-tauri-drag-region>
+          <svg class="mark" viewBox="0 0 28 28" aria-hidden="true" data-tauri-drag-region>
             <rect x="1" y="1" width="26" height="26" rx="3" fill="#12171c" stroke="#2a343d" />
             <path d="M4 18 L9 11 L14 16 L19 8 L24 13" fill="none" stroke="#3ec6ff" stroke-width="1.6" />
             <path d="M14 5 V23" stroke="#ff4d2e" stroke-width="1.2" />
           </svg>
-          <div>
-            <div class="word">Signal Loom</div>
-            <div class="sub" id="project-name">Untitled</div>
+          <div data-tauri-drag-region>
+            <div class="word" data-tauri-drag-region>Signal Loom</div>
+            <div class="sub" id="project-name" data-tauri-drag-region>Untitled</div>
           </div>
         </div>
-        <div class="identity">
-          <div class="log-name" id="log-name">No log</div>
-          <div class="log-meta" id="log-meta">Open a recording to index it</div>
+        <div class="identity" data-tauri-drag-region>
+          <div class="log-name" id="log-name" data-tauri-drag-region>No log</div>
+          <div class="log-meta" id="log-meta" data-tauri-drag-region>Open a recording to index it</div>
         </div>
         <div class="actions">
           <span class="runtime" id="runtime">Desktop</span>
@@ -35,7 +35,12 @@
           <button type="button" id="btn-add-map" title="Add another DBC on this channel">Add</button>
           <button type="button" id="btn-project" title="Open a .loom project (Ctrl/Cmd+Shift+O)">Project</button>
           <button type="button" id="btn-save" title="Save project (Ctrl/Cmd+S)">Save</button>
-          <button type="button" id="btn-help" class="icon-btn" title="Keyboard shortcuts">?</button>
+          <button type="button" id="btn-help" class="palette-trigger" title="Command palette &amp; keyboard shortcuts (Ctrl+K or ?)">⌘K</button>
+        </div>
+        <div class="win-controls" id="win-controls" hidden>
+          <button type="button" id="win-min" class="win-btn" title="Minimize" aria-label="Minimize">─</button>
+          <button type="button" id="win-max" class="win-btn" title="Maximize" aria-label="Maximize">☐</button>
+          <button type="button" id="win-close" class="win-btn is-close" title="Close" aria-label="Close">×</button>
         </div>
       </header>
       <div class="banners">
@@ -43,12 +48,17 @@
         <p id="warn" class="warn" hidden></p>
         <p id="notice" class="notice" role="status" hidden></p>
       </div>
-      <div class="workspace">
-        <aside class="rail">
+      <div class="workspace" id="workspace">
+        <button type="button" id="rail-edge" class="rail-edge" title="Hover to peek signals · Click to pin sidebar open (Ctrl+B)" aria-label="Show signals sidebar">›</button>
+        <aside class="rail" id="rail">
           <section class="rail-block signals-block">
             <header class="rail-head">
               <h2>Signals</h2>
-              <span id="sig-count">0</span>
+              <div class="rail-head-right">
+                <button type="button" id="btn-hide-chk" class="mini-pill" title="Hide checksum/counter signals" hidden>CHK</button>
+                <span id="sig-count">0</span>
+                <button type="button" id="btn-rail-toggle" class="icon-btn rail-toggle" title="Hide sidebar — hover left edge to peek (Ctrl+B)" aria-label="Hide sidebar">◀</button>
+              </div>
             </header>
             <label class="search">
               <span class="sr">Filter signals</span>
@@ -152,7 +162,7 @@
             <div class="cluster-strip">
               <canvas id="gauges" aria-label="Cluster gadgets. Click a gadget to customize, or drag to reorder."></canvas>
               <div class="cluster-actions">
-                <button type="button" id="btn-cluster-add" title="Add a new gadget to the cluster">+ Add</button>
+                <button type="button" id="btn-cluster-add" title="Add a new gadget to the cluster (+)">+ Add</button>
                 <button type="button" id="btn-cluster-reset" title="Restore default cluster gadgets">Reset</button>
               </div>
             </div>
@@ -166,10 +176,31 @@
                 <div id="cross-time"></div>
                 <div id="cross-vals"></div>
               </div>
+              <div id="lane-loupe-panel" class="lane-loupe-panel" hidden>
+                <div class="lane-loupe-head">
+                  <span id="lane-loupe-title" class="lane-loupe-title"></span>
+                  <span class="lane-loupe-meta"><kbd>↑</kbd><kbd>↓</kbd> lane · <kbd>Esc</kbd> close · <kbd>V</kbd> toggle</span>
+                </div>
+                <div class="lane-loupe-tier">
+                  <span id="lane-loupe-1-tag" class="lane-loupe-tag"></span>
+                  <canvas id="lane-loupe-1" aria-label="Lane magnifier level 1"></canvas>
+                </div>
+                <div class="lane-loupe-tier">
+                  <span id="lane-loupe-2-tag" class="lane-loupe-tag is-deep"></span>
+                  <canvas id="lane-loupe-2" aria-label="Lane magnifier level 2"></canvas>
+                </div>
+              </div>
               <p id="scale-note" class="scale-note" hidden>Each trace is scaled across the whole log</p>
               <p id="stage-msg" class="stage-msg">No log on the deck. Load the synthetic hypercar sample or open a CAN log.</p>
             </div>
-            <div class="timeline-wrap">
+            <div class="timeline-wrap" id="timeline-wrap">
+              <div id="timeline-loupe" class="timeline-loupe" hidden>
+                <div class="loupe-head">
+                  <span id="timeline-loupe-title" class="loupe-title">MICRO-MAP</span>
+                  <span id="timeline-loupe-range" class="loupe-range"></span>
+                </div>
+                <canvas id="timeline-loupe-canvas" aria-label="Magnified timeline micro-map"></canvas>
+              </div>
               <canvas id="timeline" aria-label="Recording timeline"></canvas>
               <div class="transport">
                 <button type="button" id="prev-event" title="Previous event (Shift+Left)">|◀</button>
@@ -180,13 +211,22 @@
                 <span class="readout" id="time-readout">0.000</span>
                 <span class="readout dim" id="frame-readout"></span>
                 <span class="spacer"></span>
-                <span class="readout dim" id="span-readout">span —</span>
+                <span class="readout dim" id="span-readout" title="Visible window span"></span>
                 <span class="readout dim cursor-read" id="cursor-read"></span>
-                <button type="button" id="lane-mode" title="Scope tracks: Overlay, Split, or Grouped (L)">Overlay</button>
+                <div class="mode-group" id="lane-mode-group" role="radiogroup" aria-label="Track layout mode">
+                  <button type="button" id="lane-mode-overlay" role="radio" aria-checked="true" data-lane-mode="overlay" title="Overlay analog signals on one track (L to cycle)">Overlay</button>
+                  <button type="button" id="lane-mode-split" role="radio" aria-checked="false" data-lane-mode="split" title="Split each signal onto its own track (L to cycle)">Split</button>
+                  <button type="button" id="lane-mode-grouped" role="radio" aria-checked="false" data-lane-mode="grouped" title="Group signals by unit / message or custom T1/T2 tracks (L to cycle)">Group</button>
+                </div>
+                <button type="button" id="lane-loupe" class="loupe-toggle" title="Toggle hover lane magnifier (V)"><i class="toggle-dot" aria-hidden="true"></i><span>Loupe</span></button>
                 <button type="button" id="zoom-out" title="Zoom out ([)">−</button>
                 <button type="button" id="zoom-in" title="Zoom in (])">+</button>
-                <button type="button" id="zoom-all" title="Show the whole log (double-click plot)">All</button>
-                <button type="button" id="rate" title="Playback rate">1×</button>
+                <button type="button" id="zoom-all" title="Show the whole log (F or double-click plot)">All</button>
+                <div class="rate-group">
+                  <button type="button" id="rate-down" title="Slow down playback (< or Shift+R)" aria-label="Slow down playback">‹</button>
+                  <button type="button" id="rate" title="Playback speed — click to reset to 1×, scroll or use < / >">1×</button>
+                  <button type="button" id="rate-up" title="Speed up playback (> or R)" aria-label="Speed up playback">›</button>
+                </div>
               </div>
             </div>
           </div>
@@ -203,31 +243,19 @@
         </main>
       </div>
     </div>
-    <dialog id="help">
-      <form method="dialog">
-        <header>
-          <h2>Keys</h2>
-          <button type="submit" class="icon-btn" aria-label="Close">×</button>
-        </header>
-        <ul>
-          <li><span>Open log</span><kbd>Ctrl/Cmd</kbd><kbd>O</kbd></li>
-          <li><span>Open project</span><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>O</kbd></li>
-          <li><span>Save project</span><kbd>Ctrl/Cmd</kbd><kbd>S</kbd></li>
-          <li><span>Save as</span><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>S</kbd></li>
-          <li><span>Load sample</span><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>L</kbd></li>
-          <li><span>Frame step</span><kbd>←</kbd><kbd>→</kbd></li>
-          <li><span>Event / bookmark step</span><kbd>Shift</kbd><kbd>←</kbd><kbd>→</kbd></li>
-          <li><span>Play / pause</span><kbd>Space</kbd></li>
-          <li><span>Track layout (Overlay / Split / Group)</span><kbd>L</kbd></li>
-          <li><span>Bookmark playhead</span><kbd>B</kbd></li>
-          <li><span>Note</span><kbd>N</kbd></li>
-          <li><span>Cursors A / B</span><kbd>1</kbd><kbd>2</kbd></li>
-          <li><span>Zoom / Box zoom</span><kbd>[</kbd><kbd>]</kbd><span class="hint-note">wheel, or Shift+drag</span></li>
-          <li><span>Pan camera</span><kbd>Alt</kbd><span class="hint-note">drag, or Shift+wheel</span></li>
-          <li><span>Filter signals</span><kbd>/</kbd></li>
-          <li><span>Start / end</span><kbd>Home</kbd><kbd>End</kbd></li>
-        </ul>
-      </form>
+    <dialog id="palette" class="palette-dialog">
+      <div class="palette-card">
+        <div class="palette-head">
+          <input id="palette-input" type="search" placeholder="Search commands, shortcuts, or signals… (Ctrl+K)" autocomplete="off" spellcheck="false" />
+          <button type="button" id="palette-close" class="icon-btn" aria-label="Close">×</button>
+        </div>
+        <div id="palette-list" class="palette-list" role="listbox"></div>
+        <div class="palette-foot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+          <span><kbd>Enter</kbd> run</span>
+          <span><kbd>Esc</kbd> close</span>
+        </div>
+      </div>
     </dialog>
     <div id="widget-editor" class="widget-editor" hidden>
       <div class="we-head">
@@ -236,8 +264,7 @@
           <button type="button" id="widget-move-left" class="icon-btn" title="Move left">◀</button>
           <button type="button" id="widget-move-right" class="icon-btn" title="Move right">▶</button>
           <button type="button" id="widget-dup" class="icon-btn" title="Duplicate">⧉</button>
-          <button type="button" id="widget-remove" class="icon-btn danger-btn" title="Remove gadget">✕</button>
-          <button type="button" id="widget-close" class="icon-btn" title="Close">×</button>
+          <button type="button" id="widget-close" class="icon-btn" title="Close popover (Esc)">×</button>
         </div>
       </div>
       <div class="we-section">
@@ -270,8 +297,15 @@
         <input id="widget-sig-search" type="search" placeholder="Filter signals…" autocomplete="off" />
         <div id="widget-sig-list" class="picker-list"></div>
       </div>
+      <div class="we-foot">
+        <span id="widget-hint" class="we-hint"></span>
+        <span id="widget-timeout-text" class="we-timeout-text" hidden></span>
+        <button type="button" id="widget-accept" class="primary-btn we-accept-btn" title="Accept changes (Enter)">Accept ↵</button>
+      </div>
+      <div class="we-timeout-track" aria-hidden="true"><div id="widget-timeout-bar" class="we-timeout-bar"></div></div>
     </div>
     <div id="style-menu" class="style-menu" hidden></div>
+    <div id="color-menu" class="color-menu" hidden></div>
     <dialog id="math-dialog" class="math-dialog">
       <form id="math-form" method="dialog">
         <header>
