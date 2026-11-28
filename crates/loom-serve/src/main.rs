@@ -77,11 +77,19 @@ enum CliOutcome {
     Print(String),
 }
 
+fn default_port() -> u16 {
+    env::var("LOOM_ENGINE_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|&port| port > 0)
+        .unwrap_or(43128)
+}
+
 fn parse_cli<I>(args: I) -> Result<CliOutcome, String>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut port = 43128u16;
+    let mut port = default_port();
     let mut log = None;
     let mut dbcs = Vec::new();
     let mut project = None;

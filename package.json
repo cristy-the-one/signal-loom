@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "engine": "cargo run -p loom-serve -- --port 43128",
+    "engine": "cargo run -p loom-serve",
     "dev:preview": "concurrently -k -n engine,ui -c yellow,cyan \"npm:engine\" \"npm:dev\"",
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
