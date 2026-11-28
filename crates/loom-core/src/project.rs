@@ -273,7 +273,10 @@ fn valid_lamp_op(op: &str) -> bool {
 }
 
 fn valid_signal_style(style: &str) -> bool {
-    matches!(style, "auto" | "step" | "line" | "area" | "state" | "flag" | "heat")
+    matches!(
+        style,
+        "auto" | "step" | "line" | "area" | "state" | "flag" | "heat"
+    )
 }
 
 fn tidy_widget(widget: &mut ClusterWidget) -> bool {
@@ -334,9 +337,9 @@ impl ProjectFile {
             .cluster
             .retain(|slot, signal| keeps_cluster_slot(slot, signal));
         project.cluster_widgets.retain_mut(tidy_widget);
-        project
-            .signal_styles
-            .retain(|sig, style| !sig.trim().is_empty() && sig.len() <= 128 && valid_signal_style(style));
+        project.signal_styles.retain(|sig, style| {
+            !sig.trim().is_empty() && sig.len() <= 128 && valid_signal_style(style)
+        });
         if let Some(problem) = project.shape_problems().into_iter().next() {
             return Err(Error::invalid(problem.reason));
         }
@@ -793,8 +796,14 @@ mod tests {
         assert_eq!(parsed.cluster_widgets[0].label.as_deref(), Some("BATT"));
         assert_eq!(parsed.cluster_widgets[1].lamp_op.as_deref(), Some(">="));
         assert_eq!(parsed.signal_styles.len(), 2);
-        assert_eq!(parsed.signal_styles.get("Gear").map(String::as_str), Some("state"));
-        assert_eq!(parsed.signal_styles.get("EngineRPM").map(String::as_str), Some("area"));
+        assert_eq!(
+            parsed.signal_styles.get("Gear").map(String::as_str),
+            Some("state")
+        );
+        assert_eq!(
+            parsed.signal_styles.get("EngineRPM").map(String::as_str),
+            Some("area")
+        );
 
         let encoded = parsed.to_json().unwrap();
         let reparsed = ProjectFile::parse(&encoded).unwrap();

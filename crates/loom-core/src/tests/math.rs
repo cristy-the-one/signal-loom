@@ -186,7 +186,9 @@ t_us,signal,value,unit
 3000000,V,30,m/s
 ";
     let mut session = Session::new();
-    session.open_bytes("accel.csv", csv.as_bytes().to_vec()).unwrap();
+    session
+        .open_bytes("accel.csv", csv.as_bytes().to_vec())
+        .unwrap();
     session
         .set_math(vec![
             crate::MathChannel {
@@ -219,7 +221,10 @@ t_us,signal,value,unit
     assert!((dist_stats.last - 55.0).abs() < 1e-9, "{}", dist_stats.last);
 
     let flag_stats = session.stats("FastFlag", 0, 3_000_000).unwrap();
-    assert_eq!((flag_stats.min, flag_stats.max, flag_stats.count), (0.0, 1.0, 4));
+    assert_eq!(
+        (flag_stats.min, flag_stats.max, flag_stats.count),
+        (0.0, 1.0, 4)
+    );
 
     let smooth_stats = session.stats("Smooth", 0, 3_000_000).unwrap();
     assert_eq!((smooth_stats.first, smooth_stats.last), (0.0, 30.0));

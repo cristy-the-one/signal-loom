@@ -952,10 +952,22 @@ mod tests {
     #[test]
     fn supports_power_comparisons_logic_and_stateless_functions() {
         let mut s = EvalState::default();
-        assert_eq!(compile("2 ^ 3 ^ 2").unwrap().eval_at(0, &[], &mut s), Some(512.0));
-        assert_eq!(compile("-2 ^ 2").unwrap().eval_at(0, &[], &mut s), Some(-4.0));
-        assert_eq!(compile("2 ^ -2").unwrap().eval_at(0, &[], &mut s), Some(0.25));
-        assert_eq!(compile("10 % 3").unwrap().eval_at(0, &[], &mut s), Some(1.0));
+        assert_eq!(
+            compile("2 ^ 3 ^ 2").unwrap().eval_at(0, &[], &mut s),
+            Some(512.0)
+        );
+        assert_eq!(
+            compile("-2 ^ 2").unwrap().eval_at(0, &[], &mut s),
+            Some(-4.0)
+        );
+        assert_eq!(
+            compile("2 ^ -2").unwrap().eval_at(0, &[], &mut s),
+            Some(0.25)
+        );
+        assert_eq!(
+            compile("10 % 3").unwrap().eval_at(0, &[], &mut s),
+            Some(1.0)
+        );
         assert_eq!(
             compile("if(Speed > 0, Torque / Speed, 0)")
                 .unwrap()
@@ -984,31 +996,56 @@ mod tests {
 
     #[test]
     fn supports_sma_delta_deriv_and_integ() {
-        let a = [(0, 0.0), (1_000_000, 10.0), (2_000_000, 30.0), (3_000_000, 30.0)];
+        let a = [
+            (0, 0.0),
+            (1_000_000, 10.0),
+            (2_000_000, 30.0),
+            (3_000_000, 30.0),
+        ];
 
         let sma = compile("sma(A, 2)").unwrap();
         assert_eq!(
             sma.eval_series(&[&a[..]]),
-            [(0, 0.0), (1_000_000, 5.0), (2_000_000, 20.0), (3_000_000, 30.0)]
+            [
+                (0, 0.0),
+                (1_000_000, 5.0),
+                (2_000_000, 20.0),
+                (3_000_000, 30.0)
+            ]
         );
 
         let delta = compile("delta(A)").unwrap();
         assert_eq!(
             delta.eval_series(&[&a[..]]),
-            [(0, 0.0), (1_000_000, 10.0), (2_000_000, 20.0), (3_000_000, 0.0)]
+            [
+                (0, 0.0),
+                (1_000_000, 10.0),
+                (2_000_000, 20.0),
+                (3_000_000, 0.0)
+            ]
         );
 
         let deriv = compile("deriv(A)").unwrap();
         assert_eq!(
             deriv.eval_series(&[&a[..]]),
-            [(0, 0.0), (1_000_000, 10.0), (2_000_000, 20.0), (3_000_000, 0.0)]
+            [
+                (0, 0.0),
+                (1_000_000, 10.0),
+                (2_000_000, 20.0),
+                (3_000_000, 0.0)
+            ]
         );
 
         let integ = compile("integ(A)").unwrap();
         // 0..1s: avg 5 * 1s = 5; 1..2s: avg 20 * 1s = 25; 2..3s: avg 30 * 1s = 55
         assert_eq!(
             integ.eval_series(&[&a[..]]),
-            [(0, 0.0), (1_000_000, 5.0), (2_000_000, 25.0), (3_000_000, 55.0)]
+            [
+                (0, 0.0),
+                (1_000_000, 5.0),
+                (2_000_000, 25.0),
+                (3_000_000, 55.0)
+            ]
         );
     }
 }
