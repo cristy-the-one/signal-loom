@@ -175,3 +175,52 @@ fn a_zero_divisor_leaves_a_gap_not_a_blank_plot() {
         .collect();
     assert_eq!(points, vec![(0, 2.0), (2000, 5.0)]);
 }
+
+#[test]
+fn extended_math_functions_agree_across_query_and_stats() {
+    let csv = "\
+t_us,signal,value,unit
+0,V,0,m/s
+1000000,V,10,m/s
+2000000,V,30,m/s
+3000000,V,30,m/s
+";
+    let mut session = Session::new();
+    session.open_bytes("accel.csv", csv.as_bytes().to_vec()).unwrap();
+    session
+        .set_math(vec![
+            crate::MathChannel {
+                name: "Accel".into(),
+                unit: "m/s^2".into(),
+                expr: "deriv(V)".into(),
+            },
+            crate::MathChannel {
+                name: "Dist".into(),
+                unit: "m".into(),
+                expr: "integ(V)".into(),
+            },
+            crate::MathChannel {
+                name: "FastFlag".into(),
+                unit: String::new(),
+                expr: "if(V >= 10 && V < 40, 1, 0)".into(),
+            },
+            crate::MathChannel {
+                name: "Smooth".into(),
+                unit: "m/s".into(),
+                expr: "sma(V, 2)".into(),
+            },
+        ])
+        .unwrap();
+
+    let accel_stats = session.stats("Accel", 0, 3_000_000).unwrap();
+    assert_eq!((accel_stats.min, accel_stats.max), (0.0, 20.0));
+
+    let dist_stats = session.stats("Dist", 0, 3_000_000).unwrap();
+    assert!((dist_stats.last - 55.0).abs() < 1e-9, "{}", dist_stats.last);
+
+    let flag_stats = session.stats("FastFlag", 0, 3_000_000).unwrap();
+    assert_eq!((flag_stats.min, flag_stats.max, flag_stats.count), (0.0, 1.0, 4));
+
+    let smooth_stats = session.stats("Smooth", 0, 3_000_000).unwrap();
+    assert_eq!((smooth_stats.first, smooth_stats.last), (0.0, 30.0));
+}

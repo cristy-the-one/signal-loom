@@ -128,6 +128,25 @@ export interface WindowStats {
   last: number;
 }
 
+export type WidgetKind = "arc" | "bar" | "digit" | "value" | "lamp";
+export type LampOp = ">" | ">=" | "<" | "<=" | "==" | "!=";
+export type TraceStyle = "auto" | "step" | "line" | "area" | "state" | "flag" | "heat";
+export type ConcreteTraceStyle = Exclude<TraceStyle, "auto">;
+
+export interface ClusterWidget {
+  id: string;
+  kind: WidgetKind;
+  signal?: string | null;
+  label?: string;
+  color?: string;
+  min?: number;
+  max?: number;
+  decimals?: number;
+  warnFrom?: number;
+  lampOp?: LampOp;
+  lampThreshold?: number;
+}
+
 export interface ProjectFile {
   format: "signal-loom";
   version: 1;
@@ -147,15 +166,22 @@ export interface ProjectFile {
   comparePath?: string | null;
   compareOffsetUs?: number;
   timeoutFactor?: number;
-  /** Cluster slot to the signal shown in it. */
+  /** Legacy cluster slot to the signal shown in it. */
   cluster?: Record<string, string>;
+  /** Custom ordered cluster widgets. */
+  clusterWidgets?: ClusterWidget[];
+  /** Per-signal scope trace visualization style overrides. */
+  signalStyles?: Record<string, TraceStyle>;
 }
 
 /**
  * What the UI owns of a saved project. The engine adds the deck it holds: log, map and compare paths,
  * compare offset, math channels, triggers and the timeout.
  */
-export type ProjectView = Pick<ProjectFile, "view" | "bookmarks" | "notes" | "cursorAUs" | "cursorBUs" | "cluster">;
+export type ProjectView = Pick<
+  ProjectFile,
+  "view" | "bookmarks" | "notes" | "cursorAUs" | "cursorBUs" | "cluster" | "clusterWidgets" | "signalStyles"
+>;
 
 export interface ProjectOpen {
   project: ProjectFile;

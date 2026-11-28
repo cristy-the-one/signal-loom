@@ -1,11 +1,13 @@
-import { drawBus, drawGauges, readingsFrom } from "./gauges";
+import { drawBus, drawWidgets, resolveWidgets } from "./gauges";
 import { els } from "./dom";
 import { severityOf } from "./family";
 import { formatTimeForSpan, readoutFor } from "./format";
-import { buildLaneSpecs } from "./lanes";
+import { buildLaneSpecs, resolveTraceStyle } from "./lanes";
+import { parseMath } from "./math-eval";
 import { activeView, baseName, colorFor, compareName, isCompareName, labelForValue, signalNamed } from "./model";
-import { renderLegend } from "./panels/legend";
+import { clusterInteraction } from "./panels/cluster";
 import { syncEventSelection } from "./panels/events";
+import { renderLegend } from "./panels/legend";
 import { drawPlot, formatHover, heldValue, type PlotLane, type Trace } from "./plot";
 import { mathRange } from "./query";
 import { renderTransport } from "./readout";
@@ -35,6 +37,30 @@ function stageMessage(): string | null {
   return null;
 }
 
+/** Live values for defined math channels at the current playhead (for cluster gadgets & legend). */
+export function liveMathValues(): Map<string, number> {
+  const out = new Map<string, number>();
+  if (state.math.length === 0) return out;
+  const bySeries = new Map(state.series.map((s) => [s.name, s.points]));
+  const heldMap = new Map(state.held.map((h) => [h.name, h.value]));
+  for (const ch of state.math) {
+    const pts = bySeries.get(ch.name);
+    if (pts && pts.length > 0) {
+      const v = heldValue(pts, state.playhead);
+      if (v != null) {
+        out.set(ch.name, v);
+        continue;
+      }
+    }
+    const parsed = parseMath(ch.expr);
+    if (parsed.ok) {
+      const v = parsed.evaluate(heldMap);
+      if (v != null) out.set(ch.name, v);
+    }
+  }
+  return out;
+}
+
 function makeRawTrace(name: string, byName: Map<string, { points: { t: number; v: number }[] }>): Trace {
   const base = baseName(name);
   const series = byName.get(name);
@@ -60,6 +86,8 @@ function makeRawTrace(name: string, byName: Map<string, { points: { t: number; v
     max,
     dashed: isCompareName(name),
     endT: state.seriesRange?.t1,
+    style: resolveTraceStyle(info, state.signalStyles[base]),
+    labels: info?.labels,
   };
 }
 
@@ -68,7 +96,7 @@ function buildLanes(): { traces: Trace[]; lanes: PlotLane[]; hasMixedScale: bool
   const byName = new Map(state.series.map((item) => [item.name, item]));
   const visibleBases =
     state.solo && state.plotted.includes(state.solo) ? [state.solo] : [...state.plotted];
-  const specs = buildLaneSpecs(visibleBases, state.laneMode, state.signalLanes, signalNamed);
+  const specs = buildLaneSpecs(visibleBases, state.laneMode, state.signalLanes, signalNamed, state.signalStyles);
   const allTraces: Trace[] = [];
   let hasMixedScale = false;
 
@@ -93,7 +121,7 @@ function buildLanes(): { traces: Trace[]; lanes: PlotLane[]; hasMixedScale: bool
         t.min = scaleMin;
         t.max = scaleMax;
       }
-    } else if (laneTraces.length > 1) {
+    } else if (!spec.compact && laneTraces.length > 1) {
       hasMixedScale = true;
     }
     allTraces.push(...laneTraces);
@@ -103,6 +131,7 @@ function buildLanes(): { traces: Trace[]; lanes: PlotLane[]; hasMixedScale: bool
       sharedScale: spec.sharedScale,
       scaleMin,
       scaleMax,
+      compact: spec.compact,
     };
   });
 
@@ -144,8 +173,9 @@ export function paint(): void {
   const message = stageMessage();
   els.stageMsg.hidden = message == null;
   els.stageMsg.textContent = message ?? "";
+  const mathVals = liveMathValues();
   // Render the legend first so `#plot` measures its true height when the legend bar toggles visibility.
-  renderLegend();
+  renderLegend(mathVals);
   const { traces, lanes, hasMixedScale } = buildLanes();
   els.scaleNote.hidden = !hasMixedScale;
   const liveView = summary ? activeView(summary) : state.view;
@@ -162,7 +192,10 @@ export function paint(): void {
     },
     lanes,
   );
-  drawGauges(els.gauges, state.summary ? readingsFrom(state.held, state.summary.signals, state.cluster) : null);
+  const resolved = summary
+    ? resolveWidgets(state.clusterWidgets, state.held, summary.signals, mathVals)
+    : null;
+  drawWidgets(els.gauges, resolved, clusterInteraction());
   drawBus(els.bus, state.bus);
   const domain = summary
     ? { t0: summary.tStartUs, t1: summary.tEndUs }

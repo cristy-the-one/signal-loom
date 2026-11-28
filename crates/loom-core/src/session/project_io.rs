@@ -11,7 +11,9 @@ use crate::dto::ProjectOpen;
 use crate::error::{Error, Result};
 use crate::index::{IndexControl, IndexedLog};
 use crate::map::{SignalMap, TimeoutFactor};
-use crate::project::{self, Bookmark, Located, Note, ProjectFile, ViewState, PROJECT_FORMAT};
+use crate::project::{
+    self, Bookmark, ClusterWidget, Located, Note, ProjectFile, ViewState, PROJECT_FORMAT,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +38,12 @@ pub struct ProjectView {
     /// Cluster slot to the signal shown in it.
     #[serde(default)]
     pub cluster: BTreeMap<String, String>,
+    /// Custom ordered cluster widgets.
+    #[serde(default)]
+    pub cluster_widgets: Vec<ClusterWidget>,
+    /// Per-signal plot style overrides.
+    #[serde(default)]
+    pub signal_styles: BTreeMap<String, String>,
 }
 
 enum MapLoad {
@@ -246,6 +254,8 @@ impl Session {
             compare_offset_us: self.compare.offset_us(),
             timeout_factor: Some(self.timeout.get()),
             cluster: view.cluster.clone(),
+            cluster_widgets: view.cluster_widgets.clone(),
+            signal_styles: view.signal_styles.clone(),
         })
     }
 }

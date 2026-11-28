@@ -1,8 +1,48 @@
-import type { SignalInfo } from "./types";
+import type { ConcreteTraceStyle, SignalInfo, TraceStyle } from "./types";
 
 export type LaneMode = "overlay" | "split" | "grouped";
 
 export const LANE_MODES: readonly LaneMode[] = ["overlay", "split", "grouped"];
+
+export const TRACE_STYLES: readonly TraceStyle[] = ["auto", "step", "line", "area", "state", "flag", "heat"];
+
+export const TRACE_STYLE_META: Record<TraceStyle, { label: string; short: string; desc: string }> = {
+  auto: { label: "Auto", short: "Auto", desc: "Detect best view from signal metadata" },
+  step: { label: "Step", short: "Step", desc: "CAN sample-and-hold staircase" },
+  line: { label: "Line", short: "Line", desc: "Linear continuous waveform" },
+  area: { label: "Area", short: "Area", desc: "Filled area waveform" },
+  state: { label: "State bar", short: "State", desc: "Color-coded solid enum / state ribbon" },
+  flag: { label: "Logic flag", short: "Flag", desc: "Active / inactive logic pulse band" },
+  heat: { label: "Heat strip", short: "Heat", desc: "Continuous min-to-max color strip" },
+};
+
+const HOUSEKEEPING_RE = /checksum|counter|crc|alive/i;
+
+/** Pick the concrete visualization style for a signal, honoring any manual override. */
+export function resolveTraceStyle(
+  signal: SignalInfo | undefined,
+  override?: TraceStyle,
+): ConcreteTraceStyle {
+  if (override && override !== "auto") return override;
+  if (signal?.labels && signal.labels.length > 0) return "state";
+  if (signal && !signal.unit.trim() && signal.step === 1 && signal.min != null && signal.max != null) {
+    if (signal.min >= 0 && signal.max <= 1) return "flag";
+    if (
+      signal.min >= 0 &&
+      signal.max - signal.min <= 12 &&
+      Number.isInteger(signal.min) &&
+      Number.isInteger(signal.max) &&
+      !HOUSEKEEPING_RE.test(signal.name)
+    ) {
+      return "state";
+    }
+  }
+  return "step";
+}
+
+export function isRibbonStyle(style: ConcreteTraceStyle): boolean {
+  return style === "state" || style === "flag" || style === "heat";
+}
 
 export interface SignalLaneSpec {
   id: string;
@@ -15,6 +55,8 @@ export interface SignalLaneSpec {
   signals: string[];
   /** True when all traces in this track share one physical `[min, max]` Y scale. */
   sharedScale: boolean;
+  /** True when every signal in this track renders as a compact ribbon (`state`, `flag`, `heat`). */
+  compact?: boolean;
 }
 
 export function nextLaneMode(current: LaneMode): LaneMode {
@@ -28,7 +70,8 @@ export function laneModeLabel(mode: LaneMode): string {
   return "Overlay";
 }
 
-function autoGroupKey(name: string, info: SignalInfo | undefined): string {
+function autoGroupKey(name: string, info: SignalInfo | undefined, ribbon: boolean): string {
+  if (ribbon) return `ribbon:${name}`;
   const unit = info?.unit?.trim() ?? "";
   if (unit) return `unit:${unit.toLowerCase()}`;
   const msg = info?.messageName?.trim() ?? "";
@@ -52,35 +95,60 @@ function canShareScale(signals: string[], lookup: (name: string) => SignalInfo |
 
 /**
  * Partition `visible` base signal names into horizontal scope tracks according to `mode`:
- * - `overlay`: all signals on a single track
+ * - `overlay`: analog signals share one track; ribbon signals (`state`/`flag`/`heat`) each get a compact lane beneath
  * - `split`: one track per signal
- * - `grouped`: manual `customLanes[name]` (`1..N`) overrides, otherwise auto-grouped by unit / message
+ * - `grouped`: manual `customLanes[name]` (`1..N`) overrides, otherwise auto-grouped by unit / message (ribbons get compact lanes)
  */
 export function buildLaneSpecs(
   visible: readonly string[],
   mode: LaneMode,
   customLanes: Readonly<Record<string, number>>,
   lookup: (name: string) => SignalInfo | undefined,
+  signalStyles?: Readonly<Record<string, TraceStyle>>,
 ): SignalLaneSpec[] {
   if (visible.length === 0) return [];
 
+  const styleOf = (name: string) => resolveTraceStyle(lookup(name), signalStyles?.[name]);
+
   if (mode === "overlay") {
-    const { unit } = canShareScale([...visible], lookup);
-    return [
-      {
+    const analog: string[] = [];
+    const ribbons: string[] = [];
+    for (const name of visible) {
+      if (isRibbonStyle(styleOf(name))) ribbons.push(name);
+      else analog.push(name);
+    }
+    const specs: SignalLaneSpec[] = [];
+    if (analog.length > 0) {
+      const { unit } = canShareScale(analog, lookup);
+      specs.push({
         id: "overlay",
         badge: "T1",
-        title: visible.length === 1 ? visible[0] : "Overlay",
+        title: analog.length === 1 ? (unit ? `${analog[0]} (${unit})` : analog[0]) : "Overlay",
         unit,
-        signals: [...visible],
-        sharedScale: visible.length === 1,
-      },
-    ];
+        signals: analog,
+        sharedScale: analog.length === 1,
+        compact: false,
+      });
+    }
+    for (const name of ribbons) {
+      const unit = lookup(name)?.unit?.trim() ?? "";
+      specs.push({
+        id: `ribbon:${name}`,
+        badge: `T${specs.length + 1}`,
+        title: unit ? `${name} (${unit})` : name,
+        unit,
+        signals: [name],
+        sharedScale: true,
+        compact: true,
+      });
+    }
+    return specs;
   }
 
   if (mode === "split") {
     return visible.map((name, idx) => {
       const unit = lookup(name)?.unit?.trim() ?? "";
+      const compact = isRibbonStyle(styleOf(name));
       return {
         id: `split:${name}`,
         badge: `T${idx + 1}`,
@@ -88,6 +156,7 @@ export function buildLaneSpecs(
         unit,
         signals: [name],
         sharedScale: true,
+        compact,
       };
     });
   }
@@ -95,7 +164,8 @@ export function buildLaneSpecs(
   const buckets = new Map<string, string[]>();
   for (const name of visible) {
     const manual = customLanes[name];
-    const key = manual && manual > 0 ? `manual:${manual}` : autoGroupKey(name, lookup(name));
+    const ribbon = isRibbonStyle(styleOf(name));
+    const key = manual && manual > 0 ? `manual:${manual}` : autoGroupKey(name, lookup(name), ribbon);
     const list = buckets.get(key);
     if (list) list.push(name);
     else buckets.set(key, [name]);
@@ -106,6 +176,7 @@ export function buildLaneSpecs(
   for (const [key, signals] of buckets) {
     index += 1;
     const badge = `T${index}`;
+    const compact = signals.every((sig) => isRibbonStyle(styleOf(sig)));
     const { shared, unit } = canShareScale(signals, lookup);
     let title: string;
     if (signals.length === 1) {
@@ -123,7 +194,8 @@ export function buildLaneSpecs(
       title,
       unit,
       signals,
-      sharedScale: shared,
+      sharedScale: compact ? true : shared,
+      compact,
     });
   }
   return specs;
